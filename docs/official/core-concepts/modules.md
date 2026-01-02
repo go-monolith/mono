@@ -200,7 +200,7 @@ import (
     "context"
     "log/slog"
 
-    "github.com/go-monolith/mono/v1"
+    "github.com/go-monolith/mono"
     "my-app/modules/payment"
 )
 

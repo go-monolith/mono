@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/go-monolith/mono/v1"
+	"github.com/go-monolith/mono"
 )
 
 // Mock module implementations for testing interface compliance

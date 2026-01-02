@@ -7,8 +7,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	monoerrors "github.com/go-monolith/mono/v1/pkg/errors"
-	"github.com/go-monolith/mono/v1/pkg/types"
+	monoerrors "github.com/go-monolith/mono/pkg/errors"
+	"github.com/go-monolith/mono/pkg/types"
 )
 
 // RegisterQueueGroupService registers a queue group service with multiple handlers and acknowledgment.

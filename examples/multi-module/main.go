@@ -17,14 +17,14 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/go-monolith/mono/v1"
-	"github.com/go-monolith/mono/v1/middleware/accesslog"
-	"github.com/go-monolith/mono/v1/middleware/requestid"
+	"github.com/go-monolith/mono"
+	"github.com/go-monolith/mono/middleware/accesslog"
+	"github.com/go-monolith/mono/middleware/requestid"
 
-	"github.com/go-monolith/mono/v1/examples/multi-module/inventory"
-	"github.com/go-monolith/mono/v1/examples/multi-module/notification"
-	"github.com/go-monolith/mono/v1/examples/multi-module/order"
-	"github.com/go-monolith/mono/v1/examples/multi-module/payment"
+	"github.com/go-monolith/mono/examples/multi-module/inventory"
+	"github.com/go-monolith/mono/examples/multi-module/notification"
+	"github.com/go-monolith/mono/examples/multi-module/order"
+	"github.com/go-monolith/mono/examples/multi-module/payment"
 )
 
 func main() {

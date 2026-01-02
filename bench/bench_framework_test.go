@@ -28,7 +28,7 @@ import (
 	"testing"
 	"time"
 
-	mono "github.com/go-monolith/mono/v1"
+	mono "github.com/go-monolith/mono"
 )
 
 // BenchmarkFrameworkStartup measures the time to create, register modules, and start the framework.

@@ -24,7 +24,7 @@ The `accesslog` middleware automatically logs every service call with detailed i
 Import the package:
 
 ```go
-import "github.com/go-monolith/mono/v1/middleware/accesslog"
+import "github.com/go-monolith/mono/middleware/accesslog"
 ```
 
 ## Signatures
@@ -61,8 +61,8 @@ package main
 import (
     "os"
     "context"
-    "github.com/go-monolith/mono/v1"
-    "github.com/go-monolith/mono/v1/middleware/accesslog"
+    "github.com/go-monolith/mono"
+    "github.com/go-monolith/mono/middleware/accesslog"
 )
 
 func main() {

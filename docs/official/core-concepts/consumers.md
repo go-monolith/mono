@@ -106,7 +106,7 @@ type TypedEventConsumerHandler[T any] func(ctx context.Context, event T, msg *Ms
 **Emitter Module** (declares events it will emit):
 
 ```go
-import "github.com/go-monolith/mono/v1/pkg/helper"
+import "github.com/go-monolith/mono/pkg/helper"
 
 // Define the event
 var OrderCreatedV1 = helper.EventDefinition[OrderCreatedEvent](
@@ -169,7 +169,7 @@ func (m *NotificationModule) handleOrderCreated(ctx context.Context, msg *mono.M
 For type-safe event consumption with automatic unmarshaling:
 
 ```go
-import "github.com/go-monolith/mono/v1/pkg/helper"
+import "github.com/go-monolith/mono/pkg/helper"
 
 func (m *NotificationModule) RegisterEventConsumers(registry mono.EventRegistry) error {
     // Type-safe registration with automatic unmarshaling
@@ -309,7 +309,7 @@ func (m *AuditModule) handleOrderEvents(ctx context.Context, msgs []*mono.Msg) e
 For type-safe batch event consumption:
 
 ```go
-import "github.com/go-monolith/mono/v1/pkg/helper"
+import "github.com/go-monolith/mono/pkg/helper"
 
 func (m *AuditModule) RegisterEventConsumers(registry mono.EventRegistry) error {
     config := mono.StreamConsumerConfig{
@@ -430,7 +430,7 @@ Two patterns for event discovery:
 
 **Pattern A: Direct Import (Type-Safe)**
 ```go
-import "github.com/go-monolith/mono/v1/pkg/helper"
+import "github.com/go-monolith/mono/pkg/helper"
 import "myapp/modules/order"  // Import emitter module's events
 
 func (m *NotificationModule) RegisterEventConsumers(registry mono.EventRegistry) error {
@@ -489,7 +489,7 @@ func (m *AuditModule) handleOrderEvents(ctx context.Context, msgs []*mono.Msg) e
 ### Step 1: Define Event Definitions
 
 ```go
-import "github.com/go-monolith/mono/v1/pkg/helper"
+import "github.com/go-monolith/mono/pkg/helper"
 
 // Define typed event definition
 var OrderCreatedV1 = helper.EventDefinition[OrderCreatedEvent](

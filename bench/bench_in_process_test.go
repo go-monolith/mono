@@ -19,8 +19,8 @@ import (
 	"testing"
 	"time"
 
-	mono "github.com/go-monolith/mono/v1"
-	"github.com/go-monolith/mono/v1/pkg/types"
+	mono "github.com/go-monolith/mono"
+	"github.com/go-monolith/mono/pkg/types"
 )
 
 // result is a sink variable to prevent compiler optimizations.

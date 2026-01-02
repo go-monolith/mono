@@ -148,7 +148,7 @@ mono-framework/
 
 ### Import Rules
 
-- Use root package `github.com/go-monolith/mono/v1` in `examples/` and `test/integration/`
+- Use root package `github.com/go-monolith/mono` in `examples/` and `test/integration/`
 - Use `pkg/types` in `internal/` packages to avoid circular dependencies
 - Never import root package from `internal/`
 

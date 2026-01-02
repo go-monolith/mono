@@ -554,4 +554,4 @@ Examples:
 - [Foundation Specification](../spec/foundation.md) - Core principles and detailed specifications
 - [README](../../README.md) - Quick start and overview
 - [Examples](../../examples/) - Runnable example applications
-- [API Reference](https://pkg.go.dev/github.com/go-monolith/mono/v1) - Go documentation
+- [API Reference](https://pkg.go.dev/github.com/go-monolith/mono) - Go documentation

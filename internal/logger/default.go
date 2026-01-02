@@ -4,7 +4,7 @@ import (
 	"log/slog"
 	"os"
 
-	"github.com/go-monolith/mono/v1/pkg/types"
+	"github.com/go-monolith/mono/pkg/types"
 )
 
 // NewDefaultLogger creates a default logger using slog.TextHandler.

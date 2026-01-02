@@ -1,4 +1,4 @@
-module github.com/go-monolith/mono/v1
+module github.com/go-monolith/mono
 
 go 1.25
 

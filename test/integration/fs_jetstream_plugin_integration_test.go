@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/go-monolith/mono/v1"
-	fsjetstream "github.com/go-monolith/mono/v1/plugin/fs-jetstream"
+	"github.com/go-monolith/mono"
+	fsjetstream "github.com/go-monolith/mono/plugin/fs-jetstream"
 )
 
 // testConsumerModule implements mono.UsePluginModule to consume file storage plugin

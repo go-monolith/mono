@@ -15,9 +15,9 @@ import (
 	"sync/atomic"
 	"time"
 
-	mono "github.com/go-monolith/mono/v1"
-	"github.com/go-monolith/mono/v1/pkg/helper"
-	"github.com/go-monolith/mono/v1/pkg/types"
+	mono "github.com/go-monolith/mono"
+	"github.com/go-monolith/mono/pkg/helper"
+	"github.com/go-monolith/mono/pkg/types"
 )
 
 // MultiModuleResult is a sink variable to prevent compiler optimizations in multi-module benchmarks.

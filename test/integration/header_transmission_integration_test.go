@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/go-monolith/mono/v1"
+	"github.com/go-monolith/mono"
 )
 
 // TestIntegration_RequestReplyServiceWithHeaders tests request-reply service with header transmission

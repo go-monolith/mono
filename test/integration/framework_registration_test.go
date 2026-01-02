@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/go-monolith/mono/v1"
+	"github.com/go-monolith/mono"
 )
 
 // simpleTestModule is a minimal module for testing registration

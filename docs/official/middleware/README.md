@@ -19,7 +19,7 @@ The framework comes with three built-in middleware modules:
 
 HTTP-style access logging for all service handlers.
 
-- **Package**: `github.com/go-monolith/mono/v1/middleware/accesslog`
+- **Package**: `github.com/go-monolith/mono/middleware/accesslog`
 - **Purpose**: Log request/response details including timing, sizes, and status
 - **Features**:
   - Text and JSON output formats
@@ -43,7 +43,7 @@ Learn more: [Access Log Middleware](accesslog.md)
 
 Tamper-evident audit logging with cryptographic hash chaining.
 
-- **Package**: `github.com/go-monolith/mono/v1/middleware/audit`
+- **Package**: `github.com/go-monolith/mono/middleware/audit`
 - **Purpose**: Log all framework events with cryptographic integrity protection
 - **Features**:
   - Hash chaining for tamper detection
@@ -68,7 +68,7 @@ Learn more: [Audit Middleware](audit.md)
 
 Automatic request ID generation and propagation for distributed tracing.
 
-- **Package**: `github.com/go-monolith/mono/v1/middleware/requestid`
+- **Package**: `github.com/go-monolith/mono/middleware/requestid`
 - **Purpose**: Track requests across module boundaries for debugging and tracing
 - **Features**:
   - Automatic UUID generation

@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/go-monolith/mono/v1/pkg/types"
+	"github.com/go-monolith/mono/pkg/types"
 )
 
 // TestChannelServiceFanOut tests that messages with empty Reply field

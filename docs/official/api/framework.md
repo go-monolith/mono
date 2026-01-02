@@ -617,7 +617,7 @@ package main
 import (
     "context"
     "log"
-    mono "github.com/go-monolith/mono/v1"
+    mono "github.com/go-monolith/mono"
 )
 
 func main() {

@@ -7,7 +7,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/go-monolith/mono/v1/pkg/types"
+	"github.com/go-monolith/mono/pkg/types"
 )
 
 // AuditAdapterPort provides a type-safe interface for saving custom audit entries.

@@ -65,8 +65,8 @@ package customplugin
 
 import (
     "context"
-    mono "github.com/go-monolith/mono/v1"
-    "github.com/go-monolith/mono/v1/pkg/types"
+    mono "github.com/go-monolith/mono"
+    "github.com/go-monolith/mono/pkg/types"
 )
 
 type PluginModule struct {
@@ -176,8 +176,8 @@ import (
     "context"
     "fmt"
 
-    mono "github.com/go-monolith/mono/v1"
-    "github.com/go-monolith/mono/v1/pkg/types"
+    mono "github.com/go-monolith/mono"
+    "github.com/go-monolith/mono/pkg/types"
 )
 
 // Plugin configuration

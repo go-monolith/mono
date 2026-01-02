@@ -40,7 +40,7 @@ type Storage interface {
 ```go
 import (
     "github.com/gofiber/storage/redis/v3"
-    "github.com/go-monolith/mono/v1/pkg/storage"
+    "github.com/go-monolith/mono/pkg/storage"
 )
 
 // Create a Redis storage from gofiber
@@ -122,7 +122,7 @@ type Storage interface {
 Use type assertions to safely check if a storage backend supports specific capabilities:
 
 ```go
-import "github.com/go-monolith/mono/v1/pkg/storage"
+import "github.com/go-monolith/mono/pkg/storage"
 
 func processStorage(s storage.Storage) error {
     // Check if storage supports listing
@@ -244,7 +244,7 @@ Write code that works with any storage backend:
 import (
     "context"
     "fmt"
-    "github.com/go-monolith/mono/v1/pkg/storage"
+    "github.com/go-monolith/mono/pkg/storage"
 )
 
 // StoreWithFallback stores data and optionally tracks revision
@@ -352,7 +352,7 @@ func IncrementCounter(ctx context.Context, s storage.Storage, key string) error 
 The storage package provides sentinel errors for programmatic error handling:
 
 ```go
-import "github.com/go-monolith/mono/v1/pkg/storage"
+import "github.com/go-monolith/mono/pkg/storage"
 
 // Check for specific errors
 if errors.Is(err, storage.ErrKeyNotFound) {

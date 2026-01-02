@@ -17,8 +17,8 @@ The `requestid` middleware provides automatic request ID generation and propagat
 package main
 
 import (
-    "github.com/go-monolith/mono/v1/middleware/requestid"
-    "github.com/go-monolith/mono/v1"
+    "github.com/go-monolith/mono/middleware/requestid"
+    "github.com/go-monolith/mono"
 )
 
 func main() {
@@ -74,7 +74,7 @@ This ensures the same request ID flows through the entire call chain.
 Use the `GetRequestID` function to retrieve the request ID from context:
 
 ```go
-import "github.com/go-monolith/mono/v1/middleware/requestid"
+import "github.com/go-monolith/mono/middleware/requestid"
 
 func myHandler(ctx context.Context, req *types.Msg) ([]byte, error) {
     // Get request ID from context

@@ -8,8 +8,8 @@ import (
 	"sync"
 	"time"
 
-	monoerrors "github.com/go-monolith/mono/v1/pkg/errors"
-	"github.com/go-monolith/mono/v1/pkg/types"
+	monoerrors "github.com/go-monolith/mono/pkg/errors"
+	"github.com/go-monolith/mono/pkg/types"
 )
 
 // serviceContainer implements types.ServiceContainer with thread-safe service storage.

@@ -8,8 +8,8 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/go-monolith/mono/v1"
-	"github.com/go-monolith/mono/v1/middleware/requestid"
+	"github.com/go-monolith/mono"
+	"github.com/go-monolith/mono/middleware/requestid"
 )
 
 // TestMiddlewareChainOrdering verifies that middleware executes in registration order.

@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/go-monolith/mono/v1/pkg/storage"
+	"github.com/go-monolith/mono/pkg/storage"
 )
 
 // =============================================================================

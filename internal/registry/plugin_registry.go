@@ -5,8 +5,8 @@ package registry
 import (
 	"sync"
 
-	monoerrors "github.com/go-monolith/mono/v1/pkg/errors"
-	"github.com/go-monolith/mono/v1/pkg/types"
+	monoerrors "github.com/go-monolith/mono/pkg/errors"
+	"github.com/go-monolith/mono/pkg/types"
 )
 
 // PluginRegistry manages plugin registration and retrieval by alias.

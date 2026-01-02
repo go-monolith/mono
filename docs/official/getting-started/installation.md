@@ -22,7 +22,7 @@ go mod init github.com/yourname/my-mono-app
 Add the Monolith Framework to your project:
 
 ```bash
-go get github.com/go-monolith/mono/v1
+go get github.com/go-monolith/mono
 ```
 
 This command:
@@ -42,7 +42,7 @@ import (
     "context"
     "log"
 
-    "github.com/go-monolith/mono/v1"
+    "github.com/go-monolith/mono"
 )
 
 type HelloModule struct{}
@@ -100,7 +100,7 @@ The framework installation includes:
 Import the framework using:
 
 ```go
-import "github.com/go-monolith/mono/v1"
+import "github.com/go-monolith/mono"
 ```
 
 The import path follows Go's versioning convention. The `/v1` suffix ensures you get version 1.x releases.
@@ -143,7 +143,7 @@ If you see import errors, ensure you're using the correct import path:
 
 ```go
 // Correct
-import "github.com/go-monolith/mono/v1"
+import "github.com/go-monolith/mono"
 
 // Wrong (missing /v1)
 import "github.com/go-monolith/mono"
@@ -160,5 +160,5 @@ Now that you have the framework installed, try:
 ## Getting Help
 
 - Review [examples](../../../examples/basic/README.md) for working code
-- Check the [API reference](https://pkg.go.dev/github.com/go-monolith/mono/v1)
+- Check the [API reference](https://pkg.go.dev/github.com/go-monolith/mono)
 - Visit [GitHub](https://github.com/go-monolith/mono) for issues and discussions

@@ -19,8 +19,8 @@ package main
 import (
     "os"
 
-    "github.com/go-monolith/mono/v1/middleware/accesslog"
-    "github.com/go-monolith/mono/v1"
+    "github.com/go-monolith/mono/middleware/accesslog"
+    "github.com/go-monolith/mono"
 )
 
 func main() {

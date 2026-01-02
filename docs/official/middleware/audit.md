@@ -24,7 +24,7 @@ The `audit` middleware automatically logs all framework events with cryptographi
 Import the package:
 
 ```go
-import "github.com/go-monolith/mono/v1/middleware/audit"
+import "github.com/go-monolith/mono/middleware/audit"
 ```
 
 ## Signatures
@@ -61,8 +61,8 @@ package main
 import (
     "os"
     "context"
-    "github.com/go-monolith/mono/v1"
-    "github.com/go-monolith/mono/v1/middleware/audit"
+    "github.com/go-monolith/mono"
+    "github.com/go-monolith/mono/middleware/audit"
 )
 
 func main() {

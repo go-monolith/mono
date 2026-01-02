@@ -178,7 +178,7 @@ Ready to dive deeper?
 
 ## Resources
 
-- **API Reference**: https://pkg.go.dev/github.com/go-monolith/mono/v1
+- **API Reference**: https://pkg.go.dev/github.com/go-monolith/mono
 - **Examples**: ../../../examples/ directory
 - **GitHub**: https://github.com/go-monolith/mono
 

@@ -67,7 +67,7 @@ Then explore [Core Concepts](../core-concepts/README.md) to understand:
 ## Need Help?
 
 - Check the [examples](../../../examples/) directory for working code
-- Review the [API documentation](https://pkg.go.dev/github.com/go-monolith/mono/v1)
+- Review the [API documentation](https://pkg.go.dev/github.com/go-monolith/mono)
 - Visit the [GitHub repository](https://github.com/go-monolith/mono) for issues and discussions
 
 ---

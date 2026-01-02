@@ -5,7 +5,7 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/go-monolith/mono/v1/pkg/types"
+	"github.com/go-monolith/mono/pkg/types"
 )
 
 func TestNew(t *testing.T) {

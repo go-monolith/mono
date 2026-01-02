@@ -9,10 +9,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/go-monolith/mono/v1"
-	"github.com/go-monolith/mono/v1/examples/event-emitter/tracking"
-	"github.com/go-monolith/mono/v1/pkg/helper"
-	fsjetstream "github.com/go-monolith/mono/v1/plugin/fs-jetstream"
+	"github.com/go-monolith/mono"
+	"github.com/go-monolith/mono/examples/event-emitter/tracking"
+	"github.com/go-monolith/mono/pkg/helper"
+	fsjetstream "github.com/go-monolith/mono/plugin/fs-jetstream"
 )
 
 // NAME is the unique identifier for the notification module.

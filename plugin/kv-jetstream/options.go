@@ -3,7 +3,7 @@ package kvjetstream
 import (
 	"log/slog"
 
-	"github.com/go-monolith/mono/v1/pkg/storage"
+	"github.com/go-monolith/mono/pkg/storage"
 )
 
 // Option is a functional option for configuring the Module.

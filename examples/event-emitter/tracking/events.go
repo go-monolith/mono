@@ -1,7 +1,7 @@
 package tracking
 
 import (
-	"github.com/go-monolith/mono/v1/pkg/helper"
+	"github.com/go-monolith/mono/pkg/helper"
 )
 
 // OrderCreatedV1 is the event definition for when an order is created.

@@ -4,8 +4,8 @@ import (
 	"context"
 	"fmt"
 
-	monoerrors "github.com/go-monolith/mono/v1/pkg/errors"
-	"github.com/go-monolith/mono/v1/pkg/types"
+	monoerrors "github.com/go-monolith/mono/pkg/errors"
+	"github.com/go-monolith/mono/pkg/types"
 )
 
 // RegisterChannelService registers a bidirectional Go channel service.

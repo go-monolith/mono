@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/go-monolith/mono/v1"
-	monoerrors "github.com/go-monolith/mono/v1/pkg/errors"
+	"github.com/go-monolith/mono"
+	monoerrors "github.com/go-monolith/mono/pkg/errors"
 )
 
 // mockLogger is a shared mock logger for testing

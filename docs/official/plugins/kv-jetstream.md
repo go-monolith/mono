@@ -120,7 +120,7 @@ data, err := bucket.GetWithContext(ctx, "key")
 Import the plugin:
 
 ```go
-import kvjetstream "github.com/go-monolith/mono/v1/plugin/kv-jetstream"
+import kvjetstream "github.com/go-monolith/mono/plugin/kv-jetstream"
 ```
 
 ## Signatures
@@ -154,8 +154,8 @@ import (
     "context"
     "time"
 
-    mono "github.com/go-monolith/mono/v1"
-    kvjetstream "github.com/go-monolith/mono/v1/plugin/kv-jetstream"
+    mono "github.com/go-monolith/mono"
+    kvjetstream "github.com/go-monolith/mono/plugin/kv-jetstream"
 )
 
 func main() {

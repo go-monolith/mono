@@ -9,7 +9,7 @@
 //
 // Import the framework:
 //
-//	import "github.com/go-monolith/mono/v1"
+//	import "github.com/go-monolith/mono"
 //
 // Create a simple module and run the framework:
 //

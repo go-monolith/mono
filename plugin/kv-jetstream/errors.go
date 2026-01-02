@@ -3,7 +3,7 @@ package kvjetstream
 import (
 	"fmt"
 
-	"github.com/go-monolith/mono/v1/pkg/storage"
+	"github.com/go-monolith/mono/pkg/storage"
 )
 
 // Sentinel errors for KV operations.

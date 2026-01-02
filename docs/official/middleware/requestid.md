@@ -31,7 +31,7 @@ This enables tracing requests through your entire application for debugging and 
 Import the package:
 
 ```go
-import "github.com/go-monolith/mono/v1/middleware/requestid"
+import "github.com/go-monolith/mono/middleware/requestid"
 ```
 
 ## Signatures
@@ -67,8 +67,8 @@ package main
 
 import (
     "context"
-    "github.com/go-monolith/mono/v1"
-    "github.com/go-monolith/mono/v1/middleware/requestid"
+    "github.com/go-monolith/mono"
+    "github.com/go-monolith/mono/middleware/requestid"
 )
 
 func main() {
@@ -156,7 +156,7 @@ func (m *OrderModule) handleCreateOrder(ctx context.Context, req *CreateOrderReq
 ### Helper Function
 
 ```go
-import "github.com/go-monolith/mono/v1/middleware/requestid"
+import "github.com/go-monolith/mono/middleware/requestid"
 
 func (m *OrderModule) handleOrder(ctx context.Context, order *Order) error {
     requestID := requestid.FromContext(ctx)

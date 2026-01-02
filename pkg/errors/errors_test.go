@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	pkgerrors "github.com/go-monolith/mono/v1/pkg/errors"
-	"github.com/go-monolith/mono/v1/pkg/types"
+	pkgerrors "github.com/go-monolith/mono/pkg/errors"
+	"github.com/go-monolith/mono/pkg/types"
 )
 
 // mockModule implements types.Module for testing

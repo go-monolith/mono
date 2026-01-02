@@ -33,7 +33,7 @@ package kvjetstream
 import (
 	"time"
 
-	"github.com/go-monolith/mono/v1/pkg/storage"
+	"github.com/go-monolith/mono/pkg/storage"
 )
 
 // ModuleName is the name of the kv-jetstream plugin module.
