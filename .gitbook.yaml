@@ -1,0 +1,37 @@
+# GitBook Configuration for Monolith Framework
+# Documentation: https://docs.gitbook.com/integrations/git-sync/content-configuration
+
+# Root directory containing the documentation
+root: ./docs/official/
+
+# Structure configuration
+structure:
+  readme: README.md
+  summary: SUMMARY.md
+
+# URL redirects for cleaner navigation and backwards compatibility
+redirects:
+  # Getting Started section
+  getting-started: getting-started/README.md
+  installation: getting-started/installation.md
+  quickstart: getting-started/quickstart.md
+
+  # Core Concepts section
+  core-concepts: core-concepts/README.md
+  modules: core-concepts/modules.md
+  architecture: core-concepts/architecture.md
+  communication: core-concepts/communication.md
+
+  # Guide section
+  guide: guide/README.md
+  configuration: guide/configuration.md
+  error-handling: guide/error-handling.md
+  testing: guide/testing.md
+  logging: guide/logging.md
+
+  # API Reference section
+  api: api/README.md
+  middleware: api/middleware/README.md
+
+  # Extra resources
+  faq: extra/faq.md

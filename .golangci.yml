@@ -1,0 +1,84 @@
+# golangci-lint configuration for mono-framework
+# See https://golangci-lint.run/usage/configuration/
+
+version: "2"
+
+run:
+  timeout: 5m
+  tests: true
+  modules-download-mode: readonly
+
+linters:
+  enable:
+    - errcheck      # Check for unchecked errors
+    - gosec         # Security-focused linter
+    - govet         # Standard Go vet checks
+    - staticcheck   # Advanced static analysis
+    - misspell      # Check for misspelled words
+    - ineffassign   # Detect ineffectual assignments
+    - unused        # Find unused code
+
+  settings:
+    errcheck:
+      check-type-assertions: true
+      check-blank: true
+
+    govet:
+      enable-all: true
+      disable:
+        - shadow  # Can be too noisy
+        - fieldalignment  # Handled by other linters
+
+    gosec:
+      excludes:
+        - G104  # Allow unhandled errors in some cases (covered by errcheck)
+
+    revive:
+      rules:
+        - name: exported
+          disabled: false
+        - name: package-comments
+          disabled: false
+        - name: indent-error-flow
+          disabled: false
+
+    staticcheck:
+      checks: ["all"]
+
+    gocritic:
+      enabled-tags:
+        - diagnostic
+        - style
+        - performance
+      disabled-checks:
+        - whyNoLint  # Allow comments without explanation
+
+  exclusions:
+    # Excluding configuration per-path, per-linter, per-text and per-source
+    rules:
+      # Exclude some linters from running on test files
+      - path: _test\.go
+        linters:
+          - errcheck
+          - gosec
+          - unused
+
+    # Exclude generated files
+    paths:
+      - ".*\\.pb\\.go$"
+
+issues:
+  # Maximum count of issues with the same text (0 = unlimited)
+  max-same-issues: 0
+
+  # Show all issues
+  max-issues-per-linter: 0
+
+output:
+  formats:
+    text:
+      print-issued-lines: true
+      print-linter-name: true
+  sort-order:
+    - linter
+    - file

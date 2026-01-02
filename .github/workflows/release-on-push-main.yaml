@@ -1,0 +1,250 @@
+name: release-on-push-main
+
+# Automatic patch release workflow for pushes to main branch.
+# Strategy: Bumps patch version only (vX.Y.Z -> vX.Y.Z+1).
+# For major/minor version bumps, manually create and push the tag.
+# Tests run as a safety check before tagging.
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    # Skip if commit is from github-actions bot (prevents infinite loop)
+    if: github.actor != 'github-actions[bot]'
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: 'true'
+          fetch-depth: 0  # Fetch all history and tags
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+
+      - name: Run preparation steps
+        run: ./configure.sh
+
+      - name: Cache Go modules
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/go-build
+            ~/go/pkg/mod
+          key: ${{ runner.os }}-go-stable-${{ hashFiles('**/go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-go-stable-
+
+      - name: Download dependencies
+        run: go mod download
+
+      - name: Run Go build
+        run: make build
+      
+      - name: Run unit tests
+        run: make test
+
+      - name: Run integration tests
+        run: make test-integration
+
+      - name: Run benchmarks
+        run: make bench-all-save-json
+
+      - name: Parse benchmark results
+        id: bench
+        run: |
+          # Extract key metrics from benchmark JSON using jq
+          JSON_FILE="mono_benchmark_result.json"
+
+          if [ ! -f "$JSON_FILE" ]; then
+            echo "Benchmark results file not found"
+            echo "summary=Benchmark results not available" >> "$GITHUB_OUTPUT"
+            # Create empty benchmark notes
+            echo "## Benchmark Results" > bench_release_notes.md
+            echo "" >> bench_release_notes.md
+            echo "Benchmark results not available." >> bench_release_notes.md
+            exit 0
+          fi
+
+          # Extract summary metrics
+          TOTAL_BENCHMARKS=$(jq '.results | length' "$JSON_FILE")
+          FRAMEWORK_BENCHMARKS=$(jq '.framework_results | length // 0' "$JSON_FILE")
+          TIMESTAMP=$(jq -r '.timestamp' "$JSON_FILE")
+
+          # Handle empty results
+          if [ "$TOTAL_BENCHMARKS" -eq 0 ]; then
+            echo "No benchmark results found"
+            echo "## Benchmark Results" > bench_release_notes.md
+            echo "" >> bench_release_notes.md
+            echo "No benchmark results available." >> bench_release_notes.md
+            echo "notes_file=bench_release_notes.md" >> "$GITHUB_OUTPUT"
+            echo "total=0" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Count service benchmarks (non-framework)
+          SERVICE_BENCHMARKS=$(jq '[.results[] | select(.name | startswith("BenchmarkFramework") | not)] | length' "$JSON_FILE")
+
+          # Build markdown for release notes
+          {
+            echo "## Benchmark Results"
+            echo ""
+            echo "**Run at:** $TIMESTAMP"
+            echo "**Total benchmarks:** $TOTAL_BENCHMARKS"
+            echo ""
+
+            # === Framework Benchmarks Section ===
+            if [ "$FRAMEWORK_BENCHMARKS" -gt 0 ]; then
+              # Count passed/failed
+              PASSED=$(jq '[.framework_results[] | select(.duration_passed == true or .memory_passed == true or .throughput_passed == true)] | length' "$JSON_FILE")
+              FAILED=$(jq '[.framework_results[] | select(.duration_passed == false or .memory_passed == false or .throughput_passed == false)] | length' "$JSON_FILE")
+
+              echo "### Framework Performance Targets"
+              echo ""
+              if [ "$FAILED" -eq 0 ]; then
+                echo "✅ **All $PASSED framework benchmarks passed their targets**"
+              else
+                echo "⚠️ **$PASSED passed, $FAILED failed**"
+              fi
+              echo ""
+              echo "<details>"
+              echo "<summary>Click to expand framework benchmark details</summary>"
+              echo ""
+
+              # Startup benchmarks table
+              STARTUP_COUNT=$(jq '[.framework_results[] | select(.duration)] | length' "$JSON_FILE")
+              if [ "$STARTUP_COUNT" -gt 0 ]; then
+                echo "#### Startup Time"
+                echo ""
+                echo "| Benchmark | Duration | Target | Status |"
+                echo "|-----------|----------|--------|--------|"
+                jq -r '.framework_results[] | select(.duration) | "| \(.name | split("-") | first) | \(.duration) | \(.target_duration) | \(if .duration_passed then "✅ PASS" else "❌ FAIL" end) |"' "$JSON_FILE"
+                echo ""
+              fi
+
+              # Memory benchmarks table
+              MEMORY_COUNT=$(jq '[.framework_results[] | select(.memory)] | length' "$JSON_FILE")
+              if [ "$MEMORY_COUNT" -gt 0 ]; then
+                echo "#### Memory Footprint"
+                echo ""
+                echo "| Benchmark | Memory | Target | Status |"
+                echo "|-----------|--------|--------|--------|"
+                jq -r '.framework_results[] | select(.memory) | "| \(.name | split("-") | first) | \(.memory) | \(.target_memory) | \(if .memory_passed then "✅ PASS" else "❌ FAIL" end) |"' "$JSON_FILE"
+                echo ""
+              fi
+
+              # Throughput benchmarks table
+              THROUGHPUT_COUNT=$(jq '[.framework_results[] | select(.throughput)] | length' "$JSON_FILE")
+              if [ "$THROUGHPUT_COUNT" -gt 0 ]; then
+                echo "#### Message Throughput"
+                echo ""
+                echo "| Benchmark | Throughput | Target | Status |"
+                echo "|-----------|------------|--------|--------|"
+                jq -r '.framework_results[] | select(.throughput) | "| \(.name | split("-") | first) | \(.throughput) | \(.target_throughput) | \(if .throughput_passed then "✅ PASS" else "❌ FAIL" end) |"' "$JSON_FILE"
+                echo ""
+              fi
+
+              echo "</details>"
+              echo ""
+            fi
+
+            # === Service Benchmarks Section ===
+            if [ "$SERVICE_BENCHMARKS" -gt 0 ]; then
+              echo "### Service Benchmarks"
+              echo ""
+              echo "<details>"
+              echo "<summary>Click to expand service benchmark details ($SERVICE_BENCHMARKS benchmarks)</summary>"
+              echo ""
+              echo "| Benchmark | ns/op | MB/s | B/op | allocs/op |"
+              echo "|-----------|-------|------|------|-----------|"
+              # Get non-framework results sorted by mode then name
+              jq -r '[.results[] | select(.name | startswith("BenchmarkFramework") | not)] | sort_by(.mode, .name) | .[] | "| \(.name | split("-") | first) | \(.ns_per_op | tostring | .[0:10]) | \(.mb_per_sec // "N/A" | if type == "number" then (. * 100 | floor / 100 | tostring) else . end) | \(.bytes_per_op // "N/A") | \(.allocs_per_op // "N/A") |"' "$JSON_FILE"
+              echo ""
+              echo "</details>"
+            fi
+
+            echo ""
+            echo "---"
+          } > bench_release_notes.md
+
+          # Store for multiline output
+          echo "notes_file=bench_release_notes.md" >> "$GITHUB_OUTPUT"
+          echo "total=$TOTAL_BENCHMARKS" >> "$GITHUB_OUTPUT"
+          echo "framework_total=$FRAMEWORK_BENCHMARKS" >> "$GITHUB_OUTPUT"
+
+      - name: Calculate next version
+        id: version
+        run: |
+          # Get latest semver tag (vX.Y.Z format only), default to v0.0.0 if none exists
+          LATEST_TAG=$(git tag -l 'v[0-9]*.[0-9]*.[0-9]*' --sort=-v:refname | head -n1)
+          if [ -z "$LATEST_TAG" ]; then
+            LATEST_TAG="v0.0.0"
+          fi
+          echo "Latest tag: $LATEST_TAG"
+
+          # Extract major.minor.patch and validate format
+          VERSION=${LATEST_TAG#v}
+          if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Error: Latest tag is not valid semver: $LATEST_TAG"
+            exit 1
+          fi
+
+          MAJOR=$(echo "$VERSION" | cut -d. -f1)
+          MINOR=$(echo "$VERSION" | cut -d. -f2)
+          PATCH=$(echo "$VERSION" | cut -d. -f3)
+
+          # Bump patch version
+          NEW_PATCH=$((PATCH + 1))
+          NEW_TAG="v${MAJOR}.${MINOR}.${NEW_PATCH}"
+
+          echo "New tag: $NEW_TAG"
+          echo "new_tag=$NEW_TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Create and push tag
+        id: create_tag
+        run: |
+          NEW_TAG="${{ steps.version.outputs.new_tag }}"
+
+          # Check if tag already exists
+          if git rev-parse "$NEW_TAG" >/dev/null 2>&1; then
+            echo "Tag $NEW_TAG already exists, skipping creation"
+            echo "created=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -a "$NEW_TAG" -m "Release $NEW_TAG"
+          git push origin "$NEW_TAG"
+          echo "created=true" >> "$GITHUB_OUTPUT"
+
+      - name: Create GitHub Release
+        if: steps.create_tag.outputs.created == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          NEW_TAG="${{ steps.version.outputs.new_tag }}"
+
+          # Generate changelog notes from GitHub
+          gh api repos/${{ github.repository }}/releases/generate-notes \
+            -f tag_name="$NEW_TAG" \
+            --jq '.body' > changelog_notes.md 2>/dev/null || echo "## What's Changed" > changelog_notes.md
+
+          # Combine changelog with benchmark results
+          {
+            cat changelog_notes.md
+            echo ""
+            cat bench_release_notes.md
+          } > release_body.md
+
+          # Create release with combined notes and attach benchmark JSON
+          gh release create "$NEW_TAG" \
+            --title "Release $NEW_TAG" \
+            --notes-file release_body.md \
+            mono_benchmark_result.json
