@@ -1,7 +1,9 @@
-package types
+package types_test
 
 import (
 	"testing"
+
+	"github.com/go-monolith/mono/v1/pkg/types"
 )
 
 // =============================================================================
@@ -11,49 +13,49 @@ import (
 func TestFormatServiceType(t *testing.T) {
 	tests := []struct {
 		name        string
-		serviceType ServiceType
+		serviceType types.ServiceType
 		expected    string
 	}{
 		{
 			name:        "ServiceTypeChannel returns channel",
-			serviceType: ServiceTypeChannel,
+			serviceType: types.ServiceTypeChannel,
 			expected:    "channel",
 		},
 		{
 			name:        "ServiceTypeRequestReply returns request_reply",
-			serviceType: ServiceTypeRequestReply,
+			serviceType: types.ServiceTypeRequestReply,
 			expected:    "request_reply",
 		},
 		{
 			name:        "ServiceTypeQueueGroup returns queue_group",
-			serviceType: ServiceTypeQueueGroup,
+			serviceType: types.ServiceTypeQueueGroup,
 			expected:    "queue_group",
 		},
 		{
 			name:        "ServiceTypeStreamConsumer returns stream_consumer",
-			serviceType: ServiceTypeStreamConsumer,
+			serviceType: types.ServiceTypeStreamConsumer,
 			expected:    "stream_consumer",
 		},
 		{
 			name:        "unknown service type returns unknown with value",
-			serviceType: ServiceType(99),
+			serviceType: types.ServiceType(99),
 			expected:    "unknown(99)",
 		},
 		{
 			name:        "negative service type returns unknown with value",
-			serviceType: ServiceType(-1),
+			serviceType: types.ServiceType(-1),
 			expected:    "unknown(-1)",
 		},
 		{
 			name:        "large service type returns unknown with value",
-			serviceType: ServiceType(1000),
+			serviceType: types.ServiceType(1000),
 			expected:    "unknown(1000)",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := FormatServiceType(tt.serviceType)
+			result := types.FormatServiceType(tt.serviceType)
 			if result != tt.expected {
 				t.Errorf("FormatServiceType(%d) = %q, want %q", tt.serviceType, result, tt.expected)
 			}
@@ -63,15 +65,15 @@ func TestFormatServiceType(t *testing.T) {
 
 func TestFormatServiceType_AllDefinedTypes(t *testing.T) {
 	// Verify all defined service types have proper mappings
-	definedTypes := map[ServiceType]string{
-		ServiceTypeChannel:        "channel",
-		ServiceTypeRequestReply:   "request_reply",
-		ServiceTypeQueueGroup:     "queue_group",
-		ServiceTypeStreamConsumer: "stream_consumer",
+	definedTypes := map[types.ServiceType]string{
+		types.ServiceTypeChannel:        "channel",
+		types.ServiceTypeRequestReply:   "request_reply",
+		types.ServiceTypeQueueGroup:     "queue_group",
+		types.ServiceTypeStreamConsumer: "stream_consumer",
 	}
 
 	for serviceType, expectedName := range definedTypes {
-		result := FormatServiceType(serviceType)
+		result := types.FormatServiceType(serviceType)
 		if result != expectedName {
 			t.Errorf("FormatServiceType(%d) = %q, want %q", serviceType, result, expectedName)
 		}

@@ -1,4 +1,4 @@
-package errors
+package errors_test
 
 import (
 	"context"
@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	pkgerrors "github.com/go-monolith/mono/v1/pkg/errors"
 	"github.com/go-monolith/mono/v1/pkg/types"
 )
 
@@ -32,7 +33,7 @@ func TestModuleError(t *testing.T) {
 	baseErr := errors.New("base error")
 
 	t.Run("Error method with operation", func(t *testing.T) {
-		err := &ModuleError{
+		err := &pkgerrors.ModuleError{
 			ModuleName: "test-module",
 			Operation:  "start",
 			Err:        baseErr,
@@ -46,7 +47,7 @@ func TestModuleError(t *testing.T) {
 	})
 
 	t.Run("Error method without error", func(t *testing.T) {
-		err := &ModuleError{
+		err := &pkgerrors.ModuleError{
 			ModuleName: "test-module",
 			Operation:  "start",
 		}
@@ -59,7 +60,7 @@ func TestModuleError(t *testing.T) {
 	})
 
 	t.Run("Unwrap method", func(t *testing.T) {
-		err := &ModuleError{
+		err := &pkgerrors.ModuleError{
 			ModuleName: "test-module",
 			Operation:  "start",
 			Err:        baseErr,
@@ -77,7 +78,7 @@ func TestServiceError(t *testing.T) {
 	baseErr := errors.New("base error")
 
 	t.Run("Error method", func(t *testing.T) {
-		err := &ServiceError{
+		err := &pkgerrors.ServiceError{
 			ServiceName: "test-service",
 			ModuleName:  "test-module",
 			ServiceType: types.ServiceTypeRequestReply,
@@ -92,7 +93,7 @@ func TestServiceError(t *testing.T) {
 	})
 
 	t.Run("Error method without error", func(t *testing.T) {
-		err := &ServiceError{
+		err := &pkgerrors.ServiceError{
 			ServiceName: "test-service",
 			ModuleName:  "test-module",
 			ServiceType: types.ServiceTypeChannel,
@@ -106,7 +107,7 @@ func TestServiceError(t *testing.T) {
 	})
 
 	t.Run("Unwrap method", func(t *testing.T) {
-		err := &ServiceError{
+		err := &pkgerrors.ServiceError{
 			ServiceName: "test-service",
 			Err:         baseErr,
 		}
@@ -123,7 +124,7 @@ func TestDependencyError(t *testing.T) {
 	baseErr := errors.New("base error")
 
 	t.Run("Error method with chain", func(t *testing.T) {
-		err := &DependencyError{
+		err := &pkgerrors.DependencyError{
 			Module:     "module-a",
 			Dependency: "module-b",
 			Chain:      []string{"module-a", "module-b", "module-c"},
@@ -138,7 +139,7 @@ func TestDependencyError(t *testing.T) {
 	})
 
 	t.Run("Error method without chain", func(t *testing.T) {
-		err := &DependencyError{
+		err := &pkgerrors.DependencyError{
 			Module:     "module-a",
 			Dependency: "module-b",
 			Err:        baseErr,
@@ -152,7 +153,7 @@ func TestDependencyError(t *testing.T) {
 	})
 
 	t.Run("Unwrap method", func(t *testing.T) {
-		err := &DependencyError{
+		err := &pkgerrors.DependencyError{
 			Err: baseErr,
 		}
 
@@ -168,7 +169,7 @@ func TestConfigurationError(t *testing.T) {
 	baseErr := errors.New("base error")
 
 	t.Run("Error method with value", func(t *testing.T) {
-		err := &ConfigurationError{
+		err := &pkgerrors.ConfigurationError{
 			OptionIndex: 1,
 			OptionName:  "max-connections",
 			Value:       "invalid",
@@ -183,7 +184,7 @@ func TestConfigurationError(t *testing.T) {
 	})
 
 	t.Run("Error method without value", func(t *testing.T) {
-		err := &ConfigurationError{
+		err := &pkgerrors.ConfigurationError{
 			OptionIndex: 2,
 			OptionName:  "timeout",
 			Err:         baseErr,
@@ -197,7 +198,7 @@ func TestConfigurationError(t *testing.T) {
 	})
 
 	t.Run("Unwrap method", func(t *testing.T) {
-		err := &ConfigurationError{
+		err := &pkgerrors.ConfigurationError{
 			Err: baseErr,
 		}
 
@@ -213,7 +214,7 @@ func TestTimeoutError(t *testing.T) {
 	baseErr := errors.New("base error")
 
 	t.Run("Error method", func(t *testing.T) {
-		err := &TimeoutError{
+		err := &pkgerrors.TimeoutError{
 			Operation: "startup",
 			Duration:  5 * time.Second,
 			Err:       baseErr,
@@ -227,7 +228,7 @@ func TestTimeoutError(t *testing.T) {
 	})
 
 	t.Run("Error method without error", func(t *testing.T) {
-		err := &TimeoutError{
+		err := &pkgerrors.TimeoutError{
 			Operation: "shutdown",
 			Duration:  10 * time.Second,
 		}
@@ -240,7 +241,7 @@ func TestTimeoutError(t *testing.T) {
 	})
 
 	t.Run("Unwrap method", func(t *testing.T) {
-		err := &TimeoutError{
+		err := &pkgerrors.TimeoutError{
 			Err: baseErr,
 		}
 
@@ -251,7 +252,7 @@ func TestTimeoutError(t *testing.T) {
 	})
 
 	t.Run("Timeout method", func(t *testing.T) {
-		err := &TimeoutError{
+		err := &pkgerrors.TimeoutError{
 			Operation: "test",
 		}
 
@@ -266,7 +267,7 @@ func TestEventStreamError(t *testing.T) {
 	baseErr := errors.New("base error")
 
 	t.Run("Error method with stream and subject", func(t *testing.T) {
-		err := &EventStreamError{
+		err := &pkgerrors.EventStreamError{
 			StreamName: "EVENTS",
 			Subject:    "events.test.v1.created",
 			Operation:  "publish",
@@ -281,7 +282,7 @@ func TestEventStreamError(t *testing.T) {
 	})
 
 	t.Run("Error method with subject only", func(t *testing.T) {
-		err := &EventStreamError{
+		err := &pkgerrors.EventStreamError{
 			Subject:   "events.test.v1.created",
 			Operation: "publish",
 			Err:       baseErr,
@@ -295,7 +296,7 @@ func TestEventStreamError(t *testing.T) {
 	})
 
 	t.Run("Unwrap method", func(t *testing.T) {
-		err := &EventStreamError{
+		err := &pkgerrors.EventStreamError{
 			Err: baseErr,
 		}
 
@@ -310,12 +311,12 @@ func TestEventStreamError(t *testing.T) {
 func TestWrapModuleFunctions(t *testing.T) {
 	t.Run("WrapInvalidModule with module", func(t *testing.T) {
 		module := &mockModule{name: "test-module"}
-		err := WrapInvalidModule(module, "missing Name method")
+		err := pkgerrors.WrapInvalidModule(module, "missing Name method")
 		if err == nil {
 			t.Fatal("expected error, got nil")
 		}
 
-		var moduleErr *ModuleError
+		var moduleErr *pkgerrors.ModuleError
 		if !errors.As(err, &moduleErr) {
 			t.Errorf("expected ModuleError, got %T", err)
 		}
@@ -325,12 +326,12 @@ func TestWrapModuleFunctions(t *testing.T) {
 	})
 
 	t.Run("WrapInvalidModule with nil", func(t *testing.T) {
-		err := WrapInvalidModule(nil, "module is nil")
+		err := pkgerrors.WrapInvalidModule(nil, "module is nil")
 		if err == nil {
 			t.Fatal("expected error, got nil")
 		}
 
-		var moduleErr *ModuleError
+		var moduleErr *pkgerrors.ModuleError
 		if !errors.As(err, &moduleErr) {
 			t.Errorf("expected ModuleError, got %T", err)
 		}
@@ -340,63 +341,63 @@ func TestWrapModuleFunctions(t *testing.T) {
 	})
 
 	t.Run("WrapModuleNotFound", func(t *testing.T) {
-		err := WrapModuleNotFound("missing-module")
+		err := pkgerrors.WrapModuleNotFound("missing-module")
 		if err == nil {
 			t.Fatal("expected error, got nil")
 		}
 
-		var moduleErr *ModuleError
+		var moduleErr *pkgerrors.ModuleError
 		if !errors.As(err, &moduleErr) {
 			t.Errorf("expected ModuleError, got %T", err)
 		}
-		if !errors.Is(err, ErrModuleNotFound) {
+		if !errors.Is(err, pkgerrors.ErrModuleNotFound) {
 			t.Error("expected error to wrap ErrModuleNotFound")
 		}
 	})
 
 	t.Run("WrapModuleAlreadyRegistered", func(t *testing.T) {
-		err := WrapModuleAlreadyRegistered("duplicate-module")
+		err := pkgerrors.WrapModuleAlreadyRegistered("duplicate-module")
 		if err == nil {
 			t.Fatal("expected error, got nil")
 		}
 
-		if !errors.Is(err, ErrModuleAlreadyRegistered) {
+		if !errors.Is(err, pkgerrors.ErrModuleAlreadyRegistered) {
 			t.Error("expected error to wrap ErrModuleAlreadyRegistered")
 		}
 	})
 
 	t.Run("WrapModuleStartFailed", func(t *testing.T) {
 		baseErr := errors.New("connection failed")
-		err := WrapModuleStartFailed("failed-module", baseErr)
+		err := pkgerrors.WrapModuleStartFailed("failed-module", baseErr)
 		if err == nil {
 			t.Fatal("expected error, got nil")
 		}
 
-		if !errors.Is(err, ErrModuleStartFailed) {
+		if !errors.Is(err, pkgerrors.ErrModuleStartFailed) {
 			t.Error("expected error to wrap ErrModuleStartFailed")
 		}
 	})
 
 	t.Run("WrapModuleStopFailed", func(t *testing.T) {
 		baseErr := errors.New("cleanup failed")
-		err := WrapModuleStopFailed("failed-module", baseErr)
+		err := pkgerrors.WrapModuleStopFailed("failed-module", baseErr)
 		if err == nil {
 			t.Fatal("expected error, got nil")
 		}
 
-		if !errors.Is(err, ErrModuleStopFailed) {
+		if !errors.Is(err, pkgerrors.ErrModuleStopFailed) {
 			t.Error("expected error to wrap ErrModuleStopFailed")
 		}
 	})
 
 	t.Run("WrapModulePanic", func(t *testing.T) {
 		panicValue := "panic value"
-		err := WrapModulePanic("panic-module", "start", panicValue)
+		err := pkgerrors.WrapModulePanic("panic-module", "start", panicValue)
 		if err == nil {
 			t.Fatal("expected error, got nil")
 		}
 
-		if !errors.Is(err, ErrModulePanic) {
+		if !errors.Is(err, pkgerrors.ErrModulePanic) {
 			t.Error("expected error to wrap ErrModulePanic")
 		}
 	})
@@ -405,47 +406,47 @@ func TestWrapModuleFunctions(t *testing.T) {
 // TestWrapPluginFunctions tests plugin error wrapper functions
 func TestWrapPluginFunctions(t *testing.T) {
 	t.Run("WrapPluginNotFound", func(t *testing.T) {
-		err := WrapPluginNotFound("missing-plugin")
+		err := pkgerrors.WrapPluginNotFound("missing-plugin")
 		if err == nil {
 			t.Fatal("expected error, got nil")
 		}
 
-		if !errors.Is(err, ErrPluginNotFound) {
+		if !errors.Is(err, pkgerrors.ErrPluginNotFound) {
 			t.Error("expected error to wrap ErrPluginNotFound")
 		}
 	})
 
 	t.Run("WrapPluginAlreadyRegistered", func(t *testing.T) {
-		err := WrapPluginAlreadyRegistered("duplicate-plugin")
+		err := pkgerrors.WrapPluginAlreadyRegistered("duplicate-plugin")
 		if err == nil {
 			t.Fatal("expected error, got nil")
 		}
 
-		if !errors.Is(err, ErrPluginAlreadyRegistered) {
+		if !errors.Is(err, pkgerrors.ErrPluginAlreadyRegistered) {
 			t.Error("expected error to wrap ErrPluginAlreadyRegistered")
 		}
 	})
 
 	t.Run("WrapPluginStartFailed", func(t *testing.T) {
 		baseErr := errors.New("init failed")
-		err := WrapPluginStartFailed("failed-plugin", baseErr)
+		err := pkgerrors.WrapPluginStartFailed("failed-plugin", baseErr)
 		if err == nil {
 			t.Fatal("expected error, got nil")
 		}
 
-		if !errors.Is(err, ErrModuleStartFailed) {
+		if !errors.Is(err, pkgerrors.ErrModuleStartFailed) {
 			t.Error("expected error to wrap ErrModuleStartFailed")
 		}
 	})
 
 	t.Run("WrapPluginStopFailed", func(t *testing.T) {
 		baseErr := errors.New("cleanup failed")
-		err := WrapPluginStopFailed("failed-plugin", baseErr)
+		err := pkgerrors.WrapPluginStopFailed("failed-plugin", baseErr)
 		if err == nil {
 			t.Fatal("expected error, got nil")
 		}
 
-		if !errors.Is(err, ErrModuleStopFailed) {
+		if !errors.Is(err, pkgerrors.ErrModuleStopFailed) {
 			t.Error("expected error to wrap ErrModuleStopFailed")
 		}
 	})
@@ -456,12 +457,12 @@ func TestWrapServiceFunctions(t *testing.T) {
 	baseErr := errors.New("base error")
 
 	t.Run("WrapServiceError", func(t *testing.T) {
-		err := WrapServiceError("test-service", "test-module", types.ServiceTypeRequestReply, baseErr)
+		err := pkgerrors.WrapServiceError("test-service", "test-module", types.ServiceTypeRequestReply, baseErr)
 		if err == nil {
 			t.Fatal("expected error, got nil")
 		}
 
-		var serviceErr *ServiceError
+		var serviceErr *pkgerrors.ServiceError
 		if !errors.As(err, &serviceErr) {
 			t.Errorf("expected ServiceError, got %T", err)
 		}
@@ -471,34 +472,34 @@ func TestWrapServiceFunctions(t *testing.T) {
 	})
 
 	t.Run("WrapServiceNotFound", func(t *testing.T) {
-		err := WrapServiceNotFound("missing-service", "test-module")
+		err := pkgerrors.WrapServiceNotFound("missing-service", "test-module")
 		if err == nil {
 			t.Fatal("expected error, got nil")
 		}
 
-		if !errors.Is(err, ErrServiceNotFound) {
+		if !errors.Is(err, pkgerrors.ErrServiceNotFound) {
 			t.Error("expected error to wrap ErrServiceNotFound")
 		}
 	})
 
 	t.Run("WrapServiceAlreadyRegistered", func(t *testing.T) {
-		err := WrapServiceAlreadyRegistered("duplicate-service", "test-module", types.ServiceTypeQueueGroup)
+		err := pkgerrors.WrapServiceAlreadyRegistered("duplicate-service", "test-module", types.ServiceTypeQueueGroup)
 		if err == nil {
 			t.Fatal("expected error, got nil")
 		}
 
-		if !errors.Is(err, ErrServiceAlreadyRegistered) {
+		if !errors.Is(err, pkgerrors.ErrServiceAlreadyRegistered) {
 			t.Error("expected error to wrap ErrServiceAlreadyRegistered")
 		}
 	})
 
 	t.Run("WrapServiceUnavailable", func(t *testing.T) {
-		err := WrapServiceUnavailable("unavailable-service", "test-module", types.ServiceTypeRequestReply, baseErr)
+		err := pkgerrors.WrapServiceUnavailable("unavailable-service", "test-module", types.ServiceTypeRequestReply, baseErr)
 		if err == nil {
 			t.Fatal("expected error, got nil")
 		}
 
-		if !errors.Is(err, ErrServiceUnavailable) {
+		if !errors.Is(err, pkgerrors.ErrServiceUnavailable) {
 			t.Error("expected error to wrap ErrServiceUnavailable")
 		}
 	})
@@ -507,16 +508,16 @@ func TestWrapServiceFunctions(t *testing.T) {
 // TestWrapDependencyFunctions tests dependency error wrapper functions
 func TestWrapDependencyFunctions(t *testing.T) {
 	t.Run("WrapMissingDependency", func(t *testing.T) {
-		err := WrapMissingDependency("module-a", "module-b")
+		err := pkgerrors.WrapMissingDependency("module-a", "module-b")
 		if err == nil {
 			t.Fatal("expected error, got nil")
 		}
 
-		if !errors.Is(err, ErrMissingDependency) {
+		if !errors.Is(err, pkgerrors.ErrMissingDependency) {
 			t.Error("expected error to wrap ErrMissingDependency")
 		}
 
-		var depErr *DependencyError
+		var depErr *pkgerrors.DependencyError
 		if errors.As(err, &depErr) {
 			if depErr.Module != "module-a" {
 				t.Errorf("expected module 'module-a', got %q", depErr.Module)
@@ -529,16 +530,16 @@ func TestWrapDependencyFunctions(t *testing.T) {
 
 	t.Run("WrapCircularDependency", func(t *testing.T) {
 		chain := []string{"module-a", "module-b", "module-a"}
-		err := WrapCircularDependency(chain)
+		err := pkgerrors.WrapCircularDependency(chain)
 		if err == nil {
 			t.Fatal("expected error, got nil")
 		}
 
-		if !errors.Is(err, ErrCircularDependency) {
+		if !errors.Is(err, pkgerrors.ErrCircularDependency) {
 			t.Error("expected error to wrap ErrCircularDependency")
 		}
 
-		var depErr *DependencyError
+		var depErr *pkgerrors.DependencyError
 		if errors.As(err, &depErr) {
 			if len(depErr.Chain) != 3 {
 				t.Errorf("expected chain length 3, got %d", len(depErr.Chain))
@@ -550,16 +551,16 @@ func TestWrapDependencyFunctions(t *testing.T) {
 // TestWrapConfigurationFunctions tests configuration error wrapper functions
 func TestWrapConfigurationFunctions(t *testing.T) {
 	t.Run("WrapInvalidConfiguration", func(t *testing.T) {
-		err := WrapInvalidConfiguration(1, "port", "invalid", "must be between 1024 and 65535")
+		err := pkgerrors.WrapInvalidConfiguration(1, "port", "invalid", "must be between 1024 and 65535")
 		if err == nil {
 			t.Fatal("expected error, got nil")
 		}
 
-		if !errors.Is(err, ErrInvalidConfiguration) {
+		if !errors.Is(err, pkgerrors.ErrInvalidConfiguration) {
 			t.Error("expected error to wrap ErrInvalidConfiguration")
 		}
 
-		var configErr *ConfigurationError
+		var configErr *pkgerrors.ConfigurationError
 		if errors.As(err, &configErr) {
 			if configErr.OptionName != "port" {
 				t.Errorf("expected option name 'port', got %q", configErr.OptionName)
@@ -579,12 +580,12 @@ func TestWrapTimeoutFunctions(t *testing.T) {
 	baseErr := errors.New("base error")
 
 	t.Run("WrapTimeout", func(t *testing.T) {
-		err := WrapTimeout("module-startup", 10*time.Second, baseErr)
+		err := pkgerrors.WrapTimeout("module-startup", 10*time.Second, baseErr)
 		if err == nil {
 			t.Fatal("expected error, got nil")
 		}
 
-		var timeoutErr *TimeoutError
+		var timeoutErr *pkgerrors.TimeoutError
 		if errors.As(err, &timeoutErr) {
 			if timeoutErr.Operation != "module-startup" {
 				t.Errorf("expected operation 'module-startup', got %q", timeoutErr.Operation)
@@ -604,12 +605,12 @@ func TestWrapEventStreamFunctions(t *testing.T) {
 	baseErr := errors.New("base error")
 
 	t.Run("WrapEventStreamError", func(t *testing.T) {
-		err := WrapEventStreamError("EVENTS", "events.test.v1.created", "publish", baseErr)
+		err := pkgerrors.WrapEventStreamError("EVENTS", "events.test.v1.created", "publish", baseErr)
 		if err == nil {
 			t.Fatal("expected error, got nil")
 		}
 
-		var streamErr *EventStreamError
+		var streamErr *pkgerrors.EventStreamError
 		if !errors.As(err, &streamErr) {
 			t.Errorf("expected EventStreamError, got %T", err)
 		}
@@ -622,12 +623,12 @@ func TestWrapEventStreamFunctions(t *testing.T) {
 	})
 
 	t.Run("WrapEventStreamNotAvailable", func(t *testing.T) {
-		err := WrapEventStreamNotAvailable("events.test.v1.created", "publish", baseErr)
+		err := pkgerrors.WrapEventStreamNotAvailable("events.test.v1.created", "publish", baseErr)
 		if err == nil {
 			t.Fatal("expected error, got nil")
 		}
 
-		var streamErr *EventStreamError
+		var streamErr *pkgerrors.EventStreamError
 		if !errors.As(err, &streamErr) {
 			t.Errorf("expected EventStreamError, got %T", err)
 		}
@@ -637,73 +638,73 @@ func TestWrapEventStreamFunctions(t *testing.T) {
 // TestErrorCheckingUtilities tests Is* functions
 func TestErrorCheckingUtilities(t *testing.T) {
 	t.Run("IsModuleError", func(t *testing.T) {
-		err := &ModuleError{ModuleName: "test"}
-		if !IsModuleError(err) {
+		err := &pkgerrors.ModuleError{ModuleName: "test"}
+		if !pkgerrors.IsModuleError(err) {
 			t.Error("IsModuleError should return true for ModuleError")
 		}
 
 		regularErr := errors.New("not a module error")
-		if IsModuleError(regularErr) {
+		if pkgerrors.IsModuleError(regularErr) {
 			t.Error("IsModuleError should return false for regular error")
 		}
 	})
 
 	t.Run("IsServiceError", func(t *testing.T) {
-		err := &ServiceError{ServiceName: "test"}
-		if !IsServiceError(err) {
+		err := &pkgerrors.ServiceError{ServiceName: "test"}
+		if !pkgerrors.IsServiceError(err) {
 			t.Error("IsServiceError should return true for ServiceError")
 		}
 
 		regularErr := errors.New("not a service error")
-		if IsServiceError(regularErr) {
+		if pkgerrors.IsServiceError(regularErr) {
 			t.Error("IsServiceError should return false for regular error")
 		}
 	})
 
 	t.Run("IsDependencyError", func(t *testing.T) {
-		err := &DependencyError{Module: "test"}
-		if !IsDependencyError(err) {
+		err := &pkgerrors.DependencyError{Module: "test"}
+		if !pkgerrors.IsDependencyError(err) {
 			t.Error("IsDependencyError should return true for DependencyError")
 		}
 
 		regularErr := errors.New("not a dependency error")
-		if IsDependencyError(regularErr) {
+		if pkgerrors.IsDependencyError(regularErr) {
 			t.Error("IsDependencyError should return false for regular error")
 		}
 	})
 
 	t.Run("IsConfigurationError", func(t *testing.T) {
-		err := &ConfigurationError{OptionName: "test"}
-		if !IsConfigurationError(err) {
+		err := &pkgerrors.ConfigurationError{OptionName: "test"}
+		if !pkgerrors.IsConfigurationError(err) {
 			t.Error("IsConfigurationError should return true for ConfigurationError")
 		}
 
 		regularErr := errors.New("not a config error")
-		if IsConfigurationError(regularErr) {
+		if pkgerrors.IsConfigurationError(regularErr) {
 			t.Error("IsConfigurationError should return false for regular error")
 		}
 	})
 
 	t.Run("IsTimeoutError", func(t *testing.T) {
-		err := &TimeoutError{Operation: "test"}
-		if !IsTimeoutError(err) {
+		err := &pkgerrors.TimeoutError{Operation: "test"}
+		if !pkgerrors.IsTimeoutError(err) {
 			t.Error("IsTimeoutError should return true for TimeoutError")
 		}
 
 		regularErr := errors.New("not a timeout error")
-		if IsTimeoutError(regularErr) {
+		if pkgerrors.IsTimeoutError(regularErr) {
 			t.Error("IsTimeoutError should return false for regular error")
 		}
 	})
 
 	t.Run("IsEventStreamError", func(t *testing.T) {
-		err := &EventStreamError{Subject: "test"}
-		if !IsEventStreamError(err) {
+		err := &pkgerrors.EventStreamError{Subject: "test"}
+		if !pkgerrors.IsEventStreamError(err) {
 			t.Error("IsEventStreamError should return true for EventStreamError")
 		}
 
 		regularErr := errors.New("not a stream error")
-		if IsEventStreamError(regularErr) {
+		if pkgerrors.IsEventStreamError(regularErr) {
 			t.Error("IsEventStreamError should return false for regular error")
 		}
 	})
@@ -712,13 +713,13 @@ func TestErrorCheckingUtilities(t *testing.T) {
 // TestGetErrorFunctions tests Get* accessor functions
 func TestGetErrorFunctions(t *testing.T) {
 	t.Run("GetServiceError", func(t *testing.T) {
-		serviceErr := &ServiceError{
+		serviceErr := &pkgerrors.ServiceError{
 			ServiceName: "test-service",
 			ModuleName:  "test-module",
 		}
 		wrappedErr := fmt.Errorf("wrapped: %w", serviceErr)
 
-		extracted, ok := GetServiceError(wrappedErr)
+		extracted, ok := pkgerrors.GetServiceError(wrappedErr)
 		if !ok {
 			t.Fatal("GetServiceError should extract ServiceError")
 		}
@@ -726,20 +727,20 @@ func TestGetErrorFunctions(t *testing.T) {
 			t.Errorf("expected service name 'test-service', got %q", extracted.ServiceName)
 		}
 
-		_, ok = GetServiceError(errors.New("not a service error"))
+		_, ok = pkgerrors.GetServiceError(errors.New("not a service error"))
 		if ok {
 			t.Error("GetServiceError should return false for non-ServiceError")
 		}
 	})
 
 	t.Run("GetConfigurationError", func(t *testing.T) {
-		configErr := &ConfigurationError{
+		configErr := &pkgerrors.ConfigurationError{
 			OptionName: "test-option",
 			Value:      "test-value",
 		}
 		wrappedErr := fmt.Errorf("wrapped: %w", configErr)
 
-		extracted, ok := GetConfigurationError(wrappedErr)
+		extracted, ok := pkgerrors.GetConfigurationError(wrappedErr)
 		if !ok {
 			t.Fatal("GetConfigurationError should extract ConfigurationError")
 		}
@@ -747,20 +748,20 @@ func TestGetErrorFunctions(t *testing.T) {
 			t.Errorf("expected option name 'test-option', got %q", extracted.OptionName)
 		}
 
-		_, ok = GetConfigurationError(errors.New("not a config error"))
+		_, ok = pkgerrors.GetConfigurationError(errors.New("not a config error"))
 		if ok {
 			t.Error("GetConfigurationError should return false for non-ConfigurationError")
 		}
 	})
 
 	t.Run("GetEventStreamError", func(t *testing.T) {
-		streamErr := &EventStreamError{
+		streamErr := &pkgerrors.EventStreamError{
 			Subject:   "test-subject",
 			Operation: "test-op",
 		}
 		wrappedErr := fmt.Errorf("wrapped: %w", streamErr)
 
-		extracted, ok := GetEventStreamError(wrappedErr)
+		extracted, ok := pkgerrors.GetEventStreamError(wrappedErr)
 		if !ok {
 			t.Fatal("GetEventStreamError should extract EventStreamError")
 		}
@@ -768,7 +769,7 @@ func TestGetErrorFunctions(t *testing.T) {
 			t.Errorf("expected subject 'test-subject', got %q", extracted.Subject)
 		}
 
-		_, ok = GetEventStreamError(errors.New("not a stream error"))
+		_, ok = pkgerrors.GetEventStreamError(errors.New("not a stream error"))
 		if ok {
 			t.Error("GetEventStreamError should return false for non-EventStreamError")
 		}
@@ -778,7 +779,7 @@ func TestGetErrorFunctions(t *testing.T) {
 // TestAggregateErrors tests error aggregation
 func TestAggregateErrors(t *testing.T) {
 	t.Run("empty slice", func(t *testing.T) {
-		err := AggregateErrors([]error{})
+		err := pkgerrors.AggregateErrors([]error{})
 		if err != nil {
 			t.Errorf("expected nil for empty slice, got %v", err)
 		}
@@ -786,7 +787,7 @@ func TestAggregateErrors(t *testing.T) {
 
 	t.Run("single error", func(t *testing.T) {
 		singleErr := errors.New("single error")
-		err := AggregateErrors([]error{singleErr})
+		err := pkgerrors.AggregateErrors([]error{singleErr})
 		if err != singleErr {
 			t.Errorf("expected original error, got %v", err)
 		}
@@ -798,7 +799,7 @@ func TestAggregateErrors(t *testing.T) {
 			errors.New("error 2"),
 			errors.New("error 3"),
 		}
-		err := AggregateErrors(errs)
+		err := pkgerrors.AggregateErrors(errs)
 		if err == nil {
 			t.Fatal("expected aggregated error, got nil")
 		}
@@ -819,7 +820,7 @@ func TestAggregateErrors(t *testing.T) {
 			nil,
 			errors.New("error 2"),
 		}
-		err := AggregateErrors(errs)
+		err := pkgerrors.AggregateErrors(errs)
 		if err == nil {
 			t.Fatal("expected aggregated error, got nil")
 		}
@@ -835,21 +836,21 @@ func TestAggregateErrors(t *testing.T) {
 // TestFormatDependencyChain tests dependency chain formatting
 func TestFormatDependencyChain(t *testing.T) {
 	t.Run("empty chain", func(t *testing.T) {
-		result := FormatDependencyChain([]string{})
+		result := pkgerrors.FormatDependencyChain([]string{})
 		if result != "" {
 			t.Errorf("expected empty string, got %q", result)
 		}
 	})
 
 	t.Run("single module", func(t *testing.T) {
-		result := FormatDependencyChain([]string{"module-a"})
+		result := pkgerrors.FormatDependencyChain([]string{"module-a"})
 		if result != "module-a" {
 			t.Errorf("expected 'module-a', got %q", result)
 		}
 	})
 
 	t.Run("multiple modules", func(t *testing.T) {
-		result := FormatDependencyChain([]string{"module-a", "module-b", "module-c"})
+		result := pkgerrors.FormatDependencyChain([]string{"module-a", "module-b", "module-c"})
 		if result != "module-a -> module-b -> module-c" {
 			t.Errorf("expected 'module-a -> module-b -> module-c', got %q", result)
 		}
@@ -872,7 +873,7 @@ func TestFormatFrameworkState(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.expected, func(t *testing.T) {
-			result := FormatFrameworkState(tt.state)
+			result := pkgerrors.FormatFrameworkState(tt.state)
 			if result != tt.expected {
 				t.Errorf("expected %q, got %q", tt.expected, result)
 			}
@@ -898,7 +899,7 @@ func findSubstring(s, substr string) bool {
 // TestDependencyErrorAdditionalCases tests additional DependencyError cases for better coverage
 func TestDependencyErrorAdditionalCases(t *testing.T) {
 	t.Run("Error method with chain but no error", func(t *testing.T) {
-		err := &DependencyError{
+		err := &pkgerrors.DependencyError{
 			Module:     "module-a",
 			Dependency: "module-b",
 			Chain:      []string{"module-a", "module-b", "module-c"},
@@ -913,7 +914,7 @@ func TestDependencyErrorAdditionalCases(t *testing.T) {
 	})
 
 	t.Run("Error method with no chain and no error", func(t *testing.T) {
-		err := &DependencyError{
+		err := &pkgerrors.DependencyError{
 			Module:     "module-a",
 			Dependency: "module-b",
 			Err:        nil,
@@ -930,7 +931,7 @@ func TestDependencyErrorAdditionalCases(t *testing.T) {
 // TestEventStreamErrorAdditionalCases tests additional EventStreamError cases for better coverage
 func TestEventStreamErrorAdditionalCases(t *testing.T) {
 	t.Run("Error method with stream and subject but no error", func(t *testing.T) {
-		err := &EventStreamError{
+		err := &pkgerrors.EventStreamError{
 			StreamName: "EVENTS",
 			Subject:    "events.test.v1.created",
 			Operation:  "publish",
@@ -945,7 +946,7 @@ func TestEventStreamErrorAdditionalCases(t *testing.T) {
 	})
 
 	t.Run("Error method with subject only but no error", func(t *testing.T) {
-		err := &EventStreamError{
+		err := &pkgerrors.EventStreamError{
 			Subject:   "events.test.v1.created",
 			Operation: "publish",
 			Err:       nil,
@@ -960,7 +961,7 @@ func TestEventStreamErrorAdditionalCases(t *testing.T) {
 
 	t.Run("Error method with no stream or subject but with error", func(t *testing.T) {
 		baseErr := errors.New("base error")
-		err := &EventStreamError{
+		err := &pkgerrors.EventStreamError{
 			Operation: "publish",
 			Err:       baseErr,
 		}
@@ -973,7 +974,7 @@ func TestEventStreamErrorAdditionalCases(t *testing.T) {
 	})
 
 	t.Run("Error method with no stream, subject, or error", func(t *testing.T) {
-		err := &EventStreamError{
+		err := &pkgerrors.EventStreamError{
 			Operation: "publish",
 			Err:       nil,
 		}
@@ -990,16 +991,16 @@ func TestEventStreamErrorAdditionalCases(t *testing.T) {
 func TestWrapCircularDependencyEdgeCases(t *testing.T) {
 	t.Run("WrapCircularDependency with empty chain", func(t *testing.T) {
 		chain := []string{}
-		err := WrapCircularDependency(chain)
+		err := pkgerrors.WrapCircularDependency(chain)
 		if err == nil {
 			t.Fatal("expected error, got nil")
 		}
 
-		if !errors.Is(err, ErrCircularDependency) {
+		if !errors.Is(err, pkgerrors.ErrCircularDependency) {
 			t.Error("expected error to wrap ErrCircularDependency")
 		}
 
-		var depErr *DependencyError
+		var depErr *pkgerrors.DependencyError
 		if errors.As(err, &depErr) {
 			if len(depErr.Chain) != 0 {
 				t.Errorf("expected empty chain, got length %d", len(depErr.Chain))
@@ -1015,16 +1016,16 @@ func TestWrapCircularDependencyEdgeCases(t *testing.T) {
 
 	t.Run("WrapCircularDependency with single element chain", func(t *testing.T) {
 		chain := []string{"module-a"}
-		err := WrapCircularDependency(chain)
+		err := pkgerrors.WrapCircularDependency(chain)
 		if err == nil {
 			t.Fatal("expected error, got nil")
 		}
 
-		if !errors.Is(err, ErrCircularDependency) {
+		if !errors.Is(err, pkgerrors.ErrCircularDependency) {
 			t.Error("expected error to wrap ErrCircularDependency")
 		}
 
-		var depErr *DependencyError
+		var depErr *pkgerrors.DependencyError
 		if errors.As(err, &depErr) {
 			// When chain length < 2, the function returns empty chain
 			if len(depErr.Chain) != 0 {

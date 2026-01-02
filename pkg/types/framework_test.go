@@ -1,7 +1,9 @@
-package types
+package types_test
 
 import (
 	"testing"
+
+	"github.com/go-monolith/mono/v1/pkg/types"
 )
 
 // =============================================================================
@@ -11,47 +13,47 @@ import (
 func TestMonoFrameworkState_String(t *testing.T) {
 	tests := []struct {
 		name     string
-		state    MonoFrameworkState
+		state    types.MonoFrameworkState
 		expected string
 	}{
 		{
 			name:     "StateCreated returns Created",
-			state:    StateCreated,
+			state:    types.StateCreated,
 			expected: "Created",
 		},
 		{
 			name:     "StateStarting returns Starting",
-			state:    StateStarting,
+			state:    types.StateStarting,
 			expected: "Starting",
 		},
 		{
 			name:     "StateRunning returns Running",
-			state:    StateRunning,
+			state:    types.StateRunning,
 			expected: "Running",
 		},
 		{
 			name:     "StateStopping returns Stopping",
-			state:    StateStopping,
+			state:    types.StateStopping,
 			expected: "Stopping",
 		},
 		{
 			name:     "StateStopped returns Stopped",
-			state:    StateStopped,
+			state:    types.StateStopped,
 			expected: "Stopped",
 		},
 		{
 			name:     "unknown state returns Unknown with value",
-			state:    MonoFrameworkState(99),
+			state:    types.MonoFrameworkState(99),
 			expected: "Unknown(99)",
 		},
 		{
 			name:     "negative state returns Unknown with value",
-			state:    MonoFrameworkState(-1),
+			state:    types.MonoFrameworkState(-1),
 			expected: "Unknown(-1)",
 		},
 		{
 			name:     "large state returns Unknown with value",
-			state:    MonoFrameworkState(1000),
+			state:    types.MonoFrameworkState(1000),
 			expected: "Unknown(1000)",
 		},
 	}
@@ -68,12 +70,12 @@ func TestMonoFrameworkState_String(t *testing.T) {
 
 func TestMonoFrameworkState_AllDefinedStates(t *testing.T) {
 	// Verify all defined states have proper string representations
-	definedStates := map[MonoFrameworkState]string{
-		StateCreated:  "Created",
-		StateStarting: "Starting",
-		StateRunning:  "Running",
-		StateStopping: "Stopping",
-		StateStopped:  "Stopped",
+	definedStates := map[types.MonoFrameworkState]string{
+		types.StateCreated:  "Created",
+		types.StateStarting: "Starting",
+		types.StateRunning:  "Running",
+		types.StateStopping: "Stopping",
+		types.StateStopped:  "Stopped",
 	}
 
 	for state, expectedName := range definedStates {
@@ -86,19 +88,19 @@ func TestMonoFrameworkState_AllDefinedStates(t *testing.T) {
 
 func TestMonoFrameworkState_IotaOrder(t *testing.T) {
 	// Verify the iota ordering is as expected
-	if StateCreated != 0 {
-		t.Errorf("StateCreated = %d, want 0", StateCreated)
+	if types.StateCreated != 0 {
+		t.Errorf("StateCreated = %d, want 0", types.StateCreated)
 	}
-	if StateStarting != 1 {
-		t.Errorf("StateStarting = %d, want 1", StateStarting)
+	if types.StateStarting != 1 {
+		t.Errorf("StateStarting = %d, want 1", types.StateStarting)
 	}
-	if StateRunning != 2 {
-		t.Errorf("StateRunning = %d, want 2", StateRunning)
+	if types.StateRunning != 2 {
+		t.Errorf("StateRunning = %d, want 2", types.StateRunning)
 	}
-	if StateStopping != 3 {
-		t.Errorf("StateStopping = %d, want 3", StateStopping)
+	if types.StateStopping != 3 {
+		t.Errorf("StateStopping = %d, want 3", types.StateStopping)
 	}
-	if StateStopped != 4 {
-		t.Errorf("StateStopped = %d, want 4", StateStopped)
+	if types.StateStopped != 4 {
+		t.Errorf("StateStopped = %d, want 4", types.StateStopped)
 	}
 }

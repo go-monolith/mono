@@ -1,9 +1,11 @@
-package types
+package types_test
 
 import (
 	"errors"
 	"testing"
 	"time"
+
+	"github.com/go-monolith/mono/v1/pkg/types"
 )
 
 // =============================================================================
@@ -109,7 +111,7 @@ func TestMsg_Ack(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			msg := &Msg{
+			msg := &types.Msg{
 				Subject: "test.subject",
 				Data:    []byte("test data"),
 				NatsMsg: tt.natsMsg,
@@ -174,7 +176,7 @@ func TestMsg_Nak(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			msg := &Msg{
+			msg := &types.Msg{
 				Subject: "test.subject",
 				Data:    []byte("test data"),
 				NatsMsg: tt.natsMsg,
@@ -244,7 +246,7 @@ func TestMsg_NakWithDelay(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			msg := &Msg{
+			msg := &types.Msg{
 				Subject: "test.subject",
 				Data:    []byte("test data"),
 				NatsMsg: tt.natsMsg,
@@ -312,7 +314,7 @@ func TestMsg_Term(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			msg := &Msg{
+			msg := &types.Msg{
 				Subject: "test.subject",
 				Data:    []byte("test data"),
 				NatsMsg: tt.natsMsg,
@@ -377,7 +379,7 @@ func TestMsg_InProgress(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			msg := &Msg{
+			msg := &types.Msg{
 				Subject: "test.subject",
 				Data:    []byte("test data"),
 				NatsMsg: tt.natsMsg,

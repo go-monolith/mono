@@ -1,4 +1,4 @@
-package types
+package types_test
 
 import (
 	"context"
@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-monolith/mono/v1/pkg/types"
 	"github.com/nats-io/nats.go/jetstream"
 )
 
@@ -13,7 +14,7 @@ import (
 // Mock Types
 // =============================================================================
 
-// mockMsgPubAck implements MsgPubAck for testing
+// mockMsgPubAck implements types.MsgPubAck for testing
 type mockMsgPubAck struct {
 	stream    string
 	sequence  uint64
@@ -26,27 +27,27 @@ func (m *mockMsgPubAck) Sequence() uint64 { return m.sequence }
 func (m *mockMsgPubAck) Duplicate() bool  { return m.duplicate }
 func (m *mockMsgPubAck) Domain() string   { return m.domain }
 
-// mockEventStream implements EventStream for testing
+// mockEventStream implements types.EventStream for testing
 type mockEventStream struct {
-	publishMsgFunc func(ctx context.Context, msg *Msg) (MsgPubAck, error)
+	publishMsgFunc func(ctx context.Context, msg *types.Msg) (types.MsgPubAck, error)
 }
 
-func (m *mockEventStream) Publish(_ context.Context, _ string, _ []byte) (MsgPubAck, error) {
+func (m *mockEventStream) Publish(_ context.Context, _ string, _ []byte) (types.MsgPubAck, error) {
 	return nil, errors.New("not implemented")
 }
 
-func (m *mockEventStream) PublishMsg(ctx context.Context, msg *Msg) (MsgPubAck, error) {
+func (m *mockEventStream) PublishMsg(ctx context.Context, msg *types.Msg) (types.MsgPubAck, error) {
 	if m.publishMsgFunc != nil {
 		return m.publishMsgFunc(ctx, msg)
 	}
 	return &mockMsgPubAck{stream: "test-stream", sequence: 1}, nil
 }
 
-func (m *mockEventStream) CreateOrUpdateStream(_ context.Context, _ StreamConfig) (jetstream.Stream, error) {
+func (m *mockEventStream) CreateOrUpdateStream(_ context.Context, _ types.StreamConfig) (jetstream.Stream, error) {
 	return nil, nil
 }
 
-func (m *mockEventStream) CreateOrUpdateConsumer(_ context.Context, _ string, _ ConsumerConfig) (jetstream.Consumer, error) {
+func (m *mockEventStream) CreateOrUpdateConsumer(_ context.Context, _ string, _ types.ConsumerConfig) (jetstream.Consumer, error) {
 	return nil, nil
 }
 
@@ -58,54 +59,56 @@ func (m *mockEventStream) DeleteStream(_ context.Context, _ string) error {
 	return nil
 }
 
-// mockSubscription implements Subscription for testing
+// mockSubscription implements types.Subscription for testing
 type mockSubscription struct{}
 
-func (m *mockSubscription) Unsubscribe() error                    { return nil }
-func (m *mockSubscription) Drain() error                          { return nil }
-func (m *mockSubscription) IsValid() bool                         { return true }
-func (m *mockSubscription) Subject() string                       { return "" }
-func (m *mockSubscription) Queue() string                         { return "" }
-func (m *mockSubscription) NextMsg(_ time.Duration) (*Msg, error) { return nil, nil }
-func (m *mockSubscription) NextMsgWithContext(_ context.Context) (*Msg, error) {
+func (m *mockSubscription) Unsubscribe() error                          { return nil }
+func (m *mockSubscription) Drain() error                                { return nil }
+func (m *mockSubscription) IsValid() bool                               { return true }
+func (m *mockSubscription) Subject() string                             { return "" }
+func (m *mockSubscription) Queue() string                               { return "" }
+func (m *mockSubscription) NextMsg(_ time.Duration) (*types.Msg, error) { return nil, nil }
+func (m *mockSubscription) NextMsgWithContext(_ context.Context) (*types.Msg, error) {
 	return nil, nil
 }
 
-// mockEventBus implements EventBus for testing
+// mockEventBus implements types.EventBus for testing
 type mockEventBus struct {
 	eventStream    *mockEventStream
 	eventStreamErr error
-	publishedMsgs  []*Msg
+	publishedMsgs  []*types.Msg
 }
 
 func (m *mockEventBus) Publish(_ string, _ []byte) error { return nil }
-func (m *mockEventBus) PublishMsg(msg *Msg) error {
+func (m *mockEventBus) PublishMsg(msg *types.Msg) error {
 	m.publishedMsgs = append(m.publishedMsgs, msg)
 	return nil
 }
-func (m *mockEventBus) Request(_ string, _ []byte, _ time.Duration) (*Msg, error) { return nil, nil }
-func (m *mockEventBus) RequestWithContext(_ context.Context, _ string, _ []byte) (*Msg, error) {
+func (m *mockEventBus) Request(_ string, _ []byte, _ time.Duration) (*types.Msg, error) {
 	return nil, nil
 }
-func (m *mockEventBus) RequestMsgWithContext(_ context.Context, _ *Msg) (*Msg, error) {
+func (m *mockEventBus) RequestWithContext(_ context.Context, _ string, _ []byte) (*types.Msg, error) {
 	return nil, nil
 }
-func (m *mockEventBus) Subscribe(_ string, _ MsgHandler) (Subscription, error) {
+func (m *mockEventBus) RequestMsgWithContext(_ context.Context, _ *types.Msg) (*types.Msg, error) {
+	return nil, nil
+}
+func (m *mockEventBus) Subscribe(_ string, _ types.MsgHandler) (types.Subscription, error) {
 	return &mockSubscription{}, nil
 }
-func (m *mockEventBus) SubscribeSync(_ string) (Subscription, error) {
+func (m *mockEventBus) SubscribeSync(_ string) (types.Subscription, error) {
 	return &mockSubscription{}, nil
 }
-func (m *mockEventBus) QueueSubscribe(_ string, _ string, _ MsgHandler) (Subscription, error) {
+func (m *mockEventBus) QueueSubscribe(_ string, _ string, _ types.MsgHandler) (types.Subscription, error) {
 	return &mockSubscription{}, nil
 }
-func (m *mockEventBus) QueueSubscribeSync(_ string, _ string) (Subscription, error) {
+func (m *mockEventBus) QueueSubscribeSync(_ string, _ string) (types.Subscription, error) {
 	return &mockSubscription{}, nil
 }
-func (m *mockEventBus) ChanSubscribe(_ string, _ chan *Msg) (Subscription, error) {
+func (m *mockEventBus) ChanSubscribe(_ string, _ chan *types.Msg) (types.Subscription, error) {
 	return &mockSubscription{}, nil
 }
-func (m *mockEventBus) EventStream() (EventStream, error) {
+func (m *mockEventBus) EventStream() (types.EventStream, error) {
 	if m.eventStreamErr != nil {
 		return nil, m.eventStreamErr
 	}
@@ -123,9 +126,9 @@ func (m *mockEventBus) SetRuntimeContext(_ context.Context) {}
 func TestBaseEventDefinition_EventStreamPublishRaw(t *testing.T) {
 	tests := []struct {
 		name           string
-		eventBus       EventBus
+		eventBus       types.EventBus
 		data           []byte
-		header         Header
+		header         types.Header
 		eventStreamErr error
 		publishErr     error
 		expectedSeq    uint64
@@ -136,13 +139,13 @@ func TestBaseEventDefinition_EventStreamPublishRaw(t *testing.T) {
 			name: "successful publish",
 			eventBus: &mockEventBus{
 				eventStream: &mockEventStream{
-					publishMsgFunc: func(_ context.Context, _ *Msg) (MsgPubAck, error) {
+					publishMsgFunc: func(_ context.Context, _ *types.Msg) (types.MsgPubAck, error) {
 						return &mockMsgPubAck{stream: "test-stream", sequence: 42}, nil
 					},
 				},
 			},
 			data:        []byte(`{"order_id":"123"}`),
-			header:      Header{"X-Request-ID": {"req-123"}},
+			header:      types.Header{"X-Request-ID": {"req-123"}},
 			expectedSeq: 42,
 			expectError: false,
 		},
@@ -166,7 +169,7 @@ func TestBaseEventDefinition_EventStreamPublishRaw(t *testing.T) {
 			name: "PublishMsg returns error",
 			eventBus: &mockEventBus{
 				eventStream: &mockEventStream{
-					publishMsgFunc: func(_ context.Context, _ *Msg) (MsgPubAck, error) {
+					publishMsgFunc: func(_ context.Context, _ *types.Msg) (types.MsgPubAck, error) {
 						return nil, errors.New("stream not found")
 					},
 				},
@@ -179,7 +182,7 @@ func TestBaseEventDefinition_EventStreamPublishRaw(t *testing.T) {
 			name: "nil header is allowed",
 			eventBus: &mockEventBus{
 				eventStream: &mockEventStream{
-					publishMsgFunc: func(_ context.Context, msg *Msg) (MsgPubAck, error) {
+					publishMsgFunc: func(_ context.Context, msg *types.Msg) (types.MsgPubAck, error) {
 						if msg.Header != nil {
 							t.Error("expected nil header")
 						}
@@ -196,7 +199,7 @@ func TestBaseEventDefinition_EventStreamPublishRaw(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			baseDef := BaseEventDefinition{
+			baseDef := types.BaseEventDefinition{
 				ModuleName: "test-module",
 				Name:       "TestEvent",
 				Subject:    "events.test.v1.test-event",
@@ -232,17 +235,17 @@ func TestBaseEventDefinition_EventStreamPublishRaw(t *testing.T) {
 }
 
 func TestBaseEventDefinition_EventStreamPublishRaw_SubjectAndData(t *testing.T) {
-	var capturedMsg *Msg
+	var capturedMsg *types.Msg
 	eventBus := &mockEventBus{
 		eventStream: &mockEventStream{
-			publishMsgFunc: func(_ context.Context, msg *Msg) (MsgPubAck, error) {
+			publishMsgFunc: func(_ context.Context, msg *types.Msg) (types.MsgPubAck, error) {
 				capturedMsg = msg
 				return &mockMsgPubAck{sequence: 1}, nil
 			},
 		},
 	}
 
-	baseDef := BaseEventDefinition{
+	baseDef := types.BaseEventDefinition{
 		ModuleName: "order",
 		Name:       "OrderCreated",
 		Subject:    "events.order.v1.order-created",
@@ -250,7 +253,7 @@ func TestBaseEventDefinition_EventStreamPublishRaw_SubjectAndData(t *testing.T) 
 	}
 
 	data := []byte(`{"order_id":"order-123","amount":99.99}`)
-	header := Header{"X-Trace-ID": {"trace-456"}}
+	header := types.Header{"X-Trace-ID": {"trace-456"}}
 
 	ctx := context.Background()
 	_, err := baseDef.EventStreamPublishRaw(ctx, eventBus, data, header)
@@ -287,9 +290,9 @@ type testEvent struct {
 func TestEventDefinition_EventStreamPublish(t *testing.T) {
 	tests := []struct {
 		name           string
-		eventBus       EventBus
+		eventBus       types.EventBus
 		event          testEvent
-		header         Header
+		header         types.Header
 		eventStreamErr error
 		publishErr     error
 		marshalErr     bool
@@ -301,13 +304,13 @@ func TestEventDefinition_EventStreamPublish(t *testing.T) {
 			name: "successful publish with typed event",
 			eventBus: &mockEventBus{
 				eventStream: &mockEventStream{
-					publishMsgFunc: func(_ context.Context, _ *Msg) (MsgPubAck, error) {
+					publishMsgFunc: func(_ context.Context, _ *types.Msg) (types.MsgPubAck, error) {
 						return &mockMsgPubAck{stream: "order-events", sequence: 100}, nil
 					},
 				},
 			},
 			event:       testEvent{OrderID: "order-123", Amount: 99.99},
-			header:      Header{"X-Request-ID": {"req-789"}},
+			header:      types.Header{"X-Request-ID": {"req-789"}},
 			expectedSeq: 100,
 			expectError: false,
 		},
@@ -331,7 +334,7 @@ func TestEventDefinition_EventStreamPublish(t *testing.T) {
 			name: "PublishMsg returns error",
 			eventBus: &mockEventBus{
 				eventStream: &mockEventStream{
-					publishMsgFunc: func(_ context.Context, _ *Msg) (MsgPubAck, error) {
+					publishMsgFunc: func(_ context.Context, _ *types.Msg) (types.MsgPubAck, error) {
 						return nil, errors.New("publish timeout")
 					},
 				},
@@ -344,7 +347,7 @@ func TestEventDefinition_EventStreamPublish(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			eventDef := NewEventDefinition[testEvent](
+			eventDef := types.NewEventDefinition[testEvent](
 				"order",
 				"OrderCreated",
 				"v1",
@@ -389,7 +392,7 @@ func TestEventDefinition_EventStreamPublish_MarshalError(t *testing.T) {
 		return nil, errors.New("marshal failed")
 	}
 
-	eventDef := NewEventDefinition[testEvent](
+	eventDef := types.NewEventDefinition[testEvent](
 		"order",
 		"OrderCreated",
 		"v1",
@@ -418,14 +421,14 @@ func TestEventDefinition_EventStreamPublish_CustomMarshaler(t *testing.T) {
 	var capturedData []byte
 	eventBus := &mockEventBus{
 		eventStream: &mockEventStream{
-			publishMsgFunc: func(_ context.Context, msg *Msg) (MsgPubAck, error) {
+			publishMsgFunc: func(_ context.Context, msg *types.Msg) (types.MsgPubAck, error) {
 				capturedData = msg.Data
 				return &mockMsgPubAck{sequence: 1}, nil
 			},
 		},
 	}
 
-	eventDef := NewEventDefinition[testEvent](
+	eventDef := types.NewEventDefinition[testEvent](
 		"order",
 		"OrderCreated",
 		"v1",
@@ -452,14 +455,14 @@ func TestEventDefinition_EventStreamPublish_SubjectFromDefinition(t *testing.T) 
 	var capturedSubject string
 	eventBus := &mockEventBus{
 		eventStream: &mockEventStream{
-			publishMsgFunc: func(_ context.Context, msg *Msg) (MsgPubAck, error) {
+			publishMsgFunc: func(_ context.Context, msg *types.Msg) (types.MsgPubAck, error) {
 				capturedSubject = msg.Subject
 				return &mockMsgPubAck{sequence: 1}, nil
 			},
 		},
 	}
 
-	eventDef := NewEventDefinition[testEvent](
+	eventDef := types.NewEventDefinition[testEvent](
 		"inventory",
 		"StockUpdated",
 		"v2",
@@ -485,9 +488,9 @@ func TestEventDefinition_EventStreamPublish_SubjectFromDefinition(t *testing.T) 
 func TestBaseEventDefinition_PublishRaw(t *testing.T) {
 	tests := []struct {
 		name          string
-		eventBus      EventBus
+		eventBus      types.EventBus
 		data          []byte
-		header        Header
+		header        types.Header
 		expectError   bool
 		errorContains string
 	}{
@@ -502,7 +505,7 @@ func TestBaseEventDefinition_PublishRaw(t *testing.T) {
 			name:        "successful publish",
 			eventBus:    &mockEventBus{},
 			data:        []byte(`{"order_id":"123"}`),
-			header:      Header{"X-Request-ID": {"req-123"}},
+			header:      types.Header{"X-Request-ID": {"req-123"}},
 			expectError: false,
 		},
 		{
@@ -516,7 +519,7 @@ func TestBaseEventDefinition_PublishRaw(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			baseDef := BaseEventDefinition{
+			baseDef := types.BaseEventDefinition{
 				ModuleName: "test-module",
 				Name:       "TestEvent",
 				Subject:    "events.test.v1.test-event",
@@ -545,7 +548,7 @@ func TestBaseEventDefinition_PublishRaw(t *testing.T) {
 func TestBaseEventDefinition_PublishRaw_SubjectAndData(t *testing.T) {
 	eventBus := &mockEventBus{}
 
-	baseDef := BaseEventDefinition{
+	baseDef := types.BaseEventDefinition{
 		ModuleName: "order",
 		Name:       "OrderCreated",
 		Subject:    "events.order.v1.order-created",
@@ -553,7 +556,7 @@ func TestBaseEventDefinition_PublishRaw_SubjectAndData(t *testing.T) {
 	}
 
 	data := []byte(`{"order_id":"order-123","amount":99.99}`)
-	header := Header{"X-Trace-ID": {"trace-456"}}
+	header := types.Header{"X-Trace-ID": {"trace-456"}}
 
 	err := baseDef.PublishRaw(eventBus, data, header)
 	if err != nil {
@@ -586,9 +589,9 @@ func TestBaseEventDefinition_PublishRaw_SubjectAndData(t *testing.T) {
 func TestEventDefinition_Publish(t *testing.T) {
 	tests := []struct {
 		name          string
-		eventBus      EventBus
+		eventBus      types.EventBus
 		event         testEvent
-		header        Header
+		header        types.Header
 		expectError   bool
 		errorContains string
 	}{
@@ -603,7 +606,7 @@ func TestEventDefinition_Publish(t *testing.T) {
 			name:        "successful publish",
 			eventBus:    &mockEventBus{},
 			event:       testEvent{OrderID: "123", Amount: 99.99},
-			header:      Header{"X-Request-ID": {"req-123"}},
+			header:      types.Header{"X-Request-ID": {"req-123"}},
 			expectError: false,
 		},
 		{
@@ -617,7 +620,7 @@ func TestEventDefinition_Publish(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			eventDef := NewEventDefinition[testEvent](
+			eventDef := types.NewEventDefinition[testEvent](
 				"order",
 				"OrderCreated",
 				"v1",
@@ -651,7 +654,7 @@ func TestEventDefinition_Publish_MarshalError(t *testing.T) {
 		return nil, errors.New("marshal failed")
 	}
 
-	eventDef := NewEventDefinition[testEvent](
+	eventDef := types.NewEventDefinition[testEvent](
 		"order",
 		"OrderCreated",
 		"v1",
@@ -672,7 +675,7 @@ func TestEventDefinition_Publish_MarshalError(t *testing.T) {
 func TestEventDefinition_Publish_SubjectAndData(t *testing.T) {
 	eventBus := &mockEventBus{}
 
-	eventDef := NewEventDefinition[testEvent](
+	eventDef := types.NewEventDefinition[testEvent](
 		"inventory",
 		"StockUpdated",
 		"v2",
@@ -707,7 +710,7 @@ func TestEventDefinition_WithUnmarshaler(t *testing.T) {
 		return errors.New("custom unmarshaler called")
 	}
 
-	original := NewEventDefinition[testEvent](
+	original := types.NewEventDefinition[testEvent](
 		"order",
 		"OrderCreated",
 		"v1",
@@ -718,7 +721,7 @@ func TestEventDefinition_WithUnmarshaler(t *testing.T) {
 	modified := original.WithUnmarshaler(customUnmarshal)
 
 	// Verify the modified copy has the custom unmarshaler
-	msg := &Msg{Data: []byte(`{}`)}
+	msg := &types.Msg{Data: []byte(`{}`)}
 	_, err := modified.Unmarshal(msg)
 	if err == nil || !containsString(err.Error(), "custom unmarshaler called") {
 		t.Errorf("expected custom unmarshaler to be used, got error: %v", err)
@@ -742,7 +745,7 @@ func TestEventDefinition_WithUnmarshaler_ChainedWithMarshaler(t *testing.T) {
 		return errors.New("unexpected data")
 	}
 
-	eventDef := NewEventDefinition[testEvent](
+	eventDef := types.NewEventDefinition[testEvent](
 		"order",
 		"OrderCreated",
 		"v1",
@@ -765,7 +768,7 @@ func TestEventDefinition_WithUnmarshaler_ChainedWithMarshaler(t *testing.T) {
 	}
 
 	// Test unmarshaler is correctly set
-	msg := &Msg{Data: []byte("custom-data")}
+	msg := &types.Msg{Data: []byte("custom-data")}
 	_, err = eventDef.Unmarshal(msg)
 	if err != nil {
 		t.Errorf("expected custom unmarshaler to succeed, got error: %v", err)
@@ -777,7 +780,7 @@ func TestEventDefinition_WithUnmarshaler_ChainedWithMarshaler(t *testing.T) {
 // =============================================================================
 
 func TestEventDefinition_Unmarshal(t *testing.T) {
-	eventDef := NewEventDefinition[testEvent](
+	eventDef := types.NewEventDefinition[testEvent](
 		"order",
 		"OrderCreated",
 		"v1",
@@ -819,7 +822,7 @@ func TestEventDefinition_Unmarshal(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			msg := &Msg{
+			msg := &types.Msg{
 				Subject: "events.order.v1.order-created",
 				Data:    tt.msgData,
 			}
@@ -865,14 +868,14 @@ func TestEventDefinition_Unmarshal_CustomUnmarshaler(t *testing.T) {
 		return nil
 	}
 
-	eventDef := NewEventDefinition[testEvent](
+	eventDef := types.NewEventDefinition[testEvent](
 		"order",
 		"OrderCreated",
 		"v1",
 		"events.order.v1.order-created",
 	).WithUnmarshaler(customUnmarshal)
 
-	msg := &Msg{Data: []byte("custom-data")}
+	msg := &types.Msg{Data: []byte("custom-data")}
 	event, err := eventDef.Unmarshal(msg)
 
 	if err != nil {
@@ -897,7 +900,7 @@ func TestEventDefinition_Unmarshal_CustomUnmarshaler(t *testing.T) {
 // =============================================================================
 
 func TestEventDefinition_ToBase(t *testing.T) {
-	eventDef := NewEventDefinition[testEvent](
+	eventDef := types.NewEventDefinition[testEvent](
 		"order",
 		"OrderCreated",
 		"v1",
@@ -956,7 +959,7 @@ func TestEventDefinition_ToBase_PreservesAllFields(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			eventDef := NewEventDefinition[testEvent](
+			eventDef := types.NewEventDefinition[testEvent](
 				tt.moduleName,
 				tt.eventName,
 				tt.version,

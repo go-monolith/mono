@@ -1,8 +1,10 @@
-package storage
+package storage_test
 
 import (
 	"errors"
 	"testing"
+
+	"github.com/go-monolith/mono/v1/pkg/storage"
 )
 
 // =============================================================================
@@ -16,10 +18,10 @@ func TestSentinelErrors(t *testing.T) {
 		err  error
 		msg  string
 	}{
-		{"ErrKeyNotFound", ErrKeyNotFound, "key not found"},
-		{"ErrKeyExists", ErrKeyExists, "key already exists"},
-		{"ErrRevisionMismatch", ErrRevisionMismatch, "revision mismatch"},
-		{"ErrBucketNotFound", ErrBucketNotFound, "bucket not found"},
+		{"ErrKeyNotFound", storage.ErrKeyNotFound, "key not found"},
+		{"ErrKeyExists", storage.ErrKeyExists, "key already exists"},
+		{"ErrRevisionMismatch", storage.ErrRevisionMismatch, "revision mismatch"},
+		{"ErrBucketNotFound", storage.ErrBucketNotFound, "bucket not found"},
 	}
 
 	for _, tt := range tests {
@@ -36,13 +38,13 @@ func TestSentinelErrors(t *testing.T) {
 
 func TestSentinelErrors_ErrorsIs(t *testing.T) {
 	// Test that errors.Is works correctly with wrapped errors
-	wrapped := errors.New("wrapped: " + ErrKeyNotFound.Error())
-	if errors.Is(wrapped, ErrKeyNotFound) {
+	wrapped := errors.New("wrapped: " + storage.ErrKeyNotFound.Error())
+	if errors.Is(wrapped, storage.ErrKeyNotFound) {
 		t.Log("Note: Standard wrapped errors don't match with errors.Is - this is expected")
 	}
 
 	// Test direct comparison
-	if !errors.Is(ErrKeyNotFound, ErrKeyNotFound) {
+	if !errors.Is(storage.ErrKeyNotFound, storage.ErrKeyNotFound) {
 		t.Error("expected ErrKeyNotFound to match itself")
 	}
 }
@@ -52,8 +54,8 @@ func TestSentinelErrors_ErrorsIs(t *testing.T) {
 // =============================================================================
 
 func TestWithListPrefix(t *testing.T) {
-	opt := WithListPrefix("test-prefix")
-	options := &ListOptions{}
+	opt := storage.WithListPrefix("test-prefix")
+	options := &storage.ListOptions{}
 	opt(options)
 
 	if options.Prefix != "test-prefix" {
@@ -64,37 +66,37 @@ func TestWithListPrefix(t *testing.T) {
 func TestApplyListOptions(t *testing.T) {
 	tests := []struct {
 		name     string
-		opts     []ListOption
-		expected *ListOptions
+		opts     []storage.ListOption
+		expected *storage.ListOptions
 	}{
 		{
 			name:     "no options",
 			opts:     nil,
-			expected: &ListOptions{},
+			expected: &storage.ListOptions{},
 		},
 		{
 			name:     "empty options",
-			opts:     []ListOption{},
-			expected: &ListOptions{},
+			opts:     []storage.ListOption{},
+			expected: &storage.ListOptions{},
 		},
 		{
 			name:     "with prefix",
-			opts:     []ListOption{WithListPrefix("prefix")},
-			expected: &ListOptions{Prefix: "prefix"},
+			opts:     []storage.ListOption{storage.WithListPrefix("prefix")},
+			expected: &storage.ListOptions{Prefix: "prefix"},
 		},
 		{
 			name: "multiple options - last wins",
-			opts: []ListOption{
-				WithListPrefix("first"),
-				WithListPrefix("second"),
+			opts: []storage.ListOption{
+				storage.WithListPrefix("first"),
+				storage.WithListPrefix("second"),
 			},
-			expected: &ListOptions{Prefix: "second"},
+			expected: &storage.ListOptions{Prefix: "second"},
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := ApplyListOptions(tt.opts...)
+			result := storage.ApplyListOptions(tt.opts...)
 			if result.Prefix != tt.expected.Prefix {
 				t.Errorf("expected Prefix %q, got %q", tt.expected.Prefix, result.Prefix)
 			}
@@ -107,8 +109,8 @@ func TestApplyListOptions(t *testing.T) {
 // =============================================================================
 
 func TestWithPutDescription(t *testing.T) {
-	opt := WithPutDescription("test description")
-	options := &PutOptions{}
+	opt := storage.WithPutDescription("test description")
+	options := &storage.PutOptions{}
 	opt(options)
 
 	if options.Description != "test description" {
@@ -121,8 +123,8 @@ func TestWithPutHeaders(t *testing.T) {
 		"Content-Type": "application/json",
 		"X-Custom":     "value",
 	}
-	opt := WithPutHeaders(headers)
-	options := &PutOptions{}
+	opt := storage.WithPutHeaders(headers)
+	options := &storage.PutOptions{}
 	opt(options)
 
 	if len(options.Headers) != 2 {
@@ -139,7 +141,7 @@ func TestWithPutHeaders(t *testing.T) {
 func TestApplyPutOptions(t *testing.T) {
 	tests := []struct {
 		name           string
-		opts           []PutOption
+		opts           []storage.PutOption
 		expDescription string
 		expHeadersLen  int
 	}{
@@ -151,21 +153,21 @@ func TestApplyPutOptions(t *testing.T) {
 		},
 		{
 			name:           "with description",
-			opts:           []PutOption{WithPutDescription("desc")},
+			opts:           []storage.PutOption{storage.WithPutDescription("desc")},
 			expDescription: "desc",
 			expHeadersLen:  0,
 		},
 		{
 			name:           "with headers",
-			opts:           []PutOption{WithPutHeaders(map[string]string{"key": "value"})},
+			opts:           []storage.PutOption{storage.WithPutHeaders(map[string]string{"key": "value"})},
 			expDescription: "",
 			expHeadersLen:  1,
 		},
 		{
 			name: "with both",
-			opts: []PutOption{
-				WithPutDescription("my desc"),
-				WithPutHeaders(map[string]string{"a": "1", "b": "2"}),
+			opts: []storage.PutOption{
+				storage.WithPutDescription("my desc"),
+				storage.WithPutHeaders(map[string]string{"a": "1", "b": "2"}),
 			},
 			expDescription: "my desc",
 			expHeadersLen:  2,
@@ -174,7 +176,7 @@ func TestApplyPutOptions(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := ApplyPutOptions(tt.opts...)
+			result := storage.ApplyPutOptions(tt.opts...)
 			if result.Description != tt.expDescription {
 				t.Errorf("expected Description %q, got %q", tt.expDescription, result.Description)
 			}
@@ -190,8 +192,8 @@ func TestApplyPutOptions(t *testing.T) {
 // =============================================================================
 
 func TestWithWatchUpdatesOnly(t *testing.T) {
-	opt := WithWatchUpdatesOnly()
-	options := &WatchOptions{}
+	opt := storage.WithWatchUpdatesOnly()
+	options := &storage.WatchOptions{}
 	opt(options)
 
 	if !options.UpdatesOnly {
@@ -200,8 +202,8 @@ func TestWithWatchUpdatesOnly(t *testing.T) {
 }
 
 func TestWithWatchIgnoreDeletes(t *testing.T) {
-	opt := WithWatchIgnoreDeletes()
-	options := &WatchOptions{}
+	opt := storage.WithWatchIgnoreDeletes()
+	options := &storage.WatchOptions{}
 	opt(options)
 
 	if !options.IgnoreDeletes {
@@ -210,8 +212,8 @@ func TestWithWatchIgnoreDeletes(t *testing.T) {
 }
 
 func TestWithWatchMetaOnly(t *testing.T) {
-	opt := WithWatchMetaOnly()
-	options := &WatchOptions{}
+	opt := storage.WithWatchMetaOnly()
+	options := &storage.WatchOptions{}
 	opt(options)
 
 	if !options.MetaOnly {
@@ -220,8 +222,8 @@ func TestWithWatchMetaOnly(t *testing.T) {
 }
 
 func TestWithWatchResumeFromRevision(t *testing.T) {
-	opt := WithWatchResumeFromRevision(42)
-	options := &WatchOptions{}
+	opt := storage.WithWatchResumeFromRevision(42)
+	options := &storage.WatchOptions{}
 	opt(options)
 
 	if options.ResumeFromRevision != 42 {
@@ -232,7 +234,7 @@ func TestWithWatchResumeFromRevision(t *testing.T) {
 func TestApplyWatchOptions(t *testing.T) {
 	tests := []struct {
 		name             string
-		opts             []WatchOption
+		opts             []storage.WatchOption
 		expUpdatesOnly   bool
 		expIgnoreDeletes bool
 		expMetaOnly      bool
@@ -248,31 +250,31 @@ func TestApplyWatchOptions(t *testing.T) {
 		},
 		{
 			name:           "updates only",
-			opts:           []WatchOption{WithWatchUpdatesOnly()},
+			opts:           []storage.WatchOption{storage.WithWatchUpdatesOnly()},
 			expUpdatesOnly: true,
 		},
 		{
 			name:             "ignore deletes",
-			opts:             []WatchOption{WithWatchIgnoreDeletes()},
+			opts:             []storage.WatchOption{storage.WithWatchIgnoreDeletes()},
 			expIgnoreDeletes: true,
 		},
 		{
 			name:        "meta only",
-			opts:        []WatchOption{WithWatchMetaOnly()},
+			opts:        []storage.WatchOption{storage.WithWatchMetaOnly()},
 			expMetaOnly: true,
 		},
 		{
 			name:             "resume from revision",
-			opts:             []WatchOption{WithWatchResumeFromRevision(100)},
+			opts:             []storage.WatchOption{storage.WithWatchResumeFromRevision(100)},
 			expResumeFromRev: 100,
 		},
 		{
 			name: "all options combined",
-			opts: []WatchOption{
-				WithWatchUpdatesOnly(),
-				WithWatchIgnoreDeletes(),
-				WithWatchMetaOnly(),
-				WithWatchResumeFromRevision(999),
+			opts: []storage.WatchOption{
+				storage.WithWatchUpdatesOnly(),
+				storage.WithWatchIgnoreDeletes(),
+				storage.WithWatchMetaOnly(),
+				storage.WithWatchResumeFromRevision(999),
 			},
 			expUpdatesOnly:   true,
 			expIgnoreDeletes: true,
@@ -283,7 +285,7 @@ func TestApplyWatchOptions(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := ApplyWatchOptions(tt.opts...)
+			result := storage.ApplyWatchOptions(tt.opts...)
 			if result.UpdatesOnly != tt.expUpdatesOnly {
 				t.Errorf("expected UpdatesOnly %v, got %v", tt.expUpdatesOnly, result.UpdatesOnly)
 			}
@@ -305,8 +307,8 @@ func TestApplyWatchOptions(t *testing.T) {
 // =============================================================================
 
 func TestWithDeleteRevision(t *testing.T) {
-	opt := WithDeleteRevision(123)
-	options := &DeleteOptions{}
+	opt := storage.WithDeleteRevision(123)
+	options := &storage.DeleteOptions{}
 	opt(options)
 
 	if options.Revision != 123 {
@@ -317,7 +319,7 @@ func TestWithDeleteRevision(t *testing.T) {
 func TestApplyDeleteOptions(t *testing.T) {
 	tests := []struct {
 		name        string
-		opts        []DeleteOption
+		opts        []storage.DeleteOption
 		expRevision uint64
 	}{
 		{
@@ -327,19 +329,19 @@ func TestApplyDeleteOptions(t *testing.T) {
 		},
 		{
 			name:        "empty options",
-			opts:        []DeleteOption{},
+			opts:        []storage.DeleteOption{},
 			expRevision: 0,
 		},
 		{
 			name:        "with revision",
-			opts:        []DeleteOption{WithDeleteRevision(456)},
+			opts:        []storage.DeleteOption{storage.WithDeleteRevision(456)},
 			expRevision: 456,
 		},
 		{
 			name: "multiple revisions - last wins",
-			opts: []DeleteOption{
-				WithDeleteRevision(1),
-				WithDeleteRevision(2),
+			opts: []storage.DeleteOption{
+				storage.WithDeleteRevision(1),
+				storage.WithDeleteRevision(2),
 			},
 			expRevision: 2,
 		},
@@ -347,7 +349,7 @@ func TestApplyDeleteOptions(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := ApplyDeleteOptions(tt.opts...)
+			result := storage.ApplyDeleteOptions(tt.opts...)
 			if result.Revision != tt.expRevision {
 				t.Errorf("expected Revision %d, got %d", tt.expRevision, result.Revision)
 			}
@@ -361,14 +363,14 @@ func TestApplyDeleteOptions(t *testing.T) {
 
 func TestKeyOperation_Constants(t *testing.T) {
 	// Verify the constants are defined correctly
-	if KeyOperationPut != 0 {
-		t.Errorf("expected KeyOperationPut to be 0, got %d", KeyOperationPut)
+	if storage.KeyOperationPut != 0 {
+		t.Errorf("expected KeyOperationPut to be 0, got %d", storage.KeyOperationPut)
 	}
-	if KeyOperationDelete != 1 {
-		t.Errorf("expected KeyOperationDelete to be 1, got %d", KeyOperationDelete)
+	if storage.KeyOperationDelete != 1 {
+		t.Errorf("expected KeyOperationDelete to be 1, got %d", storage.KeyOperationDelete)
 	}
-	if KeyOperationPurge != 2 {
-		t.Errorf("expected KeyOperationPurge to be 2, got %d", KeyOperationPurge)
+	if storage.KeyOperationPurge != 2 {
+		t.Errorf("expected KeyOperationPurge to be 2, got %d", storage.KeyOperationPurge)
 	}
 }
 
@@ -378,14 +380,14 @@ func TestKeyOperation_Constants(t *testing.T) {
 
 func TestOptionComposition_List(t *testing.T) {
 	// Test that options can be stored and applied in different orders
-	opts := []ListOption{
-		WithListPrefix("first"),
+	opts := []storage.ListOption{
+		storage.WithListPrefix("first"),
 	}
 
 	// Add more options
-	opts = append(opts, WithListPrefix("second"))
+	opts = append(opts, storage.WithListPrefix("second"))
 
-	result := ApplyListOptions(opts...)
+	result := storage.ApplyListOptions(opts...)
 	if result.Prefix != "second" {
 		t.Errorf("expected last prefix 'second', got %q", result.Prefix)
 	}
@@ -393,16 +395,16 @@ func TestOptionComposition_List(t *testing.T) {
 
 func TestOptionComposition_Put(t *testing.T) {
 	// Test composing options from multiple sources
-	baseOpts := []PutOption{
-		WithPutDescription("base"),
+	baseOpts := []storage.PutOption{
+		storage.WithPutDescription("base"),
 	}
 
-	additionalOpts := []PutOption{
-		WithPutHeaders(map[string]string{"X-Header": "value"}),
+	additionalOpts := []storage.PutOption{
+		storage.WithPutHeaders(map[string]string{"X-Header": "value"}),
 	}
 
 	allOpts := append(baseOpts, additionalOpts...)
-	result := ApplyPutOptions(allOpts...)
+	result := storage.ApplyPutOptions(allOpts...)
 
 	if result.Description != "base" {
 		t.Errorf("expected description 'base', got %q", result.Description)
@@ -414,12 +416,12 @@ func TestOptionComposition_Put(t *testing.T) {
 
 func TestOptionComposition_Watch(t *testing.T) {
 	// Test that watch options can be applied incrementally
-	opts := []WatchOption{}
+	opts := []storage.WatchOption{}
 
-	opts = append(opts, WithWatchUpdatesOnly())
-	opts = append(opts, WithWatchMetaOnly())
+	opts = append(opts, storage.WithWatchUpdatesOnly())
+	opts = append(opts, storage.WithWatchMetaOnly())
 
-	result := ApplyWatchOptions(opts...)
+	result := storage.ApplyWatchOptions(opts...)
 
 	if !result.UpdatesOnly {
 		t.Error("expected UpdatesOnly to be true")

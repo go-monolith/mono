@@ -14,7 +14,7 @@ import (
 	"github.com/go-monolith/mono/v1/pkg/types"
 )
 
-// toKebabCase converts a string to kebab-case.
+// ToKebabCase converts a string to kebab-case.
 // Handles CamelCase, PascalCase, acronyms (API, HTTP, ID), and replaces spaces/special chars with hyphens.
 //
 // Examples:
@@ -23,7 +23,7 @@ import (
 //   - "HTTPServer" -> "http-server"
 //   - "UserID" -> "user-id"
 //   - "Order Created" -> "order-created"
-func toKebabCase(s string) string {
+func ToKebabCase(s string) string {
 	var result strings.Builder
 	runes := []rune(s)
 
@@ -89,7 +89,7 @@ func EventDefinition[T any](moduleName, name, version string, subject ...string)
 	if len(subject) > 0 && subject[0] != "" {
 		finalSubject = subject[0]
 	} else {
-		finalSubject = fmt.Sprintf("events.%s.%s.%s", moduleName, version, toKebabCase(name))
+		finalSubject = fmt.Sprintf("events.%s.%s.%s", moduleName, version, ToKebabCase(name))
 	}
 
 	if err := errors.ValidateEventDefinitionSubject(finalSubject); err != nil {

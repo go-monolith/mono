@@ -1,4 +1,4 @@
-package helper
+package helper_test
 
 import (
 	"context"
@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-monolith/mono/v1/pkg/helper"
 	"github.com/go-monolith/mono/v1/pkg/types"
 )
 
@@ -116,9 +117,9 @@ func TestToKebabCase(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := toKebabCase(tt.input)
+			result := helper.ToKebabCase(tt.input)
 			if result != tt.expected {
-				t.Errorf("toKebabCase(%q) = %q, want %q", tt.input, result, tt.expected)
+				t.Errorf("ToKebabCase(%q) = %q, want %q", tt.input, result, tt.expected)
 			}
 		})
 	}
@@ -260,7 +261,7 @@ func TestRegisterTypedRequestReplyService(t *testing.T) {
 				return tt.expectedResp, nil
 			}
 
-			err := RegisterTypedRequestReplyService(
+			err := helper.RegisterTypedRequestReplyService(
 				mock,
 				tt.serviceName,
 				json.Unmarshal,
@@ -390,7 +391,7 @@ func TestRegisterTypedQueueGroupService(t *testing.T) {
 				}
 			}
 
-			err := RegisterTypedQueueGroupService(
+			err := helper.RegisterTypedQueueGroupService(
 				mock,
 				tt.serviceName,
 				json.Unmarshal,
@@ -514,7 +515,7 @@ func TestRegisterTypedStreamConsumerService(t *testing.T) {
 				},
 			}
 
-			err := RegisterTypedStreamConsumerService(
+			err := helper.RegisterTypedStreamConsumerService(
 				mock,
 				tt.serviceName,
 				config,
@@ -589,7 +590,7 @@ func containsString(s, substr string) bool {
 // TestEventDefinition tests the EventDefinition function
 func TestEventDefinition(t *testing.T) {
 	t.Run("auto-generated subject", func(t *testing.T) {
-		def := EventDefinition[testRequest]("order", "OrderCreated", "v1")
+		def := helper.EventDefinition[testRequest]("order", "OrderCreated", "v1")
 		base := def.ToBase()
 
 		if base.Name != "OrderCreated" {
@@ -609,7 +610,7 @@ func TestEventDefinition(t *testing.T) {
 	})
 
 	t.Run("custom subject", func(t *testing.T) {
-		def := EventDefinition[testRequest]("order", "OrderCreated", "v1", "events.orders.v1.created")
+		def := helper.EventDefinition[testRequest]("order", "OrderCreated", "v1", "events.orders.v1.created")
 		base := def.ToBase()
 
 		if base.Subject != "events.orders.v1.created" {
@@ -623,7 +624,7 @@ func TestEventDefinition(t *testing.T) {
 				t.Error("expected panic for invalid subject")
 			}
 		}()
-		EventDefinition[testRequest]("order", "OrderCreated", "v1", "invalid subject")
+		helper.EventDefinition[testRequest]("order", "OrderCreated", "v1", "invalid subject")
 	})
 
 	t.Run("panic on missing version in subject", func(t *testing.T) {
@@ -633,7 +634,7 @@ func TestEventDefinition(t *testing.T) {
 			}
 		}()
 		// Subject doesn't contain version token 'v1'
-		EventDefinition[testRequest]("order", "OrderCreated", "v1", "events.orders.created")
+		helper.EventDefinition[testRequest]("order", "OrderCreated", "v1", "events.orders.created")
 	})
 }
 
@@ -708,7 +709,7 @@ func (m *mockModule) Stop(ctx context.Context) error  { return nil }
 func TestRegisterTypedEventConsumer(t *testing.T) {
 	t.Run("successful registration", func(t *testing.T) {
 		registry := newMockEventRegistry()
-		def := EventDefinition[testRequest]("order", "OrderCreated", "v1")
+		def := helper.EventDefinition[testRequest]("order", "OrderCreated", "v1")
 		module := &mockModule{}
 
 		var receivedEvent testRequest
@@ -717,7 +718,7 @@ func TestRegisterTypedEventConsumer(t *testing.T) {
 			return nil
 		}
 
-		err := RegisterTypedEventConsumer(registry, def, handler, module)
+		err := helper.RegisterTypedEventConsumer(registry, def, handler, module)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -747,14 +748,14 @@ func TestRegisterTypedEventConsumer(t *testing.T) {
 	t.Run("registration error", func(t *testing.T) {
 		registry := newMockEventRegistry()
 		registry.returnError = errors.New("registration failed")
-		def := EventDefinition[testRequest]("order", "OrderCreated", "v1")
+		def := helper.EventDefinition[testRequest]("order", "OrderCreated", "v1")
 		module := &mockModule{}
 
 		handler := func(_ context.Context, _ testRequest, _ *types.Msg) error {
 			return nil
 		}
 
-		err := RegisterTypedEventConsumer(registry, def, handler, module)
+		err := helper.RegisterTypedEventConsumer(registry, def, handler, module)
 		if err == nil {
 			t.Fatal("expected error")
 		}
@@ -762,14 +763,14 @@ func TestRegisterTypedEventConsumer(t *testing.T) {
 
 	t.Run("unmarshal error", func(t *testing.T) {
 		registry := newMockEventRegistry()
-		def := EventDefinition[testRequest]("order", "OrderCreated", "v1")
+		def := helper.EventDefinition[testRequest]("order", "OrderCreated", "v1")
 		module := &mockModule{}
 
 		handler := func(_ context.Context, _ testRequest, _ *types.Msg) error {
 			return nil
 		}
 
-		err := RegisterTypedEventConsumer(registry, def, handler, module)
+		err := helper.RegisterTypedEventConsumer(registry, def, handler, module)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -789,7 +790,7 @@ func TestRegisterTypedEventConsumer(t *testing.T) {
 func TestRegisterTypedEventStreamConsumer(t *testing.T) {
 	t.Run("successful registration", func(t *testing.T) {
 		registry := newMockEventRegistry()
-		def := EventDefinition[testRequest]("order", "OrderCreated", "v1")
+		def := helper.EventDefinition[testRequest]("order", "OrderCreated", "v1")
 		module := &mockModule{}
 
 		var receivedEvents []testRequest
@@ -807,7 +808,7 @@ func TestRegisterTypedEventStreamConsumer(t *testing.T) {
 			},
 		}
 
-		err := RegisterTypedEventStreamConsumer(registry, def, config, handler, module)
+		err := helper.RegisterTypedEventStreamConsumer(registry, def, config, handler, module)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -845,7 +846,7 @@ func TestRegisterTypedEventStreamConsumer(t *testing.T) {
 
 	t.Run("unmarshal error in batch", func(t *testing.T) {
 		registry := newMockEventRegistry()
-		def := EventDefinition[testRequest]("order", "OrderCreated", "v1")
+		def := helper.EventDefinition[testRequest]("order", "OrderCreated", "v1")
 		module := &mockModule{}
 
 		handler := func(_ context.Context, _ []testRequest, _ []*types.Msg) error {
@@ -856,7 +857,7 @@ func TestRegisterTypedEventStreamConsumer(t *testing.T) {
 			Stream: types.StreamConfig{Name: "test-stream"},
 		}
 
-		err := RegisterTypedEventStreamConsumer(registry, def, config, handler, module)
+		err := helper.RegisterTypedEventStreamConsumer(registry, def, config, handler, module)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -973,7 +974,7 @@ func TestCallRequestReplyService(t *testing.T) {
 		req := testRequest{Name: "test", Value: 42}
 		var resp testResponse
 
-		err := CallRequestReplyService(
+		err := helper.CallRequestReplyService(
 			context.Background(),
 			container,
 			"test-service",
@@ -999,7 +1000,7 @@ func TestCallRequestReplyService(t *testing.T) {
 
 		req := testRequest{Name: "test", Value: 42}
 
-		err := CallRequestReplyService(
+		err := helper.CallRequestReplyService(
 			context.Background(),
 			container,
 			"test-service",
@@ -1029,7 +1030,7 @@ func TestCallRequestReplyService(t *testing.T) {
 		req := testRequest{Name: "test", Value: 42}
 		var resp testResponse
 
-		err := CallRequestReplyService(
+		err := helper.CallRequestReplyService(
 			context.Background(),
 			container,
 			"test-service",
@@ -1055,7 +1056,7 @@ func TestCallRequestReplyService(t *testing.T) {
 		req := testRequest{Name: "test", Value: 42}
 		var resp testResponse
 
-		err := CallRequestReplyService(
+		err := helper.CallRequestReplyService(
 			context.Background(),
 			container,
 			"test-service",
@@ -1085,7 +1086,7 @@ func TestCallRequestReplyService(t *testing.T) {
 		req := testRequest{Name: "test", Value: 42}
 		var resp testResponse
 
-		err := CallRequestReplyService(
+		err := helper.CallRequestReplyService(
 			context.Background(),
 			container,
 			"test-service",
@@ -1115,7 +1116,7 @@ func TestCallRequestReplyService(t *testing.T) {
 		req := testRequest{Name: "test", Value: 42}
 		var resp testResponse
 
-		err := CallRequestReplyService(
+		err := helper.CallRequestReplyService(
 			context.Background(),
 			container,
 			"test-service",
@@ -1142,7 +1143,7 @@ func TestSendQueueGroupService(t *testing.T) {
 
 		req := testRequest{Name: "test", Value: 42}
 
-		err := SendQueueGroupService(
+		err := helper.SendQueueGroupService(
 			context.Background(),
 			container,
 			"test-service",
@@ -1166,7 +1167,7 @@ func TestSendQueueGroupService(t *testing.T) {
 
 		req := testRequest{Name: "test", Value: 42}
 
-		err := SendQueueGroupService(
+		err := helper.SendQueueGroupService(
 			context.Background(),
 			container,
 			"test-service",
@@ -1189,7 +1190,7 @@ func TestSendQueueGroupService(t *testing.T) {
 
 		req := testRequest{Name: "test", Value: 42}
 
-		err := SendQueueGroupService(
+		err := helper.SendQueueGroupService(
 			context.Background(),
 			container,
 			"test-service",
@@ -1216,7 +1217,7 @@ func TestSendQueueGroupService(t *testing.T) {
 
 		req := testRequest{Name: "test", Value: 42}
 
-		err := SendQueueGroupService(
+		err := helper.SendQueueGroupService(
 			context.Background(),
 			container,
 			"test-service",
@@ -1241,7 +1242,7 @@ func TestPublishStreamConsumerService(t *testing.T) {
 
 		event := testRequest{Name: "test", Value: 42}
 
-		ack, err := PublishStreamConsumerService(
+		ack, err := helper.PublishStreamConsumerService(
 			context.Background(),
 			container,
 			"test-service",
@@ -1269,7 +1270,7 @@ func TestPublishStreamConsumerService(t *testing.T) {
 
 		event := testRequest{Name: "test", Value: 42}
 
-		_, err := PublishStreamConsumerService(
+		_, err := helper.PublishStreamConsumerService(
 			context.Background(),
 			container,
 			"test-service",
@@ -1292,7 +1293,7 @@ func TestPublishStreamConsumerService(t *testing.T) {
 
 		event := testRequest{Name: "test", Value: 42}
 
-		_, err := PublishStreamConsumerService(
+		_, err := helper.PublishStreamConsumerService(
 			context.Background(),
 			container,
 			"test-service",
@@ -1319,7 +1320,7 @@ func TestPublishStreamConsumerService(t *testing.T) {
 
 		event := testRequest{Name: "test", Value: 42}
 
-		_, err := PublishStreamConsumerService(
+		_, err := helper.PublishStreamConsumerService(
 			context.Background(),
 			container,
 			"test-service",
