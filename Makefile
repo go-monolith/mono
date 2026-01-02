@@ -165,6 +165,6 @@ run-example-3:
 	@cd examples/analytics && $(GO) build $(BUILD_FLAGS) -o dist/ ./... 
 	@examples/analytics/dist/analytics & PID=$$!; sleep 5; kill -2 "$$PID"; wait "$$PID" 2>/dev/null || true
 
-# Pre-commit checks (used by pre-commit hook)
+# Pre-commit checks (can be used for pre-commit hook)
 pre-commit: fmt vet test-short lint
 	@echo "✓ Pre-commit checks passed!"

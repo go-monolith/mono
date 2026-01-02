@@ -4,44 +4,29 @@ Thank you for your interest in contributing to the Mono Framework! This document
 
 ## Development Setup
 
-### Prerequisites
+For development environment setup, project structure, coding standards, testing guidelines, and available commands, see [DEVELOPMENT.md](DEVELOPMENT.md).
 
-- Go 1.25 or higher
-- Git
-- Make (optional, for convenience)
+## Contribution Workflow
 
-### Getting Started
+### Fork and Clone
 
 1. Fork the repository
 2. Clone your fork:
    ```bash
-   git clone https://github.com/YOUR_USERNAME/mono-framework.git
-   cd mono-framework
+   git clone https://github.com/YOUR_USERNAME/mono.git
+   cd mono
    ```
 3. Add upstream remote:
    ```bash
    git remote add upstream https://github.com/go-monolith/mono.git
    ```
-4. Install dependencies:
-   ```bash
-   go mod download
-   ```
-
-## Development Workflow
+4. Follow the setup instructions in [DEVELOPMENT.md](DEVELOPMENT.md)
 
 ### Creating a Feature Branch
 
 ```bash
 git checkout -b feature/your-feature-name
 ```
-
-### Making Changes
-
-1. Make your changes
-2. Run tests: `go test ./...`
-3. Run linter: `make lint` or `golangci-lint run`
-4. Format code: `gofmt -s -w .`
-5. Build: `go build ./...`
 
 ### Commit Guidelines
 
@@ -58,53 +43,17 @@ docs(readme): update installation instructions
 test(registry): add dependency resolution tests
 ```
 
-### Pre-commit Checks
-
-The project uses pre-commit hooks that run automatically:
-- Code formatting (gofmt)
-- Go vet
-- Tests
-- Linter (golangci-lint)
-
-All checks must pass before committing.
-
-## Code Standards
-
-### Go Style
-
-- Follow [Effective Go](https://golang.org/doc/effective_go.html)
-- Use `gofmt` for formatting
-- Keep functions small and focused
-- Use meaningful variable names
-
-### Documentation
-
-- Add godoc comments for all exported types and functions
-- Include usage examples in godoc
-- Update README.md for user-facing changes
-
-### Testing
-
-- Write tests for new functionality
-- Maintain >80% code coverage
-- Use table-driven tests where appropriate
-- Test edge cases and error conditions
-
-### Error Handling
-
-- Use typed errors from `pkg/mono/errors.go`
-- Wrap errors with context
-- Return errors, don't panic (except in truly unrecoverable situations)
-
 ## Pull Request Process
 
 1. **Update Documentation**: Ensure all changes are documented
 2. **Add Tests**: Include tests for new functionality
-3. **Update Changelog**: Add entry to CHANGELOG.md
-4. **Run Full Test Suite**: `go test ./...`
-5. **Submit PR**: 
-   - Clear title and description
+3. **Run Unit Test**: `make test`
+4. **Run Integration Test**: `make test-integration`
+5. **Run Benchmarks**: `make bench-all-save-json`
+6. **Submit PR**:
+   - Clear title and description (follow our PR template)
    - Link related issues
+   - Attach benchmark results
    - Request review from maintainers
 
 ### PR Review Criteria
@@ -116,38 +65,6 @@ PRs will be reviewed for:
 - Performance implications
 - Security considerations
 - Breaking changes (must be justified)
-
-## Project Structure
-
-```
-mono-framework/
-├── pkg/mono/           # Public API
-├── internal/           # Internal implementations
-├── examples/           # Usage examples
-├── docs/               # Documentation
-│   └── spec/          # Design specifications
-└── tests/              # Integration tests
-```
-
-## Testing Guidelines
-
-### Unit Tests
-
-- File: `*_test.go` in same package
-- Naming: `TestFunctionName`
-- Use subtests with `t.Run()`
-
-### Integration Tests
-
-- Directory: `tests/`
-- Use in-memory NATS for testing
-- Clean up resources in `defer`
-
-### Benchmarks
-
-- File: `*_test.go`
-- Naming: `BenchmarkFunctionName`
-- Focus on performance-critical paths
 
 ## Issue Guidelines
 
