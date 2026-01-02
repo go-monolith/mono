@@ -1,7 +1,7 @@
 //go:build integration
 // +build integration
 
-package integration
+package integration_test
 
 import (
 	"context"
@@ -151,7 +151,7 @@ func (m *analyticsConsumerModule) getReceivedCount() int {
 // TestIntegration_EventEmitterModule tests basic event emitter functionality
 func TestIntegration_EventEmitterModule(t *testing.T) {
 	fw, err := mono.NewMonoApplication(
-		mono.WithCustomLogger(&mockLogger{}),
+		mono.WithCustomLogger(&noOpsLogger{}),
 	)
 	if err != nil {
 		t.Fatalf("Failed to create framework: %v", err)
@@ -219,7 +219,7 @@ func TestIntegration_EventEmitterModule(t *testing.T) {
 // TestIntegration_MultipleEventConsumers tests multiple consumers for the same event
 func TestIntegration_MultipleEventConsumers(t *testing.T) {
 	fw, err := mono.NewMonoApplication(
-		mono.WithCustomLogger(&mockLogger{}),
+		mono.WithCustomLogger(&noOpsLogger{}),
 	)
 	if err != nil {
 		t.Fatalf("Failed to create framework: %v", err)
@@ -283,7 +283,7 @@ func TestIntegration_MultipleEventConsumers(t *testing.T) {
 // TestIntegration_EventDiscovery tests event discovery through EventRegistry
 func TestIntegration_EventDiscovery(t *testing.T) {
 	fw, err := mono.NewMonoApplication(
-		mono.WithCustomLogger(&mockLogger{}),
+		mono.WithCustomLogger(&noOpsLogger{}),
 	)
 	if err != nil {
 		t.Fatalf("Failed to create framework: %v", err)
@@ -370,7 +370,7 @@ func (m *eventDiscoveryModule) RegisterEventConsumers(registry mono.EventRegistr
 // TestIntegration_EventPublishRawHelper tests the PublishRaw helper method
 func TestIntegration_EventPublishRawHelper(t *testing.T) {
 	fw, err := mono.NewMonoApplication(
-		mono.WithCustomLogger(&mockLogger{}),
+		mono.WithCustomLogger(&noOpsLogger{}),
 	)
 	if err != nil {
 		t.Fatalf("Failed to create framework: %v", err)
@@ -431,7 +431,7 @@ func TestIntegration_EventPublishRawHelper(t *testing.T) {
 // TestIntegration_EventVersioning tests multiple versions of the same event
 func TestIntegration_EventVersioning(t *testing.T) {
 	fw, err := mono.NewMonoApplication(
-		mono.WithCustomLogger(&mockLogger{}),
+		mono.WithCustomLogger(&noOpsLogger{}),
 	)
 	if err != nil {
 		t.Fatalf("Failed to create framework: %v", err)

@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Foundation
 
-[@docs/spec/foundation.md](docs/spec/foundation.md) describe the foundational specification of this project, including architecture, core interfaces, and design principles.
+[@docs/spec/foundation.md](docs/spec/foundation.md) describes the foundational specification of this project, including architecture, core interfaces, and design principles.
 
 ## Common Commands
 

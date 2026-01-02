@@ -1,7 +1,7 @@
 //go:build integration
 // +build integration
 
-package integration
+package integration_test
 
 import (
 	"context"
@@ -42,7 +42,7 @@ func (m *testConsumerModule) Stop(_ context.Context) error {
 
 func TestIntegration_FsJetstreamPlugin_BasicOperations(t *testing.T) {
 	fw, err := mono.NewMonoApplication(
-		mono.WithCustomLogger(&mockLogger{}),
+		mono.WithCustomLogger(&noOpsLogger{}),
 		mono.WithJetStreamStorageDir(t.TempDir()),
 	)
 	if err != nil {
@@ -155,7 +155,7 @@ func TestIntegration_FsJetstreamPlugin_BasicOperations(t *testing.T) {
 
 func TestIntegration_FsJetstreamPlugin_PutWithOptions(t *testing.T) {
 	fw, err := mono.NewMonoApplication(
-		mono.WithCustomLogger(&mockLogger{}),
+		mono.WithCustomLogger(&noOpsLogger{}),
 		mono.WithJetStreamStorageDir(t.TempDir()),
 	)
 	if err != nil {
@@ -206,7 +206,7 @@ func TestIntegration_FsJetstreamPlugin_PutWithOptions(t *testing.T) {
 
 func TestIntegration_FsJetstreamPlugin_ListWithPrefix(t *testing.T) {
 	fw, err := mono.NewMonoApplication(
-		mono.WithCustomLogger(&mockLogger{}),
+		mono.WithCustomLogger(&noOpsLogger{}),
 		mono.WithJetStreamStorageDir(t.TempDir()),
 	)
 	if err != nil {
@@ -267,7 +267,7 @@ func TestIntegration_FsJetstreamPlugin_ListWithPrefix(t *testing.T) {
 
 func TestIntegration_FsJetstreamPlugin_MultipleBuckets(t *testing.T) {
 	fw, err := mono.NewMonoApplication(
-		mono.WithCustomLogger(&mockLogger{}),
+		mono.WithCustomLogger(&noOpsLogger{}),
 		mono.WithJetStreamStorageDir(t.TempDir()),
 	)
 	if err != nil {
@@ -324,7 +324,7 @@ func TestIntegration_FsJetstreamPlugin_MultipleBuckets(t *testing.T) {
 
 func TestIntegration_FsJetstreamPlugin_BucketInfo(t *testing.T) {
 	fw, err := mono.NewMonoApplication(
-		mono.WithCustomLogger(&mockLogger{}),
+		mono.WithCustomLogger(&noOpsLogger{}),
 		mono.WithJetStreamStorageDir(t.TempDir()),
 	)
 	if err != nil {

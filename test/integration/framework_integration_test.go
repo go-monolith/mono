@@ -1,7 +1,7 @@
 //go:build integration
 // +build integration
 
-package integration
+package integration_test
 
 import (
 	"context"
@@ -80,23 +80,23 @@ func (m *testModule) wasStopped() bool {
 	return m.stopCalled
 }
 
-// mockLogger for testing
-type mockLogger struct{}
+// noOpsLogger suppresses all logging output for testing
+type noOpsLogger struct{}
 
-func (m *mockLogger) Debug(msg string, args ...any)      {}
-func (m *mockLogger) Info(msg string, args ...any)       {}
-func (m *mockLogger) Warn(msg string, args ...any)       {}
-func (m *mockLogger) Error(msg string, args ...any)      {}
-func (m *mockLogger) With(args ...any) mono.Logger       { return m }
-func (m *mockLogger) WithModule(name string) mono.Logger { return m }
-func (m *mockLogger) WithError(err error) mono.Logger    { return m }
+func (m *noOpsLogger) Debug(msg string, args ...any)      {}
+func (m *noOpsLogger) Info(msg string, args ...any)       {}
+func (m *noOpsLogger) Warn(msg string, args ...any)       {}
+func (m *noOpsLogger) Error(msg string, args ...any)      {}
+func (m *noOpsLogger) With(args ...any) mono.Logger       { return m }
+func (m *noOpsLogger) WithModule(name string) mono.Logger { return m }
+func (m *noOpsLogger) WithError(err error) mono.Logger    { return m }
 
 // mockAuditLogger for testing
 
 func TestIntegration_BasicFrameworkLifecycle(t *testing.T) {
 	// Create framework with embedded NATS
 	fw, err := mono.NewMonoApplication(
-		mono.WithCustomLogger(&mockLogger{}),
+		mono.WithCustomLogger(&noOpsLogger{}),
 	)
 	if err != nil {
 		t.Fatalf("Failed to create framework: %v", err)
@@ -143,7 +143,7 @@ func TestIntegration_BasicFrameworkLifecycle(t *testing.T) {
 
 func TestIntegration_MultiModuleWithDependencies(t *testing.T) {
 	fw, err := mono.NewMonoApplication(
-		mono.WithCustomLogger(&mockLogger{}),
+		mono.WithCustomLogger(&noOpsLogger{}),
 	)
 	if err != nil {
 		t.Fatalf("Failed to create framework: %v", err)
@@ -199,7 +199,7 @@ func TestIntegration_MultiModuleWithDependencies(t *testing.T) {
 
 func TestIntegration_EventPublishSubscribe(t *testing.T) {
 	fw, err := mono.NewMonoApplication(
-		mono.WithCustomLogger(&mockLogger{}),
+		mono.WithCustomLogger(&noOpsLogger{}),
 	)
 	if err != nil {
 		t.Fatalf("Failed to create framework: %v", err)
@@ -255,7 +255,7 @@ func TestIntegration_EventPublishSubscribe(t *testing.T) {
 
 func TestIntegration_GracefulShutdown(t *testing.T) {
 	fw, err := mono.NewMonoApplication(
-		mono.WithCustomLogger(&mockLogger{}),
+		mono.WithCustomLogger(&noOpsLogger{}),
 	)
 	if err != nil {
 		t.Fatalf("Failed to create framework: %v", err)
@@ -303,7 +303,7 @@ func TestIntegration_GracefulShutdown(t *testing.T) {
 
 func TestIntegration_HealthCheck(t *testing.T) {
 	fw, err := mono.NewMonoApplication(
-		mono.WithCustomLogger(&mockLogger{}),
+		mono.WithCustomLogger(&noOpsLogger{}),
 	)
 	if err != nil {
 		t.Fatalf("Failed to create framework: %v", err)

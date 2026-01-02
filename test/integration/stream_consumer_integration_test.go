@@ -1,7 +1,7 @@
 //go:build integration
 // +build integration
 
-package integration
+package integration_test
 
 import (
 	"context"
@@ -124,7 +124,7 @@ func TestStreamConsumerIntegration(t *testing.T) {
 		// Create framework with embedded NATS server with JetStream enabled
 		// Use in-process connection to avoid port conflicts between tests
 		fw, err := mono.NewMonoApplication(
-			mono.WithCustomLogger(&mockLogger{}),
+			mono.WithCustomLogger(&noOpsLogger{}),
 			mono.WithJetStreamStorageDir(t.TempDir()), // Enable JetStream with temp storage
 			mono.WithNATSDontListen(),                 // Disable TCP listening
 			mono.WithNATSInProcessConn(),              // Use in-process connections
@@ -216,7 +216,7 @@ func TestStreamConsumerIntegration(t *testing.T) {
 		// Create framework with embedded NATS server with JetStream enabled
 		// Use in-process connection to avoid port conflicts between tests
 		fw, err := mono.NewMonoApplication(
-			mono.WithCustomLogger(&mockLogger{}),
+			mono.WithCustomLogger(&noOpsLogger{}),
 			mono.WithJetStreamStorageDir(t.TempDir()), // Enable JetStream with temp storage
 			mono.WithNATSDontListen(),                 // Disable TCP listening
 			mono.WithNATSInProcessConn(),              // Use in-process connections
@@ -307,7 +307,7 @@ func TestStreamConsumerIntegration(t *testing.T) {
 		// Create framework with JetStream
 		// Use in-process connection to avoid port conflicts between tests
 		fw, err := mono.NewMonoApplication(
-			mono.WithCustomLogger(&mockLogger{}),
+			mono.WithCustomLogger(&noOpsLogger{}),
 			mono.WithJetStreamStorageDir(t.TempDir()), // Enable JetStream with temp storage
 			mono.WithNATSDontListen(),                 // Disable TCP listening
 			mono.WithNATSInProcessConn(),              // Use in-process connections

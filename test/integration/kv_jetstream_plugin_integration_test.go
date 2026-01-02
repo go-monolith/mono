@@ -1,6 +1,7 @@
 //go:build integration
+// +build integration
 
-package integration
+package integration_test
 
 import (
 	"context"
@@ -52,7 +53,7 @@ func setupKVTestFramework(t *testing.T, buckets []kvjetstream.BucketConfig) (mon
 	t.Helper()
 
 	fw, err := mono.NewMonoApplication(
-		mono.WithCustomLogger(&mockLogger{}),
+		mono.WithCustomLogger(&noOpsLogger{}),
 		mono.WithJetStreamStorageDir(t.TempDir()),
 	)
 	if err != nil {
@@ -494,7 +495,7 @@ func TestIntegration_KVJetstreamPlugin_WatchAll(t *testing.T) {
 
 func TestIntegration_KVJetstreamPlugin_ConsumerModuleIntegration(t *testing.T) {
 	fw, err := mono.NewMonoApplication(
-		mono.WithCustomLogger(&mockLogger{}),
+		mono.WithCustomLogger(&noOpsLogger{}),
 		mono.WithJetStreamStorageDir(t.TempDir()),
 	)
 	if err != nil {

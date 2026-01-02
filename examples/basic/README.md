@@ -147,6 +147,6 @@ After understanding this basic example, explore:
 
 ## See Also
 
-- [Design Document](../../docs/spec/monolith-framework/design.md)
+- [Design Document](../../docs/spec/foundation.md)
 - [Module Interface Documentation](../../pkg/mono/module.go)
 - [Framework API Documentation](../../pkg/mono/framework.go)

@@ -1,7 +1,7 @@
 //go:build integration
 // +build integration
 
-package integration
+package integration_test
 
 import (
 	"context"
@@ -192,7 +192,7 @@ func TestIntegration_PluginsStartBeforeMiddleware(t *testing.T) {
 	startOrder := []string{}
 
 	fw, err := mono.NewMonoApplication(
-		mono.WithCustomLogger(&mockLogger{}),
+		mono.WithCustomLogger(&noOpsLogger{}),
 	)
 	if err != nil {
 		t.Fatalf("Failed to create framework: %v", err)
@@ -256,7 +256,7 @@ func TestIntegration_PluginsStopAfterMiddlewareAndModules(t *testing.T) {
 	stopOrder := []string{}
 
 	fw, err := mono.NewMonoApplication(
-		mono.WithCustomLogger(&mockLogger{}),
+		mono.WithCustomLogger(&noOpsLogger{}),
 	)
 	if err != nil {
 		t.Fatalf("Failed to create framework: %v", err)
@@ -322,7 +322,7 @@ func TestIntegration_PluginsStopAfterMiddlewareAndModules(t *testing.T) {
 
 func TestIntegration_PluginContainerInjection(t *testing.T) {
 	fw, err := mono.NewMonoApplication(
-		mono.WithCustomLogger(&mockLogger{}),
+		mono.WithCustomLogger(&noOpsLogger{}),
 	)
 	if err != nil {
 		t.Fatalf("Failed to create framework: %v", err)
@@ -359,7 +359,7 @@ func TestIntegration_PluginContainerInjection(t *testing.T) {
 
 func TestIntegration_UsePluginModuleInjection(t *testing.T) {
 	fw, err := mono.NewMonoApplication(
-		mono.WithCustomLogger(&mockLogger{}),
+		mono.WithCustomLogger(&noOpsLogger{}),
 	)
 	if err != nil {
 		t.Fatalf("Failed to create framework: %v", err)
@@ -401,7 +401,7 @@ func TestIntegration_UsePluginModuleInjection(t *testing.T) {
 
 func TestIntegration_UsePluginModuleReceivesAllPlugins(t *testing.T) {
 	fw, err := mono.NewMonoApplication(
-		mono.WithCustomLogger(&mockLogger{}),
+		mono.WithCustomLogger(&noOpsLogger{}),
 	)
 	if err != nil {
 		t.Fatalf("Failed to create framework: %v", err)
@@ -452,7 +452,7 @@ func TestIntegration_UsePluginModuleReceivesAllPlugins(t *testing.T) {
 
 func TestIntegration_MultiplePluginsWithSameModuleName(t *testing.T) {
 	fw, err := mono.NewMonoApplication(
-		mono.WithCustomLogger(&mockLogger{}),
+		mono.WithCustomLogger(&noOpsLogger{}),
 	)
 	if err != nil {
 		t.Fatalf("Failed to create framework: %v", err)
@@ -517,7 +517,7 @@ func TestIntegration_MultiplePluginsWithSameModuleName(t *testing.T) {
 
 func TestIntegration_PluginAccessAfterStop(t *testing.T) {
 	fw, err := mono.NewMonoApplication(
-		mono.WithCustomLogger(&mockLogger{}),
+		mono.WithCustomLogger(&noOpsLogger{}),
 	)
 	if err != nil {
 		t.Fatalf("Failed to create framework: %v", err)
@@ -554,7 +554,7 @@ func TestIntegration_PluginAccessAfterStop(t *testing.T) {
 
 func TestIntegration_RegisterPluginAfterStart(t *testing.T) {
 	fw, err := mono.NewMonoApplication(
-		mono.WithCustomLogger(&mockLogger{}),
+		mono.WithCustomLogger(&noOpsLogger{}),
 	)
 	if err != nil {
 		t.Fatalf("Failed to create framework: %v", err)
@@ -578,7 +578,7 @@ func TestIntegration_RegisterPluginAfterStart(t *testing.T) {
 
 func TestIntegration_DuplicatePluginAlias(t *testing.T) {
 	fw, err := mono.NewMonoApplication(
-		mono.WithCustomLogger(&mockLogger{}),
+		mono.WithCustomLogger(&noOpsLogger{}),
 	)
 	if err != nil {
 		t.Fatalf("Failed to create framework: %v", err)
