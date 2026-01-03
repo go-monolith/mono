@@ -3,7 +3,7 @@
 Welcome to the Monolith Framework documentation. This framework enables you to build modular applications as a single deployable unit with clear module boundaries and event-driven communication.
 
 {% hint style="info" %}
-These docs are for **Monolith Framework v1.x**.
+These docs are for **Monolith Framework v1.x**. [GitHub Repository](https://github.com/go-monolith/mono)
 {% endhint %}
 
 ## What is Monolith Framework?

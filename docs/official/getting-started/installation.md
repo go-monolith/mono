@@ -103,7 +103,7 @@ Import the framework using:
 import "github.com/go-monolith/mono"
 ```
 
-The import path follows Go's versioning convention. The `/v1` suffix ensures you get version 1.x releases.
+The import path follows Go's versioning convention.
 
 ## Troubleshooting
 
@@ -143,9 +143,6 @@ If you see import errors, ensure you're using the correct import path:
 
 ```go
 // Correct
-import "github.com/go-monolith/mono"
-
-// Wrong (missing /v1)
 import "github.com/go-monolith/mono"
 ```
 

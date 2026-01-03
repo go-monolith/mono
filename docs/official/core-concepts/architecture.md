@@ -17,8 +17,8 @@ The framework is organized into three logical layers:
 ┌────────────────────────────────────────────────────────┐
 │                  Framework Layer                        │
 │  ┌──────────────────┬───────────────┬─────────────────┐ │
-│  │ ServiceContainer │   EventBus    │     Logger      │ │
-│  │  (DI, Services)  │  (Pub/Sub)    │  (Structured)   │ │
+│  │ ServiceContainer │   EventBus    │  EventRegistry  │ │
+│  │  (DI, Services)  │  (Pub/Sub)    │ (EDA,Consumers) │ │
 │  └──────────────────┴───────────────┴─────────────────┘ │
 └────────────────────────────────────────────────────────┘
                            ↑
@@ -476,7 +476,7 @@ The framework is designed for monolith deployment:
 ## Summary
 
 - **Layered**: Application, Framework, Infrastructure
-- **Component-based**: ServiceContainer, EventBus, Logger, NATS
+- **Component-based**: ServiceContainer, EventBus, EventRegistry, NATS
 - **Module-centric**: Modules are the organizational unit
 - **Message-driven**: NATS pub/sub for communication
 - **Managed lifecycle**: Framework handles startup and shutdown
