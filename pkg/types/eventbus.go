@@ -12,7 +12,7 @@ import (
 // The EventBus abstraction provides high-level messaging patterns including
 // publish/subscribe, request/reply, and queue group subscriptions.
 //
-// See docs/spec/monolith-framework/design.md Event Bus Module section.
+// See docs/spec/foundation.md for detailed design documentation.
 type EventBus interface {
 	// Publish publishes data to a subject (fire-and-forget)
 	Publish(subject string, data []byte) error

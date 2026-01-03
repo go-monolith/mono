@@ -9,7 +9,7 @@ import (
 // MonoFramework is the main entry point for the monolith framework.
 // It manages module lifecycle, configuration, and inter-module communication.
 //
-// See docs/spec/monolith-framework/design.md for detailed design documentation.
+// See docs/spec/foundation.md for detailed design documentation.
 type MonoFramework interface {
 	// Register adds a module to the framework
 	Register(module Module) error

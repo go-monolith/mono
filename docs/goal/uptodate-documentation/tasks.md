@@ -81,3 +81,46 @@ Constraints: [constraints.md](./constraints.md)
   - Reference: Interface definition at `pkg/types/event.go:476`
   - **Addresses Success Criterion**: Every public API has comprehensive godoc comments explaining purpose, parameters, return values
   - _Requirements: Complete API documentation for EventRegistry similar to ServiceContainer_
+
+<!-- New tasks added on 2026-01-03 - Address remaining broken documentation references -->
+
+- [x] 7. Fix broken godoc references to non-existent design.md
+
+  - Update godoc comments in `pkg/types/` files that reference `docs/spec/monolith-framework/design.md`
+  - Files to update:
+    - `pkg/types/framework.go:12` - change to `docs/spec/foundation.md`
+    - `pkg/types/module.go:19` - change to `docs/spec/foundation.md`
+    - `pkg/types/container.go:17` - change to `docs/spec/foundation.md`
+    - `pkg/types/eventbus.go:15` - change to `docs/spec/foundation.md`
+    - `pkg/types/logger.go:8` - change to `docs/spec/foundation.md`
+    - `pkg/types/middleware.go:25` - change to `docs/spec/foundation.md`
+  - Verify `docs/spec/foundation.md` exists and is the correct target
+  - These are godoc comment changes only (no code logic changes)
+  - **Addresses Success Criterion**: All documentation matches the current implementation with no outdated information
+  - _Requirements: Accurate godoc references_
+
+- [x] 8. Fix broken links in analytics example README
+
+  - Update `examples/analytics/README.md` line 356: change `../../docs/spec/monolith-framework/design.md` to `../../docs/spec/foundation.md`
+  - Update `examples/analytics/README.md` line 357: change `../../pkg/mono/module.go` to `../../pkg/types/module.go`
+  - Verify all fixed links point to existing files
+  - **Addresses Success Criterion**: All documentation matches the current implementation with no outdated information
+  - _Requirements: Accurate documentation links_
+
+- [x] 9. Fix broken links in benchmark README
+
+  - Update `bench/README.md` line 328: change `../docs/spec/monolith-framework/requirements.md` to `../docs/spec/foundation.md`
+  - Update `bench/README.md` line 329: change `../docs/spec/monolith-framework/design.md#performance-considerations` to `../docs/spec/foundation.md#performance-targets`
+  - Verify all fixed links point to existing files/sections
+  - **Addresses Success Criterion**: All documentation matches the current implementation with no outdated information
+  - _Requirements: Accurate documentation links_
+
+- [-] 10. Verify and commit all documentation fixes
+
+  - Run `git status` to review all pending documentation changes
+  - Verify each change is correct and consistent
+  - Stage all documentation changes together
+  - Create commit with descriptive message
+  - **Addresses Success Criterion**: All documentation matches the current implementation
+  - _Dependencies: 7, 8, 9_
+  - _Requirements: Documentation consistency across all files_

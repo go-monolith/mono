@@ -5,7 +5,7 @@ package types
 // The Logger interface wraps log/slog for framework-wide structured logging
 // with module-specific context.
 //
-// See docs/spec/monolith-framework/design.md Infrastructure/Logger Module section.
+// See docs/spec/foundation.md for detailed design documentation.
 type Logger interface {
 	// Debug logs a debug-level message
 	Debug(msg string, args ...any)

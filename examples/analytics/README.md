@@ -353,5 +353,5 @@ Use NATS services (RequestReply/QueueGroup) when you need distribution or servic
 
 - [Basic Example](../basic/) - Simple single-module introduction
 - [Multi-Module Example](../multi-module/) - RequestReply and QueueGroup patterns
-- [Design Document](../../docs/spec/monolith-framework/design.md) - Complete framework design
-- [Module Interface Documentation](../../pkg/mono/module.go) - All module interfaces
+- [Design Document](../../docs/spec/foundation.md) - Complete framework design
+- [Module Interface Documentation](../../pkg/types/module.go) - All module interfaces

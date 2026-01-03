@@ -22,7 +22,7 @@ import (
 //   - Handler wrapping: Wrap service handlers for auto-encoding/decoding
 //   - Config modification: Override service configuration
 //
-// See docs/spec/monolith-framework/design.md Middleware Module section.
+// See docs/spec/foundation.md for detailed design documentation.
 type MiddlewareModule interface {
 	Module
 

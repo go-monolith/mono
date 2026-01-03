@@ -14,7 +14,7 @@ import (
 // - RequestReply services: Synchronous NATS request/response pattern
 // - Queue Group services: Asynchronous NATS queue subscription pattern
 //
-// See docs/spec/monolith-framework/design.md Service Container Module section.
+// See docs/spec/foundation.md for detailed design documentation.
 type ServiceContainer interface {
 	// BindModule binds this container to a module
 	BindModule(module Module) error
