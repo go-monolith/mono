@@ -46,7 +46,7 @@ Refer to the original framework features spec in `docs/spec/` for requirements, 
 ## Importance Points
 <importance>
 - In this framework type interface `mono.MonoApplication` is an alias for `types.MonoFramework`. Must use `MonoApplication` in examples and public documentation.
-- **Import Pattern**: Use the root package import `"github.com/go-monolith/mono/v1"` when writing integration tests in `test/integration/` and examples in `examples/`. Helper functions are available from `github.com/go-monolith/mono/v1/pkg/helper`.
+- **Import Pattern**: Use the root package import `"github.com/go-monolith/mono"` when writing integration tests in `test/integration/` and examples in `examples/`. Helper functions are available from `github.com/go-monolith/mono/pkg/helper`.
 - When writing code in `internal/`, you MUST use types from `pkg/types` package to avoid circular dependencies. Strictly no import of root package in `internal/`.
 - DO NOT add new alias in `/exports.go` unless explicitly approved by the project maintainer.
 </importance>

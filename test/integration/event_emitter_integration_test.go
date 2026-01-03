@@ -11,8 +11,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/go-monolith/mono/v1"
-	"github.com/go-monolith/mono/v1/pkg/helper"
+	"github.com/go-monolith/mono"
+	"github.com/go-monolith/mono/pkg/helper"
 )
 
 // OrderCreatedEvent is the event payload for order creation

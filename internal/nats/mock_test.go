@@ -4,7 +4,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/go-monolith/mono/v1/pkg/types"
+	"github.com/go-monolith/mono/pkg/types"
 )
 
 // mockLogger implements types.Logger interface for testing.

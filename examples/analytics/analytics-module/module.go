@@ -12,8 +12,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/go-monolith/mono/v1"
-	kvjetstream "github.com/go-monolith/mono/v1/plugin/kv-jetstream"
+	"github.com/go-monolith/mono"
+	kvjetstream "github.com/go-monolith/mono/plugin/kv-jetstream"
 )
 
 // NAME is the unique identifier for the analytics module.

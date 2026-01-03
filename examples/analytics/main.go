@@ -10,10 +10,10 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/go-monolith/mono/v1"
-	kvjetstream "github.com/go-monolith/mono/v1/plugin/kv-jetstream"
+	"github.com/go-monolith/mono"
+	kvjetstream "github.com/go-monolith/mono/plugin/kv-jetstream"
 
-	analytics "github.com/go-monolith/mono/v1/examples/analytics/analytics-module"
+	analytics "github.com/go-monolith/mono/examples/analytics/analytics-module"
 )
 
 func main() {

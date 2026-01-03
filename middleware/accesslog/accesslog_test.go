@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/go-monolith/mono/v1/pkg/types"
+	"github.com/go-monolith/mono/pkg/types"
 )
 
 // syncWriter wraps bytes.Buffer with mutex for concurrent tests.

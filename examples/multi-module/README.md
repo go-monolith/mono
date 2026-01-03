@@ -408,5 +408,5 @@ Ideas for learning and experimentation:
 
 - [Basic Example](../basic/) - Simple single-module example
 - [Channel Services Example](../channel-services/) - Channel-based communication patterns (if implemented)
-- [Design Document](../../docs/spec/monolith-framework/design.md) - Complete framework design
-- [Module Interface Documentation](../../pkg/mono/module.go) - All module interfaces
+- [Design Document](../../docs/spec/foundation.md) - Complete framework design
+- [Module Interface Documentation](../../pkg/types/module.go) - All module interfaces

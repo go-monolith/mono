@@ -5,9 +5,9 @@ import (
 	"os"
 	"time"
 
-	internallogger "github.com/go-monolith/mono/v1/internal/logger"
-	"github.com/go-monolith/mono/v1/internal/nats"
-	"github.com/go-monolith/mono/v1/pkg/types"
+	internallogger "github.com/go-monolith/mono/internal/logger"
+	"github.com/go-monolith/mono/internal/nats"
+	"github.com/go-monolith/mono/pkg/types"
 )
 
 // CreateFrameworkAppInstance creates a new MonoFramework instance with the given configuration.

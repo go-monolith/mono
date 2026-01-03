@@ -29,7 +29,7 @@ The Mono Framework implements a modular monolith architecture where all modules 
                     |                    |                      |
                     |  +------------------------------------+  |
                     |  |         Framework Core              |  |
-                    |  |  ServiceContainer | EventBus |Logger|  |
+                    |  |  ServiceContainer | EventBus |EventRegistry|  |
                     |  +------------------------------------+  |
                     |                    |                      |
                     |  +------------------------------------+  |
@@ -47,7 +47,7 @@ The Mono Framework implements a modular monolith architecture where all modules 
 | **Module** | Self-contained unit of business logic with lifecycle management |
 | **ServiceContainer** | Dependency injection and service registration per module |
 | **EventBus** | NATS-backed messaging abstraction for pub/sub |
-| **Logger** | Structured logging with module context |
+| **EventRegistry** | Event definitions and consumer registrations (EDA) |
 | **Embedded NATS** | In-process message broker with optional JetStream |
 
 ## Layered Architecture
@@ -73,12 +73,12 @@ The framework follows a strict layered architecture with clear separation of con
 |                        Framework Layer                                 |
 |                                                                        |
 |  +-------------------+  +------------------+  +---------------------+ |
-|  | ServiceContainer  |  |     EventBus     |  |       Logger        | |
+|  | ServiceContainer  |  |     EventBus     |  |   EventRegistry     | |
 |  |                   |  |                  |  |                     | |
-|  | - Channel         |  | - Publish        |  | - Debug/Info/Warn   | |
-|  | - RequestReply    |  | - Subscribe      |  | - Error             | |
-|  | - QueueGroup      |  | - Request        |  | - WithModule()      | |
-|  | - StreamConsumer  |  | - QueueSubscribe |  | - WithComponent()   | |
+|  | - Channel         |  | - Publish        |  | - RegisterEvent     | |
+|  | - RequestReply    |  | - Subscribe      |  | - GetEventByName    | |
+|  | - QueueGroup      |  | - Request        |  | - RegisterConsumer  | |
+|  | - StreamConsumer  |  | - QueueSubscribe |  | - StreamConsumer    | |
 |  +-------------------+  +------------------+  +---------------------+ |
 |                                                                        |
 |  +-------------------+  +------------------+  +---------------------+ |
@@ -554,4 +554,4 @@ Examples:
 - [Foundation Specification](../spec/foundation.md) - Core principles and detailed specifications
 - [README](../../README.md) - Quick start and overview
 - [Examples](../../examples/) - Runnable example applications
-- [API Reference](https://pkg.go.dev/github.com/go-monolith/mono/v1) - Go documentation
+- [API Reference](https://pkg.go.dev/github.com/go-monolith/mono) - Go documentation

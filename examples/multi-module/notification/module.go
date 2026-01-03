@@ -11,10 +11,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/go-monolith/mono/v1"
-	"github.com/go-monolith/mono/v1/examples/multi-module/events"
-	"github.com/go-monolith/mono/v1/pkg/helper"
-	"github.com/go-monolith/mono/v1/pkg/types"
+	"github.com/go-monolith/mono"
+	"github.com/go-monolith/mono/examples/multi-module/events"
+	"github.com/go-monolith/mono/pkg/helper"
+	"github.com/go-monolith/mono/pkg/types"
 )
 
 // NAME is the unique identifier for the notification module.

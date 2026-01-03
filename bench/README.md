@@ -325,5 +325,5 @@ When adding new benchmarks:
 
 - [Go Benchmark Documentation](https://pkg.go.dev/testing#hdr-Benchmarks)
 - [NATS Benchmarking Guide](https://docs.nats.io/running-a-nats-service/nats_admin/monitoring#benchmarking)
-- [Mono-Framework Requirements](../docs/spec/monolith-framework/requirements.md)
-- [Performance Best Practices](../docs/spec/monolith-framework/design.md#performance-considerations)
+- [Foundation Specification](../docs/spec/foundation.md)
+- [Performance Targets](../docs/spec/foundation.md#performance-targets)

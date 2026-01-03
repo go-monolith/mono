@@ -42,7 +42,7 @@ JetStreamBackend (struct)       ← JetStream ObjectStore implementation
 Import the plugin in your application:
 
 ```go
-import "github.com/go-monolith/mono/v1/plugin/fs-jetstream"
+import "github.com/go-monolith/mono/plugin/fs-jetstream"
 ```
 
 ## Quick Start
@@ -56,8 +56,8 @@ import (
     "context"
     "time"
 
-    mono "github.com/go-monolith/mono/v1"
-    fsjetstream "github.com/go-monolith/mono/v1/plugin/fs-jetstream"
+    mono "github.com/go-monolith/mono"
+    fsjetstream "github.com/go-monolith/mono/plugin/fs-jetstream"
 )
 
 func main() {

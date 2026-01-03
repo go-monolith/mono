@@ -12,8 +12,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/go-monolith/mono/v1"
-	"github.com/go-monolith/mono/v1/middleware/audit"
+	"github.com/go-monolith/mono"
+	"github.com/go-monolith/mono/middleware/audit"
 )
 
 // TestIntegration_ServiceContainer tests service container functionality

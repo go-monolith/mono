@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/go-monolith/mono/v1/pkg/types"
+	"github.com/go-monolith/mono/pkg/types"
 )
 
 // Sentinel errors for common error cases

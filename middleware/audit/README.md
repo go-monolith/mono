@@ -19,8 +19,8 @@ package main
 import (
     "os"
 
-    "github.com/go-monolith/mono/v1/middleware/audit"
-    "github.com/go-monolith/mono/v1"
+    "github.com/go-monolith/mono/middleware/audit"
+    "github.com/go-monolith/mono"
 )
 
 func main() {
@@ -165,7 +165,7 @@ func (m *MyModule) handleSensitiveOperation(ctx context.Context) error {
 Use the `VerifyChain` function to detect tampering:
 
 ```go
-import "github.com/go-monolith/mono/v1/middleware/audit"
+import "github.com/go-monolith/mono/middleware/audit"
 
 // Read audit log entries
 entries := readEntriesFromFile("audit.log")

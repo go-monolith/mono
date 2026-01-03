@@ -101,7 +101,7 @@ This example demonstrates two ways to register event consumers:
 ### Prerequisites
 
 - Go 1.25 or higher
-- Framework installed: `go get github.com/go-monolith/mono/v1`
+- Framework installed: `go get github.com/go-monolith/mono`
 
 ### Run the Example
 
@@ -255,7 +255,7 @@ func (m *NotificationModule) SetPlugin(alias string, plugin mono.PluginModule) {
 
 - Review the [Core Concepts > Service Communication](../../docs/official/core-concepts/communication.md) guide for other communication patterns
 - Explore the [multi-module example](../multi-module/README.md) for Request-Reply and Queue Group patterns
-- Check the [API documentation](https://pkg.go.dev/github.com/go-monolith/mono/v1) for detailed reference
+- Check the [API documentation](https://pkg.go.dev/github.com/go-monolith/mono) for detailed reference
 
 ## What You Learned
 

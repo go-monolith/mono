@@ -5,7 +5,7 @@ import (
 	"log/slog"
 	"os"
 
-	"github.com/go-monolith/mono/v1/pkg/types"
+	"github.com/go-monolith/mono/pkg/types"
 )
 
 // slogLogger wraps slog.Logger to implement the types.Logger interface.

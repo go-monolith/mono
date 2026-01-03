@@ -9,12 +9,12 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/go-monolith/mono/v1"
-	"github.com/go-monolith/mono/v1/examples/multi-module/events"
-	"github.com/go-monolith/mono/v1/examples/multi-module/inventory"
-	"github.com/go-monolith/mono/v1/examples/multi-module/notification"
-	"github.com/go-monolith/mono/v1/examples/multi-module/payment"
-	"github.com/go-monolith/mono/v1/pkg/helper"
+	"github.com/go-monolith/mono"
+	"github.com/go-monolith/mono/examples/multi-module/events"
+	"github.com/go-monolith/mono/examples/multi-module/inventory"
+	"github.com/go-monolith/mono/examples/multi-module/notification"
+	"github.com/go-monolith/mono/examples/multi-module/payment"
+	"github.com/go-monolith/mono/pkg/helper"
 )
 
 // NAME is the unique identifier for the order module.

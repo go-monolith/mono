@@ -4,7 +4,7 @@ import (
 	"errors"
 	"fmt"
 
-	monoerrors "github.com/go-monolith/mono/v1/pkg/errors"
+	monoerrors "github.com/go-monolith/mono/pkg/errors"
 )
 
 // ExampleIsServiceError demonstrates checking for service errors.

@@ -5,8 +5,8 @@ import (
 	"io"
 	"time"
 
-	"github.com/go-monolith/mono/v1/pkg/errors"
-	"github.com/go-monolith/mono/v1/pkg/types"
+	"github.com/go-monolith/mono/pkg/errors"
+	"github.com/go-monolith/mono/pkg/types"
 )
 
 // MonoFrameworkOption is a functional option for configuring the framework.

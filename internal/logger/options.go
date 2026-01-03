@@ -5,7 +5,7 @@ import (
 	"io"
 	"log/slog"
 
-	"github.com/go-monolith/mono/v1/pkg/types"
+	"github.com/go-monolith/mono/pkg/types"
 )
 
 // WithLogLevel sets the log level.

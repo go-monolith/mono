@@ -26,8 +26,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/go-monolith/mono/v1/middleware/requestid"
-	"github.com/go-monolith/mono/v1/pkg/types"
+	"github.com/go-monolith/mono/middleware/requestid"
+	"github.com/go-monolith/mono/pkg/types"
 )
 
 // channelProxy manages the proxy channels and goroutines for a channel service.

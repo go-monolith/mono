@@ -114,7 +114,7 @@ type OrderItem struct {
 ```go
 package order
 
-import "github.com/go-monolith/mono/v1"
+import "github.com/go-monolith/mono"
 
 type OrderCreatedEvent struct {
     OrderID    string
@@ -142,7 +142,7 @@ import (
     "log"
     "time"
 
-    "github.com/go-monolith/mono/v1"
+    "github.com/go-monolith/mono"
     "my-mono-app/config"
     "my-mono-app/modules/order"
     "my-mono-app/modules/payment"
@@ -192,7 +192,7 @@ import (
     "strconv"
     "time"
 
-    "github.com/go-monolith/mono/v1"
+    "github.com/go-monolith/mono"
 )
 
 type Config struct {
@@ -272,7 +272,7 @@ import (
     "testing"
     "time"
 
-    "github.com/go-monolith/mono/v1"
+    "github.com/go-monolith/mono"
     "my-mono-app/modules/order"
 )
 

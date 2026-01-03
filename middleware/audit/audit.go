@@ -25,8 +25,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/go-monolith/mono/v1/internal/logger"
-	"github.com/go-monolith/mono/v1/pkg/types"
+	"github.com/go-monolith/mono/internal/logger"
+	"github.com/go-monolith/mono/pkg/types"
 )
 
 // AuditModule implements types.MiddlewareModule to provide tamper-evident audit logging.

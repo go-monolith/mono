@@ -199,7 +199,7 @@ func (m *OrderModule) createOrder(ctx context.Context, order *Order) error {
 The framework provides helper functions to simplify typed service calls:
 
 ```go
-import "github.com/go-monolith/mono/v1/pkg/helper"
+import "github.com/go-monolith/mono/pkg/helper"
 
 func (m *OrderModule) createOrder(ctx context.Context, order *Order) error {
     var response PaymentResponse
@@ -338,7 +338,7 @@ type TypedEventStreamConsumerHandler[T any] func(ctx context.Context, events []T
 **Example:**
 
 ```go
-import "github.com/go-monolith/mono/v1/pkg/helper"
+import "github.com/go-monolith/mono/pkg/helper"
 
 func (m *AuditModule) RegisterEventConsumers(registry mono.EventRegistry) error {
     config := mono.StreamConsumerConfig{

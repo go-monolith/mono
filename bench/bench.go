@@ -6,7 +6,7 @@ import (
 	"context"
 	"sync"
 
-	mono "github.com/go-monolith/mono/v1"
+	mono "github.com/go-monolith/mono"
 )
 
 // DefaultPayloadSize is the standard payload size for benchmarks (256 bytes).

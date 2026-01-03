@@ -347,8 +347,8 @@ The framework provides sentinel errors. Check for specific failures:
 ```go
 import (
     "errors"
-    mono "github.com/go-monolith/mono/v1"
-    monierr "github.com/go-monolith/mono/v1/pkg/errors"
+    mono "github.com/go-monolith/mono"
+    monierr "github.com/go-monolith/mono/pkg/errors"
 )
 
 func (m *OrderModule) getDependency(ctx context.Context) (PaymentService, error) {

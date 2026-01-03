@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"sync/atomic"
 
-	"github.com/go-monolith/mono/v1"
+	"github.com/go-monolith/mono"
 )
 
 // TrackingModule implements the tracking module that emits order-related events.

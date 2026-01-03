@@ -6,7 +6,7 @@ package events
 import (
 	"time"
 
-	"github.com/go-monolith/mono/v1/pkg/helper"
+	"github.com/go-monolith/mono/pkg/helper"
 )
 
 // OrderCreatedEvent represents an event published when an order is created.

@@ -1,8 +1,8 @@
 package registry
 
 import (
-	monoerrors "github.com/go-monolith/mono/v1/pkg/errors"
-	"github.com/go-monolith/mono/v1/pkg/types"
+	monoerrors "github.com/go-monolith/mono/pkg/errors"
+	"github.com/go-monolith/mono/pkg/types"
 )
 
 // ResolveDependencies resolves module dependencies and returns modules in topological order.

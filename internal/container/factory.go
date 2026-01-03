@@ -1,7 +1,7 @@
 package container
 
 import (
-	"github.com/go-monolith/mono/v1/pkg/types"
+	"github.com/go-monolith/mono/pkg/types"
 )
 
 // New creates a new ServiceContainer instance.

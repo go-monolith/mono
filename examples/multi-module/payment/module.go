@@ -9,8 +9,8 @@ import (
 	"math/rand"
 	"time"
 
-	"github.com/go-monolith/mono/v1"
-	"github.com/go-monolith/mono/v1/pkg/helper"
+	"github.com/go-monolith/mono"
+	"github.com/go-monolith/mono/pkg/helper"
 )
 
 // NAME is the unique identifier for the payment module.

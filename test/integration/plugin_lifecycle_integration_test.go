@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/go-monolith/mono/v1"
+	"github.com/go-monolith/mono"
 )
 
 // testPluginModule implements mono.PluginModule for integration testing

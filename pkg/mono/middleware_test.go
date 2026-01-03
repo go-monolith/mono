@@ -8,9 +8,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/go-monolith/mono/v1"
-	"github.com/go-monolith/mono/v1/internal/app"
-	"github.com/go-monolith/mono/v1/middleware/audit"
+	"github.com/go-monolith/mono"
+	"github.com/go-monolith/mono/internal/app"
+	"github.com/go-monolith/mono/middleware/audit"
 )
 
 // testModule implements a simple module for testing middleware hooks

@@ -7,8 +7,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/go-monolith/mono/v1/internal/nats"
-	"github.com/go-monolith/mono/v1/pkg/types"
+	"github.com/go-monolith/mono/internal/nats"
+	"github.com/go-monolith/mono/pkg/types"
 )
 
 func TestCreateFrameworkAppInstance_WithNilLogger(t *testing.T) {

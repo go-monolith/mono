@@ -5,7 +5,7 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/go-monolith/mono/v1/pkg/storage"
+	"github.com/go-monolith/mono/pkg/storage"
 )
 
 // KVStorageAdapter implements KVStoragePort by wrapping a storage.Storage backend.

@@ -114,8 +114,8 @@ import (
     "encoding/json"
     "fmt"
 
-    "github.com/go-monolith/mono/v1"
-    "github.com/go-monolith/mono/v1/pkg/helper"
+    "github.com/go-monolith/mono"
+    "github.com/go-monolith/mono/pkg/helper"
 )
 
 // inventoryAdapter implements InventoryAdapterPort
@@ -362,7 +362,7 @@ package events
 
 import (
     "time"
-    "github.com/go-monolith/mono/v1/pkg/helper"
+    "github.com/go-monolith/mono/pkg/helper"
 )
 
 type OrderCreatedEvent struct {
@@ -572,8 +572,8 @@ import (
     "encoding/json"
     "fmt"
 
-    "github.com/go-monolith/mono/v1"
-    "github.com/go-monolith/mono/v1/pkg/helper"
+    "github.com/go-monolith/mono"
+    "github.com/go-monolith/mono/pkg/helper"
 )
 
 type inventoryAdapter struct {
@@ -608,8 +608,8 @@ import (
     "fmt"
     "sync"
 
-    "github.com/go-monolith/mono/v1"
-    "github.com/go-monolith/mono/v1/pkg/helper"
+    "github.com/go-monolith/mono"
+    "github.com/go-monolith/mono/pkg/helper"
 )
 
 const NAME = "inventory"

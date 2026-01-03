@@ -6,8 +6,8 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/go-monolith/mono/v1/internal/registry"
-	"github.com/go-monolith/mono/v1/pkg/types"
+	"github.com/go-monolith/mono/internal/registry"
+	"github.com/go-monolith/mono/pkg/types"
 )
 
 // mockPluginModule implements types.PluginModule for testing

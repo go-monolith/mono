@@ -9,11 +9,11 @@ import (
 	"sync"
 	"time"
 
-	"github.com/go-monolith/mono/v1/internal/eventbus"
-	"github.com/go-monolith/mono/v1/internal/lifecycle"
-	"github.com/go-monolith/mono/v1/internal/nats"
-	"github.com/go-monolith/mono/v1/internal/registry"
-	"github.com/go-monolith/mono/v1/pkg/types"
+	"github.com/go-monolith/mono/internal/eventbus"
+	"github.com/go-monolith/mono/internal/lifecycle"
+	"github.com/go-monolith/mono/internal/nats"
+	"github.com/go-monolith/mono/internal/registry"
+	"github.com/go-monolith/mono/pkg/types"
 )
 
 // frameworkApplication implements the types.MonoFramework interface.

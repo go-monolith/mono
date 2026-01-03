@@ -16,7 +16,7 @@ import (
 //
 // Module implementations must be safe for concurrent access to their exported methods.
 //
-// See docs/spec/monolith-framework/design.md Module Registry Module section.
+// See docs/spec/foundation.md for detailed design documentation.
 type Module interface {
 	// Name returns a unique identifier for the module.
 	// The name must be unique across all registered modules and should use kebab-case

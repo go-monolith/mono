@@ -1,6 +1,6 @@
 # Mono Framework
 
-[![Go Reference](https://pkg.go.dev/badge/github.com/go-monolith/mono/v1.svg)](https://pkg.go.dev/github.com/go-monolith/mono/v1)
+[![Go Reference](https://pkg.go.dev/badge/github.com/go-monolith/mono.svg)](https://pkg.go.dev/github.com/go-monolith/mono)
 [![Go Version](https://img.shields.io/badge/go-1.25+-blue.svg)](https://golang.org/dl/)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 [![Coverage](https://img.shields.io/badge/coverage-90.1%25-brightgreen.svg)](docs/official/extra/code-coverage.md)
@@ -25,7 +25,7 @@ Mono Framework enables building applications as a collection of loosely-coupled 
 ### Installation
 
 ```bash
-go get github.com/go-monolith/mono/v1
+go get github.com/go-monolith/mono
 ```
 
 ### Basic Example
@@ -38,7 +38,7 @@ import (
     "log"
     "time"
 
-    "github.com/go-monolith/mono/v1"
+    "github.com/go-monolith/mono"
 )
 
 // HelloModule implements a simple module
@@ -81,8 +81,8 @@ func main() {
 +-----------------------------------------------------------------------+
 |                        Framework Layer                                 |
 |  +------------------+ +------------------+ +--------------------------+|
-|  | ServiceContainer | |    EventBus      | |        Logger            ||
-|  |  (DI & Services) | |   (Pub/Sub)      | |  (Structured Logging)    ||
+|  | ServiceContainer | |    EventBus      | |     EventRegistry        ||
+|  |  (DI & Services) | |   (Pub/Sub)      | |   (EDA & Consumers)      ||
 |  +------------------+ +------------------+ +--------------------------+|
 +-----------------------------------------------------------------------+
 |                     Infrastructure Layer                               |
@@ -139,7 +139,7 @@ For security best practices and vulnerability reporting, see [SECURITY.md](SECUR
 | [Quick Start Guide](docs/official/getting-started/quickstart.md) | Get started in 5 minutes |
 | [Core Concepts](docs/official/core-concepts/README.md) | Modules, services, and architecture |
 | [API Reference](docs/official/api/README.md) | Detailed API documentation |
-| [Go Documentation](https://pkg.go.dev/github.com/go-monolith/mono/v1) | Generated godoc reference |
+| [Go Documentation](https://pkg.go.dev/github.com/go-monolith/mono) | Generated godoc reference |
 | [Examples](examples/) | Runnable example applications |
 
 ## Development

@@ -7,8 +7,8 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/go-monolith/mono/v1/internal/nats"
-	"github.com/go-monolith/mono/v1/pkg/types"
+	"github.com/go-monolith/mono/internal/nats"
+	"github.com/go-monolith/mono/pkg/types"
 	natslib "github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 )

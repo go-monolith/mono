@@ -13,7 +13,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/go-monolith/mono/v1"
+	"github.com/go-monolith/mono"
 )
 
 // multiTestModule is an enhanced test module with dependency-aware features

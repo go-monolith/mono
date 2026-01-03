@@ -3,7 +3,7 @@ package helper_test
 import (
 	"fmt"
 
-	"github.com/go-monolith/mono/v1/pkg/helper"
+	"github.com/go-monolith/mono/pkg/helper"
 )
 
 // OrderCreatedEvent is an example event payload type.

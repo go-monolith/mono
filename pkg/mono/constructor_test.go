@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/go-monolith/mono/v1"
+	"github.com/go-monolith/mono"
 )
 
 // TestNewMonoApplication_NoOptions tests creating an app with default options

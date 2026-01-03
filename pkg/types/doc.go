@@ -1,15 +1,15 @@
 // Package types provides all public interfaces and supporting types for the mono-framework.
 //
-// This package exists to resolve import cycles between mono/v1 main package and internal packages.
+// This package exists to resolve import cycles between mono main package and internal packages.
 // All interfaces, structs, constants, and type definitions that need to be shared between
 // the public API and internal implementations (internal/*) are defined here.
 //
 // # Package Purpose
 //
 // The mono-framework follows an architecture where:
-//   - mono/v1: Public API entry point for external consumers
-//   - mono/v1/pkg/types: Interface and type definitions (this package)
-//   - mono/v1/internal/*: Implementation details
+//   - mono: Public API entry point for external consumers
+//   - mono/pkg/types: Interface and type definitions (this package)
+//   - mono/internal/*: Implementation details
 //
 // By separating interfaces into this package, internal packages can implement
 // interfaces defined here without creating import cycles with pkg/mono.
@@ -18,12 +18,12 @@
 //
 // Internal packages should import this package for interface definitions:
 //
-//	import "github.com/go-monolith/mono/v1/pkg/types"
+//	import "github.com/go-monolith/mono/pkg/types"
 //
 // External consumers should continue using pkg/mono, which re-exports
 // all types from this package for backward compatibility:
 //
-//	import "github.com/go-monolith/mono/v1/pkg/mono"
+//	import "github.com/go-monolith/mono/pkg/mono"
 //
 // # Contents
 //

@@ -3,7 +3,7 @@ package mono
 import (
 	"fmt"
 
-	"github.com/go-monolith/mono/v1/internal/app"
+	"github.com/go-monolith/mono/internal/app"
 )
 
 // NewMonoApplication creates a new MonoFramework application instance with the given options.

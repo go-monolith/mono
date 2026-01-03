@@ -9,7 +9,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/go-monolith/mono/v1"
+	"github.com/go-monolith/mono"
 )
 
 // mockLoggerFactory is a mock implementation for testing

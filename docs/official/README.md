@@ -3,7 +3,7 @@
 Welcome to the Monolith Framework documentation. This framework enables you to build modular applications as a single deployable unit with clear module boundaries and event-driven communication.
 
 {% hint style="info" %}
-These docs are for **Monolith Framework v1.x**.
+These docs are for the **Monolith Framework**. [GitHub Repository](https://github.com/go-monolith/mono)
 {% endhint %}
 
 ## What is Monolith Framework?
@@ -26,7 +26,7 @@ Monolith Framework is a Go framework for building modular monolith applications 
 ### Installation
 
 ```bash
-go get github.com/go-monolith/mono/v1
+go get github.com/go-monolith/mono
 ```
 
 ### Basic Example
@@ -39,7 +39,7 @@ import (
     "log"
     "time"
 
-    "github.com/go-monolith/mono/v1"
+    "github.com/go-monolith/mono"
 )
 
 type GreetingModule struct{}
@@ -101,13 +101,13 @@ Learn by example:
 
 ## Explore More
 
-- [API Reference](https://pkg.go.dev/github.com/go-monolith/mono/v1) - Complete godoc documentation
+- [API Reference](https://pkg.go.dev/github.com/go-monolith/mono) - Complete godoc documentation
 - [GitHub Repository](https://github.com/go-monolith/mono) - Source code and issue tracking
 
 ## Help and Support
 
 - Check our [examples](../../examples/) directory for working code
-- Review the [API documentation](https://pkg.go.dev/github.com/go-monolith/mono/v1) for detailed information
+- Review the [API documentation](https://pkg.go.dev/github.com/go-monolith/mono) for detailed information
 - Visit the [GitHub repository](https://github.com/go-monolith/mono) for issues and discussions
 
 ---

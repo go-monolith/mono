@@ -14,8 +14,8 @@ import (
 	"testing"
 	"time"
 
-	mono "github.com/go-monolith/mono/v1"
-	"github.com/go-monolith/mono/v1/pkg/types"
+	mono "github.com/go-monolith/mono"
+	"github.com/go-monolith/mono/pkg/types"
 )
 
 // newSocketApp creates a MonoApplication using TCP socket connections.

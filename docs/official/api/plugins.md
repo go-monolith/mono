@@ -203,7 +203,7 @@ package myplugin
 
 import (
     "context"
-    mono "github.com/go-monolith/mono/v1"
+    mono "github.com/go-monolith/mono"
 )
 
 type MyPlugin struct {
@@ -272,7 +272,7 @@ func (m *MyModule) SetPlugin(alias string, plugin mono.PluginModule) {
 File storage plugin using JetStream ObjectStore.
 
 ```go
-import "github.com/go-monolith/mono/v1/plugin/fs-jetstream"
+import "github.com/go-monolith/mono/plugin/fs-jetstream"
 
 storage, err := fsjetstream.New(fsjetstream.Config{
     Buckets: []fsjetstream.BucketConfig{
@@ -291,7 +291,7 @@ See [fs-jetstream Plugin](../plugins/fs-jetstream.md) for detailed documentation
 Key-value storage plugin using JetStream KeyValue store.
 
 ```go
-import "github.com/go-monolith/mono/v1/plugin/kv-jetstream"
+import "github.com/go-monolith/mono/plugin/kv-jetstream"
 
 kvStore, err := kvjetstream.New(kvjetstream.Config{
     Buckets: []kvjetstream.BucketConfig{
@@ -347,8 +347,8 @@ import (
     "fmt"
     "log"
 
-    mono "github.com/go-monolith/mono/v1"
-    "github.com/go-monolith/mono/v1/plugin/fs-jetstream"
+    mono "github.com/go-monolith/mono"
+    "github.com/go-monolith/mono/plugin/fs-jetstream"
 )
 
 // DocumentModule uses the storage plugin

@@ -1,7 +1,7 @@
 package mono
 
 import (
-	"github.com/go-monolith/mono/v1/pkg/types"
+	"github.com/go-monolith/mono/pkg/types"
 )
 
 // This file provides type aliases and constant re-exports for core types of the mono framework.
@@ -9,7 +9,7 @@ import (
 //
 // Import pattern:
 //
-//	import "github.com/go-monolith/mono/v1"
+//	import "github.com/go-monolith/mono"
 //
 //	app, err := mono.NewMonoApplication(
 //	    mono.WithLogLevel(mono.LogLevelInfo),
