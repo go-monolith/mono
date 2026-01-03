@@ -49,8 +49,8 @@
 //	├─────────────────────────────────────────────────────────────────────┤
 //	│                        Framework Layer                               │
 //	│  ┌─────────────────┐ ┌─────────────────┐ ┌─────────────────────────┐│
-//	│  │ ServiceContainer│ │    EventBus     │ │        Logger           ││
-//	│  │  (DI & Services)│ │   (Pub/Sub)     │ │  (Structured Logging)   ││
+//	│  │ ServiceContainer│ │    EventBus     │ │     EventRegistry       ││
+//	│  │  (DI & Services)│ │   (Pub/Sub)     │ │   (EDA & Consumers)     ││
 //	│  └─────────────────┘ └─────────────────┘ └─────────────────────────┘│
 //	├─────────────────────────────────────────────────────────────────────┤
 //	│                     Infrastructure Layer                             │

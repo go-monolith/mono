@@ -9,7 +9,7 @@ Constraints: [constraints.md](./constraints.md)
 
 ## Task List
 
-- [ ] 1. Fix broken documentation links in example READMEs
+- [x] 1. Fix broken documentation links in example READMEs
 
   - Fix `examples/multi-module/README.md` line 411: change `../../docs/spec/monolith-framework/design.md` to `../../docs/spec/foundation.md`
   - Fix `examples/multi-module/README.md` line 412: change `../../pkg/mono/module.go` to `../../pkg/types/module.go` (types are in `pkg/types/`, not `pkg/mono/`)
@@ -19,7 +19,7 @@ Constraints: [constraints.md](./constraints.md)
   - **Addresses Success Criterion**: All documentation matches the current implementation with no outdated information
   - _Requirements: Accurate documentation links_
 
-- [ ] 2. Remove outdated version reference in official documentation
+- [x] 2. Remove outdated version reference in official documentation
 
   - Edit `docs/official/README.md` line 6: remove or update the "v1.x" reference
   - Current text: `These docs are for **Monolith Framework v1.x**.`
@@ -28,7 +28,7 @@ Constraints: [constraints.md](./constraints.md)
   - **Addresses Success Criterion**: Official framework docs accurately describe current functionality
   - _Requirements: No version confusion for users_
 
-- [ ] 3. Update architecture diagram in root package godoc
+- [x] 3. Update architecture diagram in root package godoc
 
   - Edit `doc.go` lines 51-54 to update the Framework Layer diagram
   - Current: Shows "Logger" and "(Structured Logging)" in the third box
@@ -38,7 +38,7 @@ Constraints: [constraints.md](./constraints.md)
   - **Addresses Success Criterion**: Every public API has comprehensive godoc comments explaining purpose
   - _Requirements: Accurate architecture representation in pkg.go.dev_
 
-- [ ] 4. Verify and commit pending documentation changes
+- [-] 4. Verify and commit pending documentation changes
 
   - Review the uncommitted changes in git status for documentation files:
     - `README.md` - Architecture diagram update (Logger → EventRegistry)
@@ -61,3 +61,23 @@ Constraints: [constraints.md](./constraints.md)
   - **Addresses Success Criterion**: Examples in examples/ directory are accurate, working, and demonstrate current API usage
   - _Dependencies: 1_
   - _Requirements: All examples compile and run correctly_
+
+<!-- New task added on 2026-01-03 - Per user request to add EventRegistry API documentation -->
+
+- [ ] 6. Create EventRegistry API reference documentation
+
+  - Create `docs/official/api/eventregistry.md` similar to `docs/official/api/container.md`
+  - Include comprehensive method signatures with parameters and return types:
+    - `RegisterEvent(def BaseEventDefinition) error`
+    - `GetEventByName(name, version, moduleName string) (BaseEventDefinition, bool)`
+    - `GetEventsByModule(moduleName string) []BaseEventDefinition`
+    - `GetAllEvents() []BaseEventDefinition`
+    - `RegisterEventConsumer(eventDef, handler, module, queueGroup...) error`
+    - `RegisterEventStreamConsumer(eventDef, config, handler, module) error`
+    - `Entries() []EventConsumerEntry`
+  - Add detailed examples for each method (similar to container.md examples)
+  - Include configuration tables and best practices section
+  - Update `docs/official/SUMMARY.md` to add the new page under API Reference section
+  - Reference: Interface definition at `pkg/types/event.go:476`
+  - **Addresses Success Criterion**: Every public API has comprehensive godoc comments explaining purpose, parameters, return values
+  - _Requirements: Complete API documentation for EventRegistry similar to ServiceContainer_
