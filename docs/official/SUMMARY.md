@@ -22,6 +22,7 @@
 * [🚀 Framework](api/framework.md)
 * [📦 Modules](api/module.md)
 * [⚙️ Service Container](api/container.md)
+* [📋 EventRegistry](api/eventregistry.md)
 * [🧠 EventBus](api/eventbus.md)
 * [💾 Storage](api/storage.md)
 * [🧩 Plugin API](api/plugins.md)

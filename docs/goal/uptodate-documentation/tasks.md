@@ -38,7 +38,7 @@ Constraints: [constraints.md](./constraints.md)
   - **Addresses Success Criterion**: Every public API has comprehensive godoc comments explaining purpose
   - _Requirements: Accurate architecture representation in pkg.go.dev_
 
-- [-] 4. Verify and commit pending documentation changes
+- [x] 4. Verify and commit pending documentation changes
 
   - Review the uncommitted changes in git status for documentation files:
     - `README.md` - Architecture diagram update (Logger → EventRegistry)
@@ -52,7 +52,7 @@ Constraints: [constraints.md](./constraints.md)
   - _Dependencies: 1, 2, 3_
   - _Requirements: Documentation consistency across all files_
 
-- [ ] 5. Run examples to verify documentation accuracy
+- [x] 5. Run examples to verify documentation accuracy
 
   - Run `make run-example-basic` to verify basic example works
   - Run `make run-example-2` to verify multi-module example works
@@ -64,7 +64,7 @@ Constraints: [constraints.md](./constraints.md)
 
 <!-- New task added on 2026-01-03 - Per user request to add EventRegistry API documentation -->
 
-- [ ] 6. Create EventRegistry API reference documentation
+- [x] 6. Create EventRegistry API reference documentation
 
   - Create `docs/official/api/eventregistry.md` similar to `docs/official/api/container.md`
   - Include comprehensive method signatures with parameters and return types:
