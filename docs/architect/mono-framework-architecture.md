@@ -17,26 +17,26 @@ This document provides a comprehensive overview of the Mono Framework architectu
 The Mono Framework implements a modular monolith architecture where all modules run in a single process but communicate through an embedded NATS message queue, providing loose coupling and clear boundaries.
 
 ```
-                    +------------------------------------------+
-                    |         Mono Application                  |
-                    |  +------------------------------------+  |
-                    |  |         Application Modules         |  |
-                    |  |  +--------+ +--------+ +--------+  |  |
-                    |  |  |Order   | |Payment | |Notif.  |  |  |
-                    |  |  |Module  | |Module  | |Module  |  |  |
-                    |  |  +--------+ +--------+ +--------+  |  |
-                    |  +------------------------------------+  |
-                    |                    |                      |
-                    |  +------------------------------------+  |
-                    |  |         Framework Core              |  |
-                    |  |  ServiceContainer | EventBus |EventRegistry|  |
-                    |  +------------------------------------+  |
-                    |                    |                      |
-                    |  +------------------------------------+  |
-                    |  |      Embedded NATS Server           |  |
-                    |  |    (Core + JetStream Optional)      |  |
-                    |  +------------------------------------+  |
-                    +------------------------------------------+
++------------------------------------------------------+
+|                  Mono Application                    |
+|  +------------------------------------------------+  |
+|  |             Application Modules                |  |
+|  |  +------------+ +------------+ +------------+  |  |
+|  |  |   Order    | |  Payment   | |   Notif.   |  |  |
+|  |  |   Module   | |   Module   | |   Module   |  |  |
+|  |  +------------+ +------------+ +------------+  |  |
+|  +------------------------------------------------+  |
+|                         |                            |
+|  +------------------------------------------------+  |
+|  |               Framework Core                   |  |
+|  |  ServiceContainer | EventBus | EventRegistry   |  |
+|  +------------------------------------------------+  |
+|                         |                            |
+|  +------------------------------------------------+  |
+|  |            Embedded NATS Server                |  |
+|  |         (Core + JetStream Optional)            |  |
+|  +------------------------------------------------+  |
++------------------------------------------------------+
 ```
 
 ### Key Components
@@ -55,54 +55,54 @@ The Mono Framework implements a modular monolith architecture where all modules 
 The framework follows a strict layered architecture with clear separation of concerns.
 
 ```
-+-----------------------------------------------------------------------+
-|                       Application Layer                                |
-|                                                                        |
-|  Your modules implementing mono.Module and optional interfaces:        |
-|  - DependentModule       (declare dependencies)                        |
-|  - ServiceProviderModule (register services)                           |
-|  - EventBusAwareModule   (pub/sub messaging)                           |
-|  - EventEmitterModule    (emit typed events)                           |
-|  - EventConsumerModule   (consume events)                              |
-|  - HealthCheckableModule (health reporting)                            |
-|  - PluginModule          (framework extensions)                        |
-+-----------------------------------------------------------------------+
-                                    |
-                                    v
-+-----------------------------------------------------------------------+
-|                        Framework Layer                                 |
-|                                                                        |
-|  +-------------------+  +------------------+  +---------------------+ |
-|  | ServiceContainer  |  |     EventBus     |  |   EventRegistry     | |
-|  |                   |  |                  |  |                     | |
-|  | - Channel         |  | - Publish        |  | - RegisterEvent     | |
-|  | - RequestReply    |  | - Subscribe      |  | - GetEventByName    | |
-|  | - QueueGroup      |  | - Request        |  | - RegisterConsumer  | |
-|  | - StreamConsumer  |  | - QueueSubscribe |  | - StreamConsumer    | |
-|  +-------------------+  +------------------+  +---------------------+ |
-|                                                                        |
-|  +-------------------+  +------------------+  +---------------------+ |
-|  |  Module Registry  |  |  Event Registry  |  | Lifecycle Manager   | |
-|  +-------------------+  +------------------+  +---------------------+ |
-+-----------------------------------------------------------------------+
-                                    |
-                                    v
-+-----------------------------------------------------------------------+
-|                     Infrastructure Layer                               |
-|                                                                        |
-|  +---------------------------------------------------------------+   |
-|  |                    Embedded NATS Server                        |   |
-|  |                                                                 |   |
-|  |  +------------------+  +------------------------------------+ |   |
-|  |  |   NATS Core      |  |           JetStream                | |   |
-|  |  |                  |  |                                    | |   |
-|  |  | - Pub/Sub        |  | - Streams (persistence)            | |   |
-|  |  | - Request/Reply  |  | - Consumers (durable pull)         | |   |
-|  |  | - Queue Groups   |  | - KV Store (key-value)             | |   |
-|  |  +------------------+  | - Object Store (file storage)      | |   |
-|  |                        +------------------------------------+ |   |
-|  +---------------------------------------------------------------+   |
-+-----------------------------------------------------------------------+
++---------------------------------------------------------------------+
+|                        Application Layer                            |
+|                                                                     |
+|  Your modules implementing mono.Module and optional interfaces:     |
+|  - DependentModule       (declare dependencies)                     |
+|  - ServiceProviderModule (register services)                        |
+|  - EventBusAwareModule   (pub/sub messaging)                        |
+|  - EventEmitterModule    (emit typed events)                        |
+|  - EventConsumerModule   (consume events)                           |
+|  - HealthCheckableModule (health reporting)                         |
+|  - PluginModule          (framework extensions)                     |
++---------------------------------------------------------------------+
+                                   |
+                                   v
++---------------------------------------------------------------------+
+|                         Framework Layer                             |
+|                                                                     |
+|  +------------------+ +------------------+ +---------------------+  |
+|  | ServiceContainer | |     EventBus     | |   EventRegistry     |  |
+|  |                  | |                  | |                     |  |
+|  | - Channel        | | - Publish        | | - RegisterEvent     |  |
+|  | - RequestReply   | | - Subscribe      | | - GetEventByName    |  |
+|  | - QueueGroup     | | - Request        | | - RegisterConsumer  |  |
+|  | - StreamConsumer | | - QueueSubscribe | | - StreamConsumer    |  |
+|  +------------------+ +------------------+ +---------------------+  |
+|                                                                     |
+|  +------------------+ +------------------+ +---------------------+  |
+|  | Module Registry  | |  Event Registry  | | Lifecycle Manager   |  |
+|  +------------------+ +------------------+ +---------------------+  |
++---------------------------------------------------------------------+
+                                   |
+                                   v
++---------------------------------------------------------------------+
+|                      Infrastructure Layer                           |
+|                                                                     |
+|  +---------------------------------------------------------------+  |
+|  |                   Embedded NATS Server                        |  |
+|  |                                                               |  |
+|  |  +----------------+  +-------------------------------------+  |  |
+|  |  |   NATS Core    |  |            JetStream                |  |  |
+|  |  |                |  |                                     |  |  |
+|  |  | - Pub/Sub      |  | - Streams (persistence)             |  |  |
+|  |  | - Request/Reply|  | - Consumers (durable pull)          |  |  |
+|  |  | - Queue Groups |  | - KV Store (key-value)              |  |  |
+|  |  +----------------+  | - Object Store (file storage)       |  |  |
+|  |                      +-------------------------------------+  |  |
+|  +---------------------------------------------------------------+  |
++---------------------------------------------------------------------+
 ```
 
 ### Package Structure
@@ -242,29 +242,29 @@ Modules have a well-defined lifecycle managed by the framework. The initializati
 ### Module Interface Hierarchy
 
 ```
-                    +------------------+
-                    |     Module       |  (Required)
-                    | Name() string    |
-                    | Start(ctx) error |
-                    | Stop(ctx) error  |
-                    +------------------+
-                           |
-         +-----------------+-----------------+
-         |                 |                 |
-         v                 v                 v
+                     +------------------+
+                     |      Module      |  (Required)
+                     | Name() string    |
+                     | Start(ctx) error |
+                     | Stop(ctx) error  |
+                     +------------------+
+                             |
+          +------------------+------------------+
+          |                  |                  |
+          v                  v                  v
 +------------------+ +------------------+ +--------------------+
 | DependentModule  | |ServiceProvider   | |EventBusAwareModule |
 | Dependencies()   | |Module            | |SetEventBus(bus)    |
 | SetDependency... | |RegisterServices()| +--------------------+
-+------------------+ +------------------+          |
++------------------+ +------------------+           |
                                                    v
-                           +------------------------------------------+
-                           |                    |                     |
-                           v                    v                     v
-                   +----------------+  +------------------+  +-------------------+
-                   |EventEmitterMod |  |EventConsumerMod  |  |HealthCheckableMod |
-                   |EmitEvents()    |  |RegisterEvent...  |  |Health(ctx)        |
-                   +----------------+  +------------------+  +-------------------+
+                      +----------------------------+----------------------------+
+                      |                            |                            |
+                      v                            v                            v
+             +----------------+          +------------------+          +-------------------+
+             |EventEmitterMod |          |EventConsumerMod  |          |HealthCheckableMod |
+             |EmitEvents()    |          |RegisterEvent...  |          |Health(ctx)        |
+             +----------------+          +------------------+          +-------------------+
 ```
 
 ## Service Communication Patterns

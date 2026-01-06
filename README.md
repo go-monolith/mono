@@ -5,20 +5,34 @@
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 [![Coverage](https://img.shields.io/badge/coverage-90.1%25-brightgreen.svg)](docs/official/extra/code-coverage.md)
 
-A Go framework for building modular monolith applications centered around an embedded NATS.io message queue system.
+A Go framework for building **distributed modular monolith** applications powered by NATS.io.
 
-Mono Framework enables building applications as a collection of loosely-coupled modules that communicate via NATS messaging, while running as a single binary. This approach combines the simplicity of a monolith with the architectural benefits of microservices - modules are independently developable and testable while running in a single process.
+Mono Framework enables building applications as a collection of loosely-coupled modules that communicate via NATS messaging. Start with a single binary monolith for simplicity, then scale horizontally to a distributed cluster when needed—without changing your code. Powered by NATS.io's distributed architecture, your application can seamlessly evolve from a single instance to a highly scalable distributed system.
 
 ## Features
 
-- **Modular Monolith Architecture** - Clear module boundaries with dependency injection
-- **Embedded NATS Server** - Built-in messaging with optional JetStream persistence
+- **Distributed Modular Monolith** - Start simple, scale horizontally without code changes
+- **NATS.io Powered** - Built on NATS distributed messaging for high scalability and resilience
+- **Embedded or External NATS** - Run embedded for development, connect to NATS clusters in production
 - **Event-Driven Communication** - Publish/subscribe patterns for inter-module messaging
 - **Four Service Patterns** - Channel, Request-Reply, Queue Group, and Stream Consumer
+- **JetStream Persistence** - Durable messaging with at-least-once delivery guarantees
 - **Lifecycle Management** - Automatic dependency resolution and ordered startup/shutdown
 - **Built-in Middleware** - Access logging, audit trails, and request ID injection
 - **Plugin System** - Extensible architecture for custom functionality
-- **Structured Logging** - Module-aware logging with configurable output
+
+## Why Distributed Modular Monolith?
+
+| Approach | Development | Deployment | Scaling |
+|----------|-------------|------------|---------|
+| Traditional Monolith | Simple | Single binary | Vertical only |
+| Microservices | Complex | Many services | Horizontal |
+| **Distributed Modular Monolith** | **Simple** | **Single binary** | **Horizontal** |
+
+Mono Framework gives you the best of both worlds:
+- **Develop** like a monolith: single codebase, simple debugging, no network complexity during development
+- **Deploy** like microservices: run multiple instances behind a load balancer, scale horizontally on demand
+- **Communicate** through NATS: modules use messaging patterns that work identically whether running in one process or distributed across a cluster
 
 ## Quick Start
 
@@ -75,22 +89,29 @@ func main() {
 ## Architecture
 
 ```
-+-----------------------------------------------------------------------+
-|                       Application Layer                                |
-|             (Your Modules implementing mono.Module)                    |
-+-----------------------------------------------------------------------+
-|                        Framework Layer                                 |
-|  +------------------+ +------------------+ +--------------------------+|
-|  | ServiceContainer | |    EventBus      | |     EventRegistry        ||
-|  |  (DI & Services) | |   (Pub/Sub)      | |   (EDA & Consumers)      ||
-|  +------------------+ +------------------+ +--------------------------+|
-+-----------------------------------------------------------------------+
-|                     Infrastructure Layer                               |
-|               (Embedded NATS Server + JetStream)                       |
-+-----------------------------------------------------------------------+
+┌───────────────────────────────────────────────────────────────────────┐
+│                         Application Layer                             │
+│            (Your Modules implementing mono.Module)                    │
+├───────────────────────────────────────────────────────────────────────┤
+│                          Framework Layer                              │
+│  ┌──────────────────┐ ┌──────────────────┐ ┌───────────────────────┐  │
+│  │ ServiceContainer │ │     EventBus     │ │    EventRegistry      │  │
+│  │  (DI & Services) │ │    (Pub/Sub)     │ │  (EDA & Consumers)    │  │
+│  └──────────────────┘ └──────────────────┘ └───────────────────────┘  │
+├───────────────────────────────────────────────────────────────────────┤
+│                       Infrastructure Layer                            │
+│              (NATS.io + JetStream Persistence)                        │
+└───────────────────────────────────────────────────────────────────────┘
+                                  │
+       ┌──────────────────────────┼──────────────────────────┐
+       ▼                          ▼                          ▼
+  ┌──────────┐              ┌──────────┐              ┌──────────┐
+  │  Node 1  │◄────────────►│  Node 2  │◄────────────►│  Node 3  │
+  │(Instance)│ NATS Cluster │(Instance)│ NATS Cluster │(Instance)│
+  └──────────┘              └──────────┘              └──────────┘
 ```
 
-Modules communicate through NATS messaging patterns rather than direct method calls, enabling loose coupling and clear module boundaries.
+Modules communicate through NATS messaging patterns rather than direct method calls. This enables loose coupling, clear module boundaries, and **horizontal scaling**—deploy multiple instances that automatically coordinate through the NATS cluster.
 
 ## Service Communication Patterns
 

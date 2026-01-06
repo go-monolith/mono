@@ -354,37 +354,37 @@ Event communication enables **loose coupling** between modules. Emitters declare
 ### How Event Communication Works
 
 ```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                          Event Communication Flow                           │
-├─────────────────────────────────────────────────────────────────────────────┤
-│                                                                             │
-│  ┌────────────────┐                                                         │
-│  │  OrderModule   │                                                         │
-│  │  (Emitter)     │                                                         │
-│  └───────┬────────┘                                                         │
-│          │                                                                  │
-│          │ 1. EmitEvents() → declares OrderCreatedV1                        │
-│          │                                                                  │
-│          ▼                                                                  │
-│  ┌────────────────┐                                                         │
-│  │  EventRegistry │  ← Framework manages event catalog                      │
-│  └───────┬────────┘                                                         │
-│          │                                                                  │
-│          │ 2. Consumer modules discover via GetEventByName()                │
-│          │                                                                  │
-│          ├──────────────────────────────┬───────────────────────────────┐   │
-│          ▼                              ▼                               ▼   │
-│  ┌────────────────┐          ┌────────────────┐            ┌────────────────┐
-│  │NotificationMod │          │  AnalyticsMod  │            │   AuditModule  │
-│  │  (Consumer)    │          │  (Consumer)    │            │  (Consumer)    │
-│  └────────────────┘          └────────────────┘            └────────────────┘
-│                                                                             │
-│  3. Each consumer registers via RegisterEventConsumers(registry)           │
-│                                                                             │
-│  ⚠️ NO DEPENDENCY: OrderModule doesn't know about consumers                 │
-│     Consumers don't declare OrderModule as a dependency                     │
-│                                                                             │
-└─────────────────────────────────────────────────────────────────────────────┘
+┌───────────────────────────────────────────────────────────────────────────┐
+│                        Event Communication Flow                           │
+├───────────────────────────────────────────────────────────────────────────┤
+│                                                                           │
+│  ┌────────────────┐                                                       │
+│  │  OrderModule   │                                                       │
+│  │  (Emitter)     │                                                       │
+│  └───────┬────────┘                                                       │
+│          │                                                                │
+│          │ 1. EmitEvents() → declares OrderCreatedV1                      │
+│          │                                                                │
+│          ▼                                                                │
+│  ┌────────────────┐                                                       │
+│  │  EventRegistry │  ← Framework manages event catalog                    │
+│  └───────┬────────┘                                                       │
+│          │                                                                │
+│          │ 2. Consumer modules discover via GetEventByName()              │
+│          │                                                                │
+│          ├─────────────────────────┬─────────────────────────┐            │
+│          ▼                         ▼                         ▼            │
+│  ┌──────────────┐          ┌──────────────┐          ┌──────────────┐     │
+│  │Notification  │          │  Analytics   │          │    Audit     │     │
+│  │Module (Cons.)│          │Module (Cons.)│          │Module (Cons.)│     │
+│  └──────────────┘          └──────────────┘          └──────────────┘     │
+│                                                                           │
+│  3. Each consumer registers via RegisterEventConsumers(registry)          │
+│                                                                           │
+│  Note: OrderModule doesn't know about consumers.                          │
+│        Consumers don't declare OrderModule as a dependency.               │
+│                                                                           │
+└───────────────────────────────────────────────────────────────────────────┘
 ```
 
 ### Declaring Events (Emitter Side)

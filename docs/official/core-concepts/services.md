@@ -7,40 +7,40 @@ Services are the **public APIs** of modules in the Monolith Framework. When a mo
 A service is a named endpoint registered by a module that other modules can invoke. Think of services as the contract between modules:
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                    Module A (Service Provider)                   │
-│                                                                  │
-│    ┌─────────────────────────────────────────────────────────┐  │
-│    │              ServiceContainer (Module A)                 │  │
-│    │                                                          │  │
-│    │   ┌──────────────────────────────────────────────────┐  │  │
-│    │   │  Service: "process-payment"                      │  │  │
-│    │   │  Type: Request-Reply                             │  │  │
-│    │   │  Handler: handleProcessPayment()                 │  │  │
-│    │   └──────────────────────────────────────────────────┘  │  │
-│    │                                                          │  │
-│    │   ┌──────────────────────────────────────────────────┐  │  │
-│    │   │  Service: "validate-card"                        │  │  │
-│    │   │  Type: Request-Reply                             │  │  │
-│    │   │  Handler: handleValidateCard()                   │  │  │
-│    │   └──────────────────────────────────────────────────┘  │  │
-│    │                                                          │  │
-│    └─────────────────────────────────────────────────────────┘  │
-│                                                                  │
-└─────────────────────────────────────────────────────────────────┘
-                              │
-                              │ Framework injects ServiceContainer
-                              ▼
-┌─────────────────────────────────────────────────────────────────┐
-│                    Module B (Service Consumer)                   │
-│                                                                  │
-│    Dependencies() → ["payment"]                                  │
-│                                                                  │
-│    SetDependencyServiceContainer("payment", containerA)          │
-│                                                                  │
-│    m.paymentContainer.GetRequestReplyService("process-payment")  │
-│                                                                  │
-└─────────────────────────────────────────────────────────────────┘
+┌───────────────────────────────────────────────────────────────┐
+│                  Module A (Service Provider)                  │
+│                                                               │
+│  ┌─────────────────────────────────────────────────────────┐  │
+│  │            ServiceContainer (Module A)                  │  │
+│  │                                                         │  │
+│  │  ┌───────────────────────────────────────────────────┐  │  │
+│  │  │  Service: "process-payment"                       │  │  │
+│  │  │  Type: Request-Reply                              │  │  │
+│  │  │  Handler: handleProcessPayment()                  │  │  │
+│  │  └───────────────────────────────────────────────────┘  │  │
+│  │                                                         │  │
+│  │  ┌───────────────────────────────────────────────────┐  │  │
+│  │  │  Service: "validate-card"                         │  │  │
+│  │  │  Type: Request-Reply                              │  │  │
+│  │  │  Handler: handleValidateCard()                    │  │  │
+│  │  └───────────────────────────────────────────────────┘  │  │
+│  │                                                         │  │
+│  └─────────────────────────────────────────────────────────┘  │
+│                                                               │
+└───────────────────────────────────────────────────────────────┘
+                             │
+                             │ Framework injects ServiceContainer
+                             ▼
+┌───────────────────────────────────────────────────────────────┐
+│                  Module B (Service Consumer)                  │
+│                                                               │
+│  Dependencies() → ["payment"]                                 │
+│                                                               │
+│  SetDependencyServiceContainer("payment", containerA)         │
+│                                                               │
+│  m.paymentContainer.GetRequestReplyService("process-payment") │
+│                                                               │
+└───────────────────────────────────────────────────────────────┘
 ```
 
 ## Services Establish Module Dependencies
@@ -240,26 +240,26 @@ For detailed information about each service type, see [Inter-Module Communicatio
 The framework automatically handles startup order based on declared dependencies:
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                    Dependency Resolution                         │
-├─────────────────────────────────────────────────────────────────┤
-│                                                                  │
-│  Modules Registered:                                             │
-│    - OrderModule      → Dependencies: ["payment", "inventory"]   │
-│    - PaymentModule    → Dependencies: []                         │
-│    - InventoryModule  → Dependencies: []                         │
-│    - ShippingModule   → Dependencies: ["order"]                  │
-│                                                                  │
-│  Computed Startup Order:                                         │
-│    1. PaymentModule     (no dependencies)                        │
-│    2. InventoryModule   (no dependencies)                        │
-│    3. OrderModule       (after payment, inventory)               │
-│    4. ShippingModule    (after order)                            │
-│                                                                  │
-│  Shutdown Order:                                                 │
-│    4 → 3 → 2 → 1       (reverse of startup)                      │
-│                                                                  │
-└─────────────────────────────────────────────────────────────────┘
+┌───────────────────────────────────────────────────────────────┐
+│                    Dependency Resolution                      │
+├───────────────────────────────────────────────────────────────┤
+│                                                               │
+│  Modules Registered:                                          │
+│    - OrderModule     → Dependencies: ["payment", "inventory"] │
+│    - PaymentModule   → Dependencies: []                       │
+│    - InventoryModule → Dependencies: []                       │
+│    - ShippingModule  → Dependencies: ["order"]                │
+│                                                               │
+│  Computed Startup Order:                                      │
+│    1. PaymentModule    (no dependencies)                      │
+│    2. InventoryModule  (no dependencies)                      │
+│    3. OrderModule      (after payment, inventory)             │
+│    4. ShippingModule   (after order)                          │
+│                                                               │
+│  Shutdown Order:                                              │
+│    4 → 3 → 2 → 1      (reverse of startup)                    │
+│                                                               │
+└───────────────────────────────────────────────────────────────┘
 ```
 
 ### Circular Dependency Detection

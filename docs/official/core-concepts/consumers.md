@@ -7,34 +7,34 @@ Event consumers enable **loose coupling** between modules. Unlike services, even
 An event consumer is a handler registered by a module to receive events published by other modules. Think of events as a broadcast mechanism:
 
 ```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                          Event Communication                                 │
-│                                                                             │
-│   ┌───────────────────┐                                                     │
-│   │   OrderModule     │                                                     │
-│   │   (Emitter)       │                                                     │
-│   │                   │                                                     │
-│   │  EmitEvents() →   │─── OrderCreatedV1 ──┐                               │
-│   │  OrderCreatedV1   │                     │                               │
-│   │  OrderShippedV1   │                     │                               │
-│   └───────────────────┘                     │                               │
-│                                             ▼                               │
-│                                    ┌──────────────┐                         │
-│                                    │ EventRegistry│ ◄── Framework manages   │
-│                                    └──────┬───────┘                         │
-│                                           │                                 │
-│         ┌─────────────────────────────────┼─────────────────────────────┐   │
-│         ▼                                 ▼                             ▼   │
-│   ┌───────────────┐               ┌───────────────┐             ┌───────────┐
-│   │ Notification  │               │   Analytics   │             │   Audit   │
-│   │   Module      │               │    Module     │             │  Module   │
-│   │  (Consumer)   │               │  (Consumer)   │             │(Consumer) │
-│   └───────────────┘               └───────────────┘             └───────────┘
-│                                                                             │
-│   ⚠️ NO DEPENDENCY: OrderModule doesn't know about consumers               │
-│      Consumers don't declare OrderModule as a dependency                    │
-│                                                                             │
-└─────────────────────────────────────────────────────────────────────────────┘
+┌───────────────────────────────────────────────────────────────────────────┐
+│                          Event Communication                              │
+│                                                                           │
+│   ┌───────────────────┐                                                   │
+│   │   OrderModule     │                                                   │
+│   │   (Emitter)       │                                                   │
+│   │                   │                                                   │
+│   │  EmitEvents() →   │─── OrderCreatedV1 ──┐                             │
+│   │  OrderCreatedV1   │                     │                             │
+│   │  OrderShippedV1   │                     │                             │
+│   └───────────────────┘                     │                             │
+│                                             ▼                             │
+│                                    ┌──────────────┐                       │
+│                                    │ EventRegistry│ ◄── Framework manages │
+│                                    └──────┬───────┘                       │
+│                                           │                               │
+│         ┌─────────────────────────────────┼───────────────────────────┐   │
+│         ▼                                 ▼                           ▼   │
+│   ┌─────────────┐                 ┌─────────────┐               ┌───────┐ │
+│   │ Notification│                 │  Analytics  │               │ Audit │ │
+│   │   Module    │                 │   Module    │               │Module │ │
+│   │ (Consumer)  │                 │ (Consumer)  │               │(Cons.)│ │
+│   └─────────────┘                 └─────────────┘               └───────┘ │
+│                                                                           │
+│   Note: OrderModule doesn't know about consumers.                         │
+│         Consumers don't declare OrderModule as a dependency.              │
+│                                                                           │
+└───────────────────────────────────────────────────────────────────────────┘
 ```
 
 ## Events Do NOT Create Dependencies
