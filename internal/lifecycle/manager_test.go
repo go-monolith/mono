@@ -4895,3 +4895,67 @@ func TestLifecycleManager_EventStreamConsumerSetupError(t *testing.T) {
 		t.Errorf("Expected error to contain 'event stream creation failed', got: %v", err)
 	}
 }
+
+// TestGetErrorTypeName tests the getErrorTypeName helper function
+func TestGetErrorTypeName(t *testing.T) {
+	tests := []struct {
+		name     string
+		err      error
+		expected string
+	}{
+		{
+			name:     "nil error",
+			err:      nil,
+			expected: "",
+		},
+		{
+			name:     "ServiceError",
+			err:      &monoerrors.ServiceError{ServiceName: "test", ModuleName: "mod"},
+			expected: "service",
+		},
+		{
+			name:     "TimeoutError",
+			err:      &monoerrors.TimeoutError{Operation: "test"},
+			expected: "timeout",
+		},
+		{
+			name:     "ModuleError",
+			err:      &monoerrors.ModuleError{ModuleName: "test"},
+			expected: "module",
+		},
+		{
+			name:     "DependencyError",
+			err:      &monoerrors.DependencyError{Module: "test"},
+			expected: "dependency",
+		},
+		{
+			name:     "ConfigurationError",
+			err:      &monoerrors.ConfigurationError{OptionName: "test"},
+			expected: "configuration",
+		},
+		{
+			name:     "EventStreamError",
+			err:      &monoerrors.EventStreamError{Operation: "test"},
+			expected: "eventstream",
+		},
+		{
+			name:     "RemoteError",
+			err:      &monoerrors.RemoteError{Message: "test"},
+			expected: "remote",
+		},
+		{
+			name:     "standard error",
+			err:      errors.New("standard error"),
+			expected: "errorstring", // errors.errorString type name
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := getErrorTypeName(tt.err)
+			if result != tt.expected {
+				t.Errorf("getErrorTypeName(%T) = %q, want %q", tt.err, result, tt.expected)
+			}
+		})
+	}
+}

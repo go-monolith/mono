@@ -181,6 +181,11 @@ func (c *requestReplyClient) Call(ctx context.Context, data []byte) (*types.Msg,
 		return nil, err
 	}
 
+	// Check for error response from handler
+	if err := c.checkForErrorResponse(response); err != nil {
+		return nil, err
+	}
+
 	return response, nil
 }
 
@@ -232,5 +237,38 @@ func (c *requestReplyClient) CallMsg(ctx context.Context, msg *types.Msg) (*type
 		return nil, err
 	}
 
+	// Check for error response from handler
+	if err := c.checkForErrorResponse(response); err != nil {
+		return nil, err
+	}
+
 	return response, nil
+}
+
+// checkForErrorResponse examines the response message for error headers
+// and returns a RemoteError if found. Returns nil if the response does not
+// indicate an error. This enables automatic error propagation from
+// RequestReply service handlers back to the client.
+func (c *requestReplyClient) checkForErrorResponse(response *types.Msg) error {
+	if response.Header == nil {
+		return nil
+	}
+
+	errorValues := response.Header[types.HeaderError]
+	if len(errorValues) == 0 || errorValues[0] != "true" {
+		return nil
+	}
+
+	// Extract error details from headers
+	message := "unknown error"
+	if msgValues := response.Header[types.HeaderErrorMessage]; len(msgValues) > 0 {
+		message = msgValues[0]
+	}
+
+	errorType := ""
+	if typeValues := response.Header[types.HeaderErrorType]; len(typeValues) > 0 {
+		errorType = typeValues[0]
+	}
+
+	return monoerrors.WrapRemoteError(c.serviceName, c.moduleName, message, errorType)
 }

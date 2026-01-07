@@ -1034,3 +1034,145 @@ func TestWrapCircularDependencyEdgeCases(t *testing.T) {
 		}
 	})
 }
+
+// TestRemoteError tests the RemoteError type
+func TestRemoteError(t *testing.T) {
+	t.Run("Error method with error type", func(t *testing.T) {
+		err := &pkgerrors.RemoteError{
+			Message:     "failed to process request",
+			ServiceName: "check-stock",
+			ModuleName:  "inventory",
+			ErrorType:   "service",
+		}
+
+		errMsg := err.Error()
+		expected := "remote service 'check-stock' (inventory): failed to process request (service)"
+		if errMsg != expected {
+			t.Errorf("expected %q, got %q", expected, errMsg)
+		}
+	})
+
+	t.Run("Error method without error type", func(t *testing.T) {
+		err := &pkgerrors.RemoteError{
+			Message:     "failed to process request",
+			ServiceName: "check-stock",
+			ModuleName:  "inventory",
+			ErrorType:   "",
+		}
+
+		errMsg := err.Error()
+		expected := "remote service 'check-stock' (inventory): failed to process request"
+		if errMsg != expected {
+			t.Errorf("expected %q, got %q", expected, errMsg)
+		}
+	})
+}
+
+// TestWrapRemoteError tests the WrapRemoteError constructor
+func TestWrapRemoteError(t *testing.T) {
+	t.Run("creates RemoteError with all fields", func(t *testing.T) {
+		err := pkgerrors.WrapRemoteError("get-stats", "analytics", "database connection failed", "service")
+
+		var remoteErr *pkgerrors.RemoteError
+		if !errors.As(err, &remoteErr) {
+			t.Fatal("expected RemoteError type")
+		}
+
+		if remoteErr.ServiceName != "get-stats" {
+			t.Errorf("expected ServiceName 'get-stats', got %q", remoteErr.ServiceName)
+		}
+		if remoteErr.ModuleName != "analytics" {
+			t.Errorf("expected ModuleName 'analytics', got %q", remoteErr.ModuleName)
+		}
+		if remoteErr.Message != "database connection failed" {
+			t.Errorf("expected Message 'database connection failed', got %q", remoteErr.Message)
+		}
+		if remoteErr.ErrorType != "service" {
+			t.Errorf("expected ErrorType 'service', got %q", remoteErr.ErrorType)
+		}
+	})
+
+	t.Run("creates RemoteError without error type", func(t *testing.T) {
+		err := pkgerrors.WrapRemoteError("process-order", "order", "validation failed", "")
+
+		var remoteErr *pkgerrors.RemoteError
+		if !errors.As(err, &remoteErr) {
+			t.Fatal("expected RemoteError type")
+		}
+
+		if remoteErr.ErrorType != "" {
+			t.Errorf("expected empty ErrorType, got %q", remoteErr.ErrorType)
+		}
+	})
+}
+
+// TestIsRemoteError tests the IsRemoteError function
+func TestIsRemoteError(t *testing.T) {
+	t.Run("returns true for RemoteError", func(t *testing.T) {
+		err := pkgerrors.WrapRemoteError("svc", "mod", "msg", "type")
+		if !pkgerrors.IsRemoteError(err) {
+			t.Error("expected IsRemoteError to return true for RemoteError")
+		}
+	})
+
+	t.Run("returns false for other error types", func(t *testing.T) {
+		err := errors.New("regular error")
+		if pkgerrors.IsRemoteError(err) {
+			t.Error("expected IsRemoteError to return false for regular error")
+		}
+	})
+
+	t.Run("returns false for ServiceError", func(t *testing.T) {
+		err := pkgerrors.WrapServiceError("svc", "mod", 1, errors.New("test"))
+		if pkgerrors.IsRemoteError(err) {
+			t.Error("expected IsRemoteError to return false for ServiceError")
+		}
+	})
+
+	t.Run("returns false for nil error", func(t *testing.T) {
+		if pkgerrors.IsRemoteError(nil) {
+			t.Error("expected IsRemoteError to return false for nil")
+		}
+	})
+}
+
+// TestGetRemoteError tests the GetRemoteError function
+func TestGetRemoteError(t *testing.T) {
+	t.Run("extracts RemoteError from error", func(t *testing.T) {
+		originalErr := pkgerrors.WrapRemoteError("check-stock", "inventory", "not found", "service")
+		remoteErr, ok := pkgerrors.GetRemoteError(originalErr)
+
+		if !ok {
+			t.Fatal("expected ok to be true")
+		}
+		if remoteErr == nil {
+			t.Fatal("expected non-nil RemoteError")
+		}
+		if remoteErr.ServiceName != "check-stock" {
+			t.Errorf("expected ServiceName 'check-stock', got %q", remoteErr.ServiceName)
+		}
+	})
+
+	t.Run("returns false for non-RemoteError", func(t *testing.T) {
+		err := errors.New("regular error")
+		remoteErr, ok := pkgerrors.GetRemoteError(err)
+
+		if ok {
+			t.Error("expected ok to be false")
+		}
+		if remoteErr != nil {
+			t.Error("expected nil RemoteError")
+		}
+	})
+
+	t.Run("returns false for nil error", func(t *testing.T) {
+		remoteErr, ok := pkgerrors.GetRemoteError(nil)
+
+		if ok {
+			t.Error("expected ok to be false for nil")
+		}
+		if remoteErr != nil {
+			t.Error("expected nil RemoteError for nil")
+		}
+	})
+}

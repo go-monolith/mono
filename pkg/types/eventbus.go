@@ -7,6 +7,21 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 )
 
+// Reserved header names for error responses in RequestReply services.
+// These headers are used to propagate handler errors back to the client.
+const (
+	// HeaderError indicates the response contains an error.
+	// Value should be "true" when present.
+	HeaderError = "Mono-Error"
+
+	// HeaderErrorMessage contains the human-readable error message.
+	HeaderErrorMessage = "Mono-Error-Message"
+
+	// HeaderErrorType contains the error classification (e.g., "service", "timeout").
+	// This is optional and helps clients handle errors differently based on type.
+	HeaderErrorType = "Mono-Error-Type"
+)
+
 // EventBus provides event-driven communication wrapping NATS client.
 //
 // The EventBus abstraction provides high-level messaging patterns including
