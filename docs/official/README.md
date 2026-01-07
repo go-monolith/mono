@@ -1,23 +1,38 @@
 # 👋 Welcome
 
-Welcome to the Monolith Framework documentation. This framework enables you to build modular applications as a single deployable unit with clear module boundaries and event-driven communication.
+Welcome to the Mono Framework documentation—a Go framework for building **distributed modular monolith** applications powered by NATS.io.
 
 {% hint style="info" %}
-These docs are for the **Monolith Framework**. [GitHub Repository](https://github.com/go-monolith/mono)
+These docs are for the **Mono Framework**. [GitHub Repository](https://github.com/go-monolith/mono)
 {% endhint %}
 
-## What is Monolith Framework?
+## What is Mono Framework?
 
-Monolith Framework is a Go framework for building modular monolith applications centered around an embedded NATS.io message queue system. It combines the simplicity and deployment benefits of a monolith with the architectural advantages of microservices—modules are independently developable and testable while running in a single process.
+Mono Framework enables building applications as a collection of loosely-coupled modules that communicate via NATS messaging. Start with a single binary monolith for simplicity, then scale horizontally to a distributed cluster when needed—**without changing your code**.
+
+Powered by NATS.io's distributed architecture, your application can seamlessly evolve from a single instance to a highly scalable distributed system.
+
+### Why Distributed Modular Monolith?
+
+| Approach | Development | Deployment | Scaling |
+|----------|-------------|------------|---------|
+| Traditional Monolith | Simple | Single binary | Vertical only |
+| Microservices | Complex | Many services | Horizontal |
+| **Distributed Modular Monolith** | **Simple** | **Single binary** | **Horizontal** |
+
+- **Develop** like a monolith: single codebase, simple debugging, no network complexity during development
+- **Deploy** like microservices: run multiple instances behind a load balancer, scale horizontally on demand
+- **Communicate** through NATS: modules use messaging patterns that work identically whether running in one process or distributed across a cluster
 
 ### Key Features
 
-- **Modular Monolith Architecture** - Define clear module boundaries with dependency injection
-- **Embedded NATS Server** - Built-in messaging with optional JetStream persistence
+- **Distributed Modular Monolith** - Start simple, scale horizontally without code changes
+- **NATS.io Powered** - Built on NATS distributed messaging for high scalability and resilience
+- **Embedded or External NATS** - Run embedded for development or single instance deployment, connect to production NATS clusters for HA deployments
 - **Event-Driven Communication** - Publish/subscribe patterns for loose coupling
 - **Four Service Patterns** - Channel, Request-Reply, Queue Group, and Stream Consumer services
+- **JetStream Persistence** - Durable messaging with at-least-once delivery guarantees
 - **Lifecycle Management** - Automatic dependency resolution and ordered startup/shutdown
-- **Structured Logging** - Module-aware logging with sensitive data redaction
 - **Built-in Middleware** - Access logging, audit trails, and request ID injection
 - **Plugin System** - Extensible architecture for custom functionality
 
@@ -71,7 +86,7 @@ func main() {
 
 ## Next Steps
 
-New to Monolith Framework? Start here:
+New to Mono Framework? Start here:
 
 | If you want to...                    | Start here                                           |
 | ------------------------------------ | ---------------------------------------------------- |

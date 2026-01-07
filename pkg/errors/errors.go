@@ -213,6 +213,31 @@ func (e *EventStreamError) Unwrap() error {
 	return e.Err
 }
 
+// RemoteError represents an error returned from a remote service call.
+// It wraps errors that were propagated back from RequestReply handlers.
+// This error type indicates the error originated from a remote service,
+// not from local code or network issues.
+type RemoteError struct {
+	Message     string
+	ServiceName string
+	ModuleName  string
+	ErrorType   string
+}
+
+// Error implements the error interface.
+func (e *RemoteError) Error() string {
+	if e.ErrorType != "" {
+		return fmt.Sprintf("remote service '%s' (%s): %s (%s)", e.ServiceName, e.ModuleName, e.Message, e.ErrorType)
+	}
+	return fmt.Sprintf("remote service '%s' (%s): %s", e.ServiceName, e.ModuleName, e.Message)
+}
+
+// Unwrap returns nil as RemoteError is a terminal error.
+// This method exists for consistency with other error types in the package.
+func (e *RemoteError) Unwrap() error {
+	return nil
+}
+
 // Module Error Constructors
 
 // WrapInvalidModule wraps an error indicating an invalid module.
@@ -353,6 +378,19 @@ func WrapServiceUnavailable(serviceName, moduleName string, serviceType types.Se
 	}
 }
 
+// Remote Error Constructors
+
+// WrapRemoteError creates a new RemoteError from response headers.
+// This is used to wrap errors received from remote RequestReply service handlers.
+func WrapRemoteError(serviceName, moduleName, message, errorType string) error {
+	return &RemoteError{
+		Message:     message,
+		ServiceName: serviceName,
+		ModuleName:  moduleName,
+		ErrorType:   errorType,
+	}
+}
+
 // Dependency Error Constructors
 
 // WrapMissingDependency wraps ErrMissingDependency with dependency context.
@@ -464,6 +502,12 @@ func IsEventStreamError(err error) bool {
 	return errors.As(err, &streamErr)
 }
 
+// IsRemoteError reports whether err is a RemoteError.
+func IsRemoteError(err error) bool {
+	var remoteErr *RemoteError
+	return errors.As(err, &remoteErr)
+}
+
 // Error Extraction Utilities
 
 // GetServiceError extracts ServiceError from err if present.
@@ -485,6 +529,13 @@ func GetEventStreamError(err error) (*EventStreamError, bool) {
 	var streamErr *EventStreamError
 	ok := errors.As(err, &streamErr)
 	return streamErr, ok
+}
+
+// GetRemoteError extracts RemoteError from err if present.
+func GetRemoteError(err error) (*RemoteError, bool) {
+	var remoteErr *RemoteError
+	ok := errors.As(err, &remoteErr)
+	return remoteErr, ok
 }
 
 // Error Aggregation Utilities

@@ -840,3 +840,304 @@ func TestGetRequestReplyServiceErrors(t *testing.T) {
 		}
 	})
 }
+
+// TestRequestReplyClientErrorResponse tests error response detection in Call
+func TestRequestReplyClientErrorResponse(t *testing.T) {
+	t.Run("Call detects error response with error type", func(t *testing.T) {
+		eventBus := &mockEventBus{
+			requestMsgWithCtxHandler: func(ctx context.Context, msg *types.Msg) (*types.Msg, error) {
+				return &types.Msg{
+					Header: types.Header{
+						types.HeaderError:        []string{"true"},
+						types.HeaderErrorMessage: []string{"handler failed: database error"},
+						types.HeaderErrorType:    []string{"service"},
+					},
+					Data: nil,
+				}, nil
+			},
+		}
+
+		client := &requestReplyClient{
+			eventBus:        eventBus,
+			serviceName:     "test-service",
+			moduleName:      "test-module",
+			subject:         "services.test-module.test-service",
+			timeout:         5 * time.Second,
+			middlewareChain: &mockMiddlewareChainRunner{},
+		}
+
+		_, err := client.Call(context.Background(), []byte("request"))
+
+		if err == nil {
+			t.Fatal("expected error, got nil")
+		}
+
+		if !monoerrors.IsRemoteError(err) {
+			t.Errorf("expected RemoteError, got %T: %v", err, err)
+		}
+
+		remoteErr, ok := monoerrors.GetRemoteError(err)
+		if !ok {
+			t.Fatal("failed to extract RemoteError")
+		}
+
+		if remoteErr.Message != "handler failed: database error" {
+			t.Errorf("expected message 'handler failed: database error', got %q", remoteErr.Message)
+		}
+		if remoteErr.ServiceName != "test-service" {
+			t.Errorf("expected ServiceName 'test-service', got %q", remoteErr.ServiceName)
+		}
+		if remoteErr.ModuleName != "test-module" {
+			t.Errorf("expected ModuleName 'test-module', got %q", remoteErr.ModuleName)
+		}
+		if remoteErr.ErrorType != "service" {
+			t.Errorf("expected ErrorType 'service', got %q", remoteErr.ErrorType)
+		}
+	})
+
+	t.Run("Call detects error response without error type", func(t *testing.T) {
+		eventBus := &mockEventBus{
+			requestMsgWithCtxHandler: func(ctx context.Context, msg *types.Msg) (*types.Msg, error) {
+				return &types.Msg{
+					Header: types.Header{
+						types.HeaderError:        []string{"true"},
+						types.HeaderErrorMessage: []string{"something went wrong"},
+					},
+					Data: nil,
+				}, nil
+			},
+		}
+
+		client := &requestReplyClient{
+			eventBus:        eventBus,
+			serviceName:     "test-service",
+			moduleName:      "test-module",
+			subject:         "services.test-module.test-service",
+			timeout:         5 * time.Second,
+			middlewareChain: &mockMiddlewareChainRunner{},
+		}
+
+		_, err := client.Call(context.Background(), []byte("request"))
+
+		if err == nil {
+			t.Fatal("expected error, got nil")
+		}
+
+		remoteErr, ok := monoerrors.GetRemoteError(err)
+		if !ok {
+			t.Fatal("failed to extract RemoteError")
+		}
+
+		if remoteErr.ErrorType != "" {
+			t.Errorf("expected empty ErrorType, got %q", remoteErr.ErrorType)
+		}
+	})
+
+	t.Run("Call returns normal response when no error header", func(t *testing.T) {
+		eventBus := &mockEventBus{
+			requestMsgWithCtxHandler: func(ctx context.Context, msg *types.Msg) (*types.Msg, error) {
+				return &types.Msg{
+					Header: types.Header{},
+					Data:   []byte("success response"),
+				}, nil
+			},
+		}
+
+		client := &requestReplyClient{
+			eventBus:        eventBus,
+			serviceName:     "test-service",
+			moduleName:      "test-module",
+			subject:         "services.test-module.test-service",
+			timeout:         5 * time.Second,
+			middlewareChain: &mockMiddlewareChainRunner{},
+		}
+
+		resp, err := client.Call(context.Background(), []byte("request"))
+
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if string(resp.Data) != "success response" {
+			t.Errorf("expected 'success response', got %q", string(resp.Data))
+		}
+	})
+}
+
+// TestRequestReplyClientCallMsgErrorResponse tests error response detection in CallMsg
+func TestRequestReplyClientCallMsgErrorResponse(t *testing.T) {
+	t.Run("CallMsg detects error response", func(t *testing.T) {
+		eventBus := &mockEventBus{
+			requestMsgWithCtxHandler: func(ctx context.Context, msg *types.Msg) (*types.Msg, error) {
+				return &types.Msg{
+					Header: types.Header{
+						types.HeaderError:        []string{"true"},
+						types.HeaderErrorMessage: []string{"validation failed"},
+						types.HeaderErrorType:    []string{"timeout"},
+					},
+					Data: nil,
+				}, nil
+			},
+		}
+
+		client := &requestReplyClient{
+			eventBus:        eventBus,
+			serviceName:     "test-service",
+			moduleName:      "test-module",
+			subject:         "services.test-module.test-service",
+			timeout:         5 * time.Second,
+			middlewareChain: &mockMiddlewareChainRunner{},
+		}
+
+		inputMsg := &types.Msg{
+			Data:   []byte("request"),
+			Header: make(types.Header),
+		}
+
+		_, err := client.CallMsg(context.Background(), inputMsg)
+
+		if err == nil {
+			t.Fatal("expected error, got nil")
+		}
+
+		if !monoerrors.IsRemoteError(err) {
+			t.Errorf("expected RemoteError, got %T: %v", err, err)
+		}
+
+		remoteErr, ok := monoerrors.GetRemoteError(err)
+		if !ok {
+			t.Fatal("failed to extract RemoteError")
+		}
+
+		if remoteErr.Message != "validation failed" {
+			t.Errorf("expected message 'validation failed', got %q", remoteErr.Message)
+		}
+	})
+
+	t.Run("CallMsg returns normal response when no error header", func(t *testing.T) {
+		eventBus := &mockEventBus{
+			requestMsgWithCtxHandler: func(ctx context.Context, msg *types.Msg) (*types.Msg, error) {
+				return &types.Msg{
+					Header: types.Header{},
+					Data:   []byte("success"),
+				}, nil
+			},
+		}
+
+		client := &requestReplyClient{
+			eventBus:        eventBus,
+			serviceName:     "test-service",
+			moduleName:      "test-module",
+			subject:         "services.test-module.test-service",
+			timeout:         5 * time.Second,
+			middlewareChain: &mockMiddlewareChainRunner{},
+		}
+
+		inputMsg := &types.Msg{
+			Data:   []byte("request"),
+			Header: make(types.Header),
+		}
+
+		resp, err := client.CallMsg(context.Background(), inputMsg)
+
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if string(resp.Data) != "success" {
+			t.Errorf("expected 'success', got %q", string(resp.Data))
+		}
+	})
+}
+
+// TestCheckForErrorResponse tests the checkForErrorResponse helper method
+func TestCheckForErrorResponse(t *testing.T) {
+	client := &requestReplyClient{
+		serviceName: "test-service",
+		moduleName:  "test-module",
+	}
+
+	t.Run("returns nil for nil header", func(t *testing.T) {
+		response := &types.Msg{
+			Header: nil,
+			Data:   []byte("data"),
+		}
+
+		err := client.checkForErrorResponse(response)
+		if err != nil {
+			t.Errorf("expected nil error, got %v", err)
+		}
+	})
+
+	t.Run("returns nil for empty header", func(t *testing.T) {
+		response := &types.Msg{
+			Header: types.Header{},
+			Data:   []byte("data"),
+		}
+
+		err := client.checkForErrorResponse(response)
+		if err != nil {
+			t.Errorf("expected nil error, got %v", err)
+		}
+	})
+
+	t.Run("returns nil when error header is not 'true'", func(t *testing.T) {
+		response := &types.Msg{
+			Header: types.Header{
+				types.HeaderError: []string{"false"},
+			},
+			Data: []byte("data"),
+		}
+
+		err := client.checkForErrorResponse(response)
+		if err != nil {
+			t.Errorf("expected nil error, got %v", err)
+		}
+	})
+
+	t.Run("returns RemoteError when error header is 'true'", func(t *testing.T) {
+		response := &types.Msg{
+			Header: types.Header{
+				types.HeaderError:        []string{"true"},
+				types.HeaderErrorMessage: []string{"test error message"},
+				types.HeaderErrorType:    []string{"service"},
+			},
+			Data: nil,
+		}
+
+		err := client.checkForErrorResponse(response)
+		if err == nil {
+			t.Fatal("expected error, got nil")
+		}
+
+		remoteErr, ok := monoerrors.GetRemoteError(err)
+		if !ok {
+			t.Fatal("expected RemoteError")
+		}
+
+		if remoteErr.Message != "test error message" {
+			t.Errorf("expected message 'test error message', got %q", remoteErr.Message)
+		}
+	})
+
+	t.Run("uses 'unknown error' when message header is missing", func(t *testing.T) {
+		response := &types.Msg{
+			Header: types.Header{
+				types.HeaderError: []string{"true"},
+			},
+			Data: nil,
+		}
+
+		err := client.checkForErrorResponse(response)
+		if err == nil {
+			t.Fatal("expected error, got nil")
+		}
+
+		remoteErr, ok := monoerrors.GetRemoteError(err)
+		if !ok {
+			t.Fatal("expected RemoteError")
+		}
+
+		if remoteErr.Message != "unknown error" {
+			t.Errorf("expected message 'unknown error', got %q", remoteErr.Message)
+		}
+	})
+}

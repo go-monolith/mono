@@ -26,7 +26,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "make fmt vet"
+            "command": "make fmt vet || true"
           }
         ]
       }

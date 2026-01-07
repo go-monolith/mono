@@ -7,29 +7,29 @@ This guide explains how the Monolith Framework is organized and how all the comp
 The framework is organized into three logical layers:
 
 ```
-┌────────────────────────────────────────────────────────┐
-│                 Application Layer                       │
-│       (Your Modules implementing Module interface)      │
-└────────────────────────────────────────────────────────┘
-                           ↑
-                           │ uses
-                           ↓
-┌────────────────────────────────────────────────────────┐
-│                  Framework Layer                        │
-│  ┌──────────────────┬───────────────┬─────────────────┐ │
-│  │ ServiceContainer │   EventBus    │  EventRegistry  │ │
-│  │  (DI, Services)  │  (Pub/Sub)    │ (EDA,Consumers) │ │
-│  └──────────────────┴───────────────┴─────────────────┘ │
-└────────────────────────────────────────────────────────┘
-                           ↑
-                           │ uses
-                           ↓
-┌────────────────────────────────────────────────────────┐
-│              Infrastructure Layer                       │
-│  ┌──────────────────────────────────────────────────┐  │
-│  │   Embedded NATS Server with JetStream Support   │  │
-│  └──────────────────────────────────────────────────┘  │
-└────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────┐
+│                  Application Layer                   │
+│     (Your Modules implementing Module interface)     │
+└──────────────────────────────────────────────────────┘
+                          ↑
+                          │ uses
+                          ↓
+┌──────────────────────────────────────────────────────┐
+│                   Framework Layer                    │
+│  ┌────────────────┬──────────────┬────────────────┐  │
+│  │ServiceContainer│   EventBus   │ EventRegistry  │  │
+│  │ (DI, Services) │  (Pub/Sub)   │(EDA,Consumers) │  │
+│  └────────────────┴──────────────┴────────────────┘  │
+└──────────────────────────────────────────────────────┘
+                          ↑
+                          │ uses
+                          ↓
+┌──────────────────────────────────────────────────────┐
+│                Infrastructure Layer                  │
+│  ┌────────────────────────────────────────────────┐  │
+│  │  Embedded NATS Server with JetStream Support   │  │
+│  └────────────────────────────────────────────────┘  │
+└──────────────────────────────────────────────────────┘
 ```
 
 ## Core Components
@@ -451,26 +451,26 @@ Note: Actual performance depends on message size, system load, and configuration
 The framework is designed for monolith deployment:
 
 ```
-┌─────────────────────────────────┐
-│    Single Deployable Unit       │
-│  ┌──────────────────────────┐   │
-│  │  Your Application        │   │
-│  │  ┌────────────────────┐  │   │
-│  │  │ Order Module       │  │   │
-│  │  │ Payment Module     │  │   │
-│  │  │ Email Module       │  │   │
-│  │  └────────────────────┘  │   │
-│  │         ↓                │   │
-│  │  ┌────────────────────┐  │   │
-│  │  │  Embedded NATS     │  │   │
-│  │  │  with JetStream    │  │   │
-│  │  └────────────────────┘  │   │
-│  └──────────────────────────┘   │
-└─────────────────────────────────┘
-         ↓
-    One Docker Image
-    One Binary
-    One Process
+┌───────────────────────────────────┐
+│      Single Deployable Unit       │
+│  ┌─────────────────────────────┐  │
+│  │     Your Application        │  │
+│  │  ┌───────────────────────┐  │  │
+│  │  │ Order Module          │  │  │
+│  │  │ Payment Module        │  │  │
+│  │  │ Email Module          │  │  │
+│  │  └───────────────────────┘  │  │
+│  │             ↓               │  │
+│  │  ┌───────────────────────┐  │  │
+│  │  │    Embedded NATS      │  │  │
+│  │  │    with JetStream     │  │  │
+│  │  └───────────────────────┘  │  │
+│  └─────────────────────────────┘  │
+└───────────────────────────────────┘
+              ↓
+       One Docker Image
+       One Binary
+       One Process
 ```
 
 ## Summary

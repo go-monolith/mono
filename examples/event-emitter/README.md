@@ -14,24 +14,21 @@ The modules communicate entirely through events, demonstrating loose coupling an
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────┐
-│                   Mono Application                       │
-├─────────────────────────────────────────────────────────┤
-│                                                           │
-│  ┌──────────────────┐         Event Channel    ┌───────┐ │
-│  │ Tracking Module  │ ────── OrderCreated ───→ │       │ │
-│  │ (EventEmitter)   │         OrderShipped   │ Notif. │ │
-│  │                  │                        │ Module │ │
-│  │ • CreateOrder()  │                        │ (Event │ │
-│  │ • ShipOrder()    │                        │Consumer)
-│  └──────────────────┘                        │       │ │
-│                                              └───────┘ │
-│                                                │       │ │
-│                                                └─ Storage
-│                                                  (fs-jetstream)
-│
-│         Embedded NATS (JetStream Enabled)         │ │
-├─────────────────────────────────────────────────────────┤
+┌─────────────────────────────────────────────────────────────┐
+│                      Mono Application                       │
+├─────────────────────────────────────────────────────────────┤
+│                                                             │
+│  ┌──────────────────┐                      ┌─────────────┐  │
+│  │ Tracking Module  │  ── OrderCreated ──▶ │ Notif.      │  │
+│  │ (EventEmitter)   │  ── OrderShipped ──▶ │ Module      │  │
+│  │                  │                      │ (Consumer)  │  │
+│  │ • CreateOrder()  │                      │             │  │
+│  │ • ShipOrder()    │                      │  ↓ Storage  │  │
+│  └──────────────────┘                      └─────────────┘  │
+│                                                             │
+├─────────────────────────────────────────────────────────────┤
+│              Embedded NATS (JetStream Enabled)              │
+└─────────────────────────────────────────────────────────────┘
 ```
 
 ## Key Concepts

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 	"regexp"
 	"strings"
 	"sync"
@@ -299,13 +300,36 @@ func (lm *lifecycleManager) setupNATSSubscriptions(ctx context.Context) error {
 				eventBus := lm.eventBus
 				logger := lm.logger
 				serviceName := entry.Name
+				modName := moduleName // Capture module name for error responses
 				queueGroup := entry.QueueGroup
 
 				// Create NATS request-reply subscription with queue group for "at most one" delivery
 				sub, err := eventBus.QueueSubscribe(entry.Subject, queueGroup, func(reqCtx context.Context, msg *types.Msg) {
 					response, err := entry.RequestHandler(reqCtx, msg)
 					if err != nil {
-						logger.Error("RequestReply handler error", "service", serviceName, "error", err)
+						logger.Error("RequestReply handler error", "service", serviceName, "module", modName, "error", err)
+
+						// Send error response instead of leaving the client hanging
+						if msg.Reply != "" {
+							errorMsg := &types.Msg{
+								Subject: msg.Reply,
+								Header: types.Header{
+									types.HeaderError:        []string{"true"},
+									types.HeaderErrorMessage: []string{err.Error()},
+								},
+								Data: nil,
+							}
+
+							// Add error type classification if available (optional header).
+							// Uses reflection to extract the error type name.
+							if errorType := getErrorTypeName(err); errorType != "" {
+								errorMsg.Header[types.HeaderErrorType] = []string{errorType}
+							}
+
+							if pubErr := eventBus.PublishMsg(errorMsg); pubErr != nil {
+								logger.Error("Failed to publish error response", "service", serviceName, "module", modName, "error", pubErr)
+							}
+						}
 						return
 					}
 					// Manually publish response to the reply subject when sender specifies one
@@ -1131,4 +1155,33 @@ func sanitizeConsumerName(name string) string {
 		name = "consumer"
 	}
 	return name
+}
+
+// getErrorTypeName extracts a clean error type name using reflection.
+// It returns the type name in lowercase with "Error" suffix removed.
+// For example: *errors.ServiceError -> "service", *errors.TimeoutError -> "timeout"
+// Returns empty string if the error type cannot be determined.
+func getErrorTypeName(err error) string {
+	if err == nil {
+		return ""
+	}
+
+	// Get the underlying type, handling pointers
+	t := reflect.TypeOf(err)
+	if t == nil {
+		return ""
+	}
+	if t.Kind() == reflect.Ptr {
+		t = t.Elem()
+	}
+
+	// Get the type name and format it
+	typeName := t.Name()
+	if typeName == "" {
+		return ""
+	}
+
+	// Remove "Error" suffix and convert to lowercase
+	typeName = strings.TrimSuffix(typeName, "Error")
+	return strings.ToLower(typeName)
 }
