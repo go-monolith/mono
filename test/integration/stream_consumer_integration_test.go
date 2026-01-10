@@ -14,6 +14,22 @@ import (
 	"github.com/go-monolith/mono"
 )
 
+// setupFrameworkForTest creates a framework with embedded NATS server and JetStream enabled.
+// This is a helper function to reduce code duplication across integration tests.
+func setupFrameworkForTest(t *testing.T) mono.MonoApplication {
+	t.Helper()
+	fw, err := mono.NewMonoApplication(
+		mono.WithCustomLogger(&noOpsLogger{}),
+		mono.WithJetStreamStorageDir(t.TempDir()),
+		mono.WithNATSDontListen(),
+		mono.WithNATSInProcessConn(),
+	)
+	if err != nil {
+		t.Fatalf("Failed to create framework: %v", err)
+	}
+	return fw
+}
+
 // streamConsumerModule is a test module that registers a stream consumer service
 type streamConsumerModule struct {
 	name                 string
@@ -469,6 +485,83 @@ func TestStreamConsumerIntegration(t *testing.T) {
 		}
 		if subTopicCount != 3 {
 			t.Errorf("Expected 3 messages on sub-topics, got %d", subTopicCount)
+		}
+	})
+
+	t.Run("explicit wildcard subject still works (backward compatibility)", func(t *testing.T) {
+		// This test verifies backward compatibility:
+		// Users who explicitly configured wildcard-only subjects (e.g., "orders.>")
+		// should still work correctly after the default subject change.
+
+		config := mono.StreamConsumerConfig{
+			Stream: mono.StreamConfig{
+				Name:     "COMPAT_STREAM",
+				Subjects: []string{"orders.>"}, // Explicitly set wildcard, not relying on defaults
+			},
+			Fetch: mono.FetchConfig{
+				BatchSize: 5,
+				Timeout:   2 * time.Second,
+			},
+		}
+
+		// Expect messages only on sub-topics (wildcard pattern)
+		expectedMessages := 3
+		module := newStreamConsumerModule("compat-test", config, expectedMessages)
+
+		// Create framework
+		fw := setupFrameworkForTest(t)
+
+		// Register module
+		if err := fw.Register(module); err != nil {
+			fw.Stop(context.Background())
+			t.Fatalf("Failed to register module: %v", err)
+		}
+
+		// Start framework
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+
+		if err := fw.Start(ctx); err != nil {
+			fw.Stop(context.Background())
+			t.Fatalf("Failed to start framework: %v", err)
+		}
+		defer fw.Stop(context.Background())
+
+		// Get EventStream
+		js, err := module.eventBus.EventStream()
+		if err != nil {
+			t.Fatalf("Failed to get EventStream: %v", err)
+		}
+
+		// Wait for stream consumer to be set up
+		time.Sleep(500 * time.Millisecond)
+
+		// Publish messages to sub-topics matching the wildcard pattern
+		for i := 0; i < expectedMessages; i++ {
+			_, err := js.Publish(ctx, "orders.new", []byte("order-message"))
+			if err != nil {
+				t.Fatalf("Failed to publish to sub-topic: %v", err)
+			}
+		}
+
+		// Wait for messages
+		if !module.waitForMessages(10 * time.Second) {
+			received := atomic.LoadInt64(&module.messagesReceived)
+			t.Fatalf("Timeout waiting for messages. Expected %d, received %d", expectedMessages, received)
+		}
+
+		// Verify correct number of messages received
+		receivedMsgs := module.getReceivedMessages()
+		if len(receivedMsgs) != expectedMessages {
+			t.Errorf("Expected %d messages, got %d", expectedMessages, len(receivedMsgs))
+		}
+
+		// All messages should be on sub-topics
+		receivedSubjects := module.getReceivedSubjects()
+		for _, subject := range receivedSubjects {
+			if !strings.HasPrefix(subject, "orders.") {
+				t.Errorf("Expected subject to start with 'orders.', got: %s", subject)
+			}
 		}
 	})
 }

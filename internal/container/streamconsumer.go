@@ -64,10 +64,12 @@ func (c *serviceContainer) RegisterStreamConsumerService(
 		}
 	}
 
-	// Derive client publish subject from first subject in Stream.Subjects
-	// For default subjects, the first entry is the concrete subject (services.<module>.<service>)
-	// which matches other service types (RequestReply, QueueGroup)
-	// Note: Stream.Subjects is guaranteed non-empty at this point (either user-provided or defaulted above)
+	// Defensive check: should never trigger, but protects against future code changes
+	if len(config.Stream.Subjects) == 0 {
+		return fmt.Errorf("internal error: stream subjects unexpectedly empty for service '%s'", name)
+	}
+
+	// Derive publish subject from first entry (concrete subject for consistency with RequestReply/QueueGroup)
 	subject := derivePublishSubject(config.Stream.Subjects[0])
 
 	// Create service entry
