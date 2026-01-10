@@ -253,7 +253,7 @@ func TestRegisterStreamConsumerService(t *testing.T) {
 		config := types.StreamConsumerConfig{
 			Stream: types.StreamConfig{
 				Name: "PAYMENTS",
-				// No subjects - should default to "services.payments.processor.>"
+				// No subjects - should default to concrete + wildcard subjects
 			},
 		}
 
@@ -265,18 +265,87 @@ func TestRegisterStreamConsumerService(t *testing.T) {
 		entries := testContainer.Entries()
 		for _, entry := range entries {
 			if entry.Name == "processor" {
-				expectedDefaultSubject := "services.payments.processor.>"
-				if len(entry.StreamConsumerConfig.Stream.Subjects) != 1 {
-					t.Errorf("Expected 1 subject, got %d", len(entry.StreamConsumerConfig.Stream.Subjects))
-				} else if entry.StreamConsumerConfig.Stream.Subjects[0] != expectedDefaultSubject {
-					t.Errorf("Expected default subject %q, got %q", expectedDefaultSubject, entry.StreamConsumerConfig.Stream.Subjects[0])
+				// Default subjects should include both concrete and wildcard patterns
+				expectedConcreteSubject := "services.payments.processor"
+				expectedWildcardSubject := "services.payments.processor.>"
+				if len(entry.StreamConsumerConfig.Stream.Subjects) != 2 {
+					t.Errorf("Expected 2 subjects, got %d", len(entry.StreamConsumerConfig.Stream.Subjects))
+				} else {
+					if entry.StreamConsumerConfig.Stream.Subjects[0] != expectedConcreteSubject {
+						t.Errorf("Expected first subject %q, got %q", expectedConcreteSubject, entry.StreamConsumerConfig.Stream.Subjects[0])
+					}
+					if entry.StreamConsumerConfig.Stream.Subjects[1] != expectedWildcardSubject {
+						t.Errorf("Expected second subject %q, got %q", expectedWildcardSubject, entry.StreamConsumerConfig.Stream.Subjects[1])
+					}
 				}
-				// Publish subject should be derived from wildcard: "services.payments.processor.default"
-				expectedPublishSubject := "services.payments.processor.default"
+				// Publish subject should be derived from first (concrete) subject
+				expectedPublishSubject := "services.payments.processor"
 				if entry.Subject != expectedPublishSubject {
 					t.Errorf("Expected publish subject %q, got %q", expectedPublishSubject, entry.Subject)
 				}
 			}
+		}
+	})
+
+	t.Run("default subject consistent with other service types", func(t *testing.T) {
+		// This test verifies the fix for GitHub issue #5:
+		// StreamConsumer default subject pattern should be consistent with
+		// RequestReply and QueueGroup services (services.<module>.<service>)
+		testContainer := NewServiceContainer(logger).(*serviceContainer)
+		testModule := &mockModule{name: "orders"}
+		_ = testContainer.BindModule(testModule)
+
+		handler := func(ctx context.Context, msgs []*types.Msg) error {
+			return nil
+		}
+
+		config := types.StreamConsumerConfig{
+			Stream: types.StreamConfig{
+				Name: "ORDERS",
+				// Empty subjects - should default to include base subject
+			},
+		}
+
+		err := testContainer.RegisterStreamConsumerService("create", config, handler)
+		if err != nil {
+			t.Fatalf("RegisterStreamConsumerService failed: %v", err)
+		}
+
+		entries := testContainer.Entries()
+		var entry *types.ServiceEntry
+		for _, e := range entries {
+			if e.Name == "create" {
+				entry = e
+				break
+			}
+		}
+
+		if entry == nil {
+			t.Fatal("Service entry not found")
+		}
+
+		// Verify default subjects include both patterns
+		subjects := entry.StreamConsumerConfig.Stream.Subjects
+		if len(subjects) != 2 {
+			t.Fatalf("Expected 2 default subjects, got %d: %v", len(subjects), subjects)
+		}
+
+		// First subject should be concrete (consistent with RequestReply/QueueGroup)
+		expectedBaseSubject := "services.orders.create"
+		if subjects[0] != expectedBaseSubject {
+			t.Errorf("First default subject should be concrete %q, got %q", expectedBaseSubject, subjects[0])
+		}
+
+		// Second subject should be wildcard for sub-topic flexibility
+		expectedWildcard := "services.orders.create.>"
+		if subjects[1] != expectedWildcard {
+			t.Errorf("Second default subject should be wildcard %q, got %q", expectedWildcard, subjects[1])
+		}
+
+		// Publish subject should match base subject (consistent with other services)
+		if entry.Subject != expectedBaseSubject {
+			t.Errorf("Publish subject should be %q (consistent with RequestReply/QueueGroup), got %q",
+				expectedBaseSubject, entry.Subject)
 		}
 	})
 

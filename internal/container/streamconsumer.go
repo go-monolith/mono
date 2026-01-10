@@ -55,16 +55,19 @@ func (c *serviceContainer) RegisterStreamConsumerService(
 		return err
 	}
 	if len(config.Stream.Subjects) == 0 {
-		// Default subject pattern: services.<module>.<service>.>
-		defaultSubject := fmt.Sprintf("%s.>", computedServiceName)
-		config.Stream.Subjects = []string{defaultSubject}
+		// Default subjects: concrete + wildcard pattern
+		// - Concrete subject ensures consistency with other service types (RequestReply, QueueGroup)
+		// - Wildcard pattern allows sub-topic publishing (e.g., services.<module>.<service>.priority.high)
+		config.Stream.Subjects = []string{
+			computedServiceName,                      // services.<module>.<service>
+			fmt.Sprintf("%s.>", computedServiceName), // services.<module>.<service>.>
+		}
 	}
 
 	// Derive client publish subject from first subject in Stream.Subjects
-	// (guaranteed non-empty by the default subject logic above)
-	if len(config.Stream.Subjects) == 0 {
-		return fmt.Errorf("internal error: stream subjects unexpectedly empty for service '%s'", name)
-	}
+	// For default subjects, the first entry is the concrete subject (services.<module>.<service>)
+	// which matches other service types (RequestReply, QueueGroup)
+	// Note: Stream.Subjects is guaranteed non-empty at this point (either user-provided or defaulted above)
 	subject := derivePublishSubject(config.Stream.Subjects[0])
 
 	// Create service entry

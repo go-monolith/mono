@@ -5,6 +5,7 @@ package integration_test
 
 import (
 	"context"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -353,6 +354,121 @@ func TestStreamConsumerIntegration(t *testing.T) {
 		receivedMsgs := module.getReceivedMessages()
 		if len(receivedMsgs) != expectedMessages {
 			t.Errorf("Expected %d pre-published messages, got %d", expectedMessages, len(receivedMsgs))
+		}
+	})
+
+	t.Run("default subjects receive messages on both base and sub-topics (issue #5)", func(t *testing.T) {
+		// This test verifies the fix for GitHub issue #5:
+		// When Stream.Subjects is empty, default subjects should include both:
+		// - services.<module>.<service> (base subject, consistent with other service types)
+		// - services.<module>.<service>.> (wildcard for sub-topics)
+
+		// Create test module with empty subjects to use defaults
+		config := mono.StreamConsumerConfig{
+			Stream: mono.StreamConfig{
+				Name: "DEFAULT_SUBJECTS_STREAM",
+				// Empty subjects - should default to concrete + wildcard
+			},
+			Fetch: mono.FetchConfig{
+				BatchSize: 5,
+				Timeout:   2 * time.Second,
+			},
+		}
+
+		// Expect messages on both base subject and sub-topics
+		expectedMessages := 6 // 3 on base subject + 3 on sub-topics
+		module := newStreamConsumerModule("default-subject-test", config, expectedMessages)
+
+		// Create framework with embedded NATS server with JetStream enabled
+		fw, err := mono.NewMonoApplication(
+			mono.WithCustomLogger(&noOpsLogger{}),
+			mono.WithJetStreamStorageDir(t.TempDir()),
+			mono.WithNATSDontListen(),
+			mono.WithNATSInProcessConn(),
+		)
+		if err != nil {
+			t.Fatalf("Failed to create framework: %v", err)
+		}
+
+		// Register module
+		if err := fw.Register(module); err != nil {
+			fw.Stop(context.Background())
+			t.Fatalf("Failed to register module: %v", err)
+		}
+
+		// Start framework
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+
+		if err := fw.Start(ctx); err != nil {
+			fw.Stop(context.Background())
+			t.Fatalf("Failed to start framework: %v", err)
+		}
+		defer fw.Stop(context.Background())
+
+		// Get EventStream
+		js, err := module.eventBus.EventStream()
+		if err != nil {
+			t.Fatalf("Failed to get EventStream: %v", err)
+		}
+
+		// Wait for stream consumer to be set up
+		time.Sleep(500 * time.Millisecond)
+
+		// The default subject should be: services.default-subject-test.stream-handler
+		baseSubject := "services.default-subject-test.stream-handler"
+
+		// Publish messages to base subject (consistent with RequestReply/QueueGroup pattern)
+		for i := 0; i < 3; i++ {
+			_, err := js.Publish(ctx, baseSubject, []byte("base-message"))
+			if err != nil {
+				t.Fatalf("Failed to publish to base subject: %v", err)
+			}
+		}
+
+		// Publish messages to sub-topics (using wildcard pattern)
+		subTopics := []string{
+			baseSubject + ".priority.high",
+			baseSubject + ".type.order",
+			baseSubject + ".region.us",
+		}
+		for _, topic := range subTopics {
+			_, err := js.Publish(ctx, topic, []byte("subtopic-message"))
+			if err != nil {
+				t.Fatalf("Failed to publish to sub-topic %s: %v", topic, err)
+			}
+		}
+
+		// Wait for all messages
+		if !module.waitForMessages(10 * time.Second) {
+			received := atomic.LoadInt64(&module.messagesReceived)
+			t.Fatalf("Timeout waiting for messages. Expected %d, received %d", expectedMessages, received)
+		}
+
+		// Verify correct number of messages received
+		receivedMsgs := module.getReceivedMessages()
+		if len(receivedMsgs) != expectedMessages {
+			t.Errorf("Expected %d messages (3 base + 3 sub-topics), got %d", expectedMessages, len(receivedMsgs))
+		}
+
+		// Verify we received messages on both base subject and sub-topics
+		receivedSubjects := module.getReceivedSubjects()
+		baseCount := 0
+		subTopicCount := 0
+		for _, subject := range receivedSubjects {
+			if subject == baseSubject {
+				baseCount++
+			} else if strings.HasPrefix(subject, baseSubject+".") {
+				// Sub-topic must start with baseSubject followed by "." separator
+				subTopicCount++
+			}
+		}
+
+		if baseCount != 3 {
+			t.Errorf("Expected 3 messages on base subject, got %d", baseCount)
+		}
+		if subTopicCount != 3 {
+			t.Errorf("Expected 3 messages on sub-topics, got %d", subTopicCount)
 		}
 	})
 }
