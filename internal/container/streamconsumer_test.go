@@ -253,7 +253,7 @@ func TestRegisterStreamConsumerService(t *testing.T) {
 		config := types.StreamConsumerConfig{
 			Stream: types.StreamConfig{
 				Name: "PAYMENTS",
-				// No subjects - should default to "services.payments.processor.>"
+				// No subjects - should default to concrete + wildcard subjects
 			},
 		}
 
@@ -263,20 +263,88 @@ func TestRegisterStreamConsumerService(t *testing.T) {
 		}
 
 		entries := testContainer.Entries()
-		for _, entry := range entries {
-			if entry.Name == "processor" {
-				expectedDefaultSubject := "services.payments.processor.>"
-				if len(entry.StreamConsumerConfig.Stream.Subjects) != 1 {
-					t.Errorf("Expected 1 subject, got %d", len(entry.StreamConsumerConfig.Stream.Subjects))
-				} else if entry.StreamConsumerConfig.Stream.Subjects[0] != expectedDefaultSubject {
-					t.Errorf("Expected default subject %q, got %q", expectedDefaultSubject, entry.StreamConsumerConfig.Stream.Subjects[0])
-				}
-				// Publish subject should be derived from wildcard: "services.payments.processor.default"
-				expectedPublishSubject := "services.payments.processor.default"
-				if entry.Subject != expectedPublishSubject {
-					t.Errorf("Expected publish subject %q, got %q", expectedPublishSubject, entry.Subject)
-				}
+		var entry *types.ServiceEntry
+		for _, e := range entries {
+			if e.Name == "processor" {
+				entry = e
+				break
 			}
+		}
+		if entry == nil {
+			t.Fatal("Service entry 'processor' not found")
+		}
+
+		// Default subjects should include both concrete and wildcard patterns
+		expectedConcreteSubject := "services.payments.processor"
+		expectedWildcardSubject := "services.payments.processor.>"
+		subjects := entry.StreamConsumerConfig.Stream.Subjects
+		if len(subjects) != 2 {
+			t.Fatalf("Expected 2 subjects, got %d: %v", len(subjects), subjects)
+		}
+		if subjects[0] != expectedConcreteSubject {
+			t.Errorf("Expected first subject %q, got %q", expectedConcreteSubject, subjects[0])
+		}
+		if subjects[1] != expectedWildcardSubject {
+			t.Errorf("Expected second subject %q, got %q", expectedWildcardSubject, subjects[1])
+		}
+		// Publish subject should be derived from first (concrete) subject
+		expectedPublishSubject := "services.payments.processor"
+		if entry.Subject != expectedPublishSubject {
+			t.Errorf("Expected publish subject %q, got %q", expectedPublishSubject, entry.Subject)
+		}
+	})
+
+	t.Run("user-provided wildcard subject derives publish subject correctly", func(t *testing.T) {
+		// When user explicitly provides only a wildcard subject (not using defaults),
+		// the publish subject should be derived from that wildcard subject.
+		// This test ensures backward compatibility with explicit wildcard configurations.
+		testContainer := NewServiceContainer(logger).(*serviceContainer)
+		testModule := &mockModule{name: "orders"}
+		_ = testContainer.BindModule(testModule)
+
+		handler := func(ctx context.Context, msgs []*types.Msg) error {
+			return nil
+		}
+
+		config := types.StreamConsumerConfig{
+			Stream: types.StreamConfig{
+				Name:     "ORDERS",
+				Subjects: []string{"orders.>"}, // User-provided wildcard only
+			},
+		}
+
+		err := testContainer.RegisterStreamConsumerService("create", config, handler)
+		if err != nil {
+			t.Fatalf("RegisterStreamConsumerService failed: %v", err)
+		}
+
+		entries := testContainer.Entries()
+		var entry *types.ServiceEntry
+		for _, e := range entries {
+			if e.Name == "create" {
+				entry = e
+				break
+			}
+		}
+
+		if entry == nil {
+			t.Fatal("Service entry not found")
+		}
+
+		// Subjects should be exactly what user provided (no defaults added)
+		subjects := entry.StreamConsumerConfig.Stream.Subjects
+		if len(subjects) != 1 {
+			t.Fatalf("Expected 1 subject (user-provided), got %d: %v", len(subjects), subjects)
+		}
+		if subjects[0] != "orders.>" {
+			t.Errorf("Expected subject 'orders.>', got %q", subjects[0])
+		}
+
+		// Publish subject should be derived from wildcard: orders.> -> orders.default
+		expectedPublishSubject := "orders.default"
+		if entry.Subject != expectedPublishSubject {
+			t.Errorf("Publish subject should be %q (derived from wildcard), got %q",
+				expectedPublishSubject, entry.Subject)
 		}
 	})
 
@@ -426,6 +494,11 @@ func TestDerivePublishSubject(t *testing.T) {
 		{"complex wildcard", "services.payment.>", "services.payment.default"},
 		{"middle single wildcard", "orders.*.items", "orders.default.items"},
 		{"multiple wildcards", "orders.*.items.*", "orders.default.items.default"},
+		// Edge cases: technically invalid NATS patterns but the function handles them gracefully
+		{"multi-level wildcard at end only", "a.b.c.>", "a.b.c.default"},
+		{"empty segments handled", "orders..new", "orders..new"},
+		{"single segment with wildcard", "*", "default"},
+		{"single segment with multi-wildcard", ">", "default"},
 	}
 
 	for _, tt := range tests {

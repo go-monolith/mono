@@ -8,7 +8,7 @@
   "permissions": {
     "allow": [
       "mcp__gosu",
-      "mcp__codex",
+      "mcp__claude-in-chrome",
       "mcp__ide__getDiagnostics",
       "Skill"
     ],
@@ -39,9 +39,10 @@
   "enabledPlugins": {
     "gosu-mcp-core@gosu-code": true,
     "voice-coding@gosu-code": true,
-    "codex-mcp@gosu-code": true,
     "gdd@gosu-code": true,
-    "gopls-lsp@claude-plugins-official": true
+    "gopls-lsp@claude-plugins-official": true,
+    "pr-review-toolkit@claude-plugins-official": true,
+    "code-simplifier@claude-plugins-official": true
   },
   "extraKnownMarketplaces": {
     "gosu-code": {

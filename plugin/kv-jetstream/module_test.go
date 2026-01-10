@@ -76,6 +76,8 @@ type mockBackend struct {
 	keysErr   error
 	watchErr  error
 	statusErr error
+	resetErr  error
+	closeErr  error
 }
 
 // mockEntry stores entry data for mock backend.
@@ -158,6 +160,9 @@ func (m *mockBackend) Delete(key string) error {
 func (m *mockBackend) ResetWithContext(_ context.Context) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.resetErr != nil {
+		return m.resetErr
+	}
 	m.data = make(map[string]*mockEntry)
 	return nil
 }
@@ -167,6 +172,11 @@ func (m *mockBackend) Reset() error {
 }
 
 func (m *mockBackend) Close() error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.closeErr != nil {
+		return m.closeErr
+	}
 	return nil
 }
 
@@ -435,37 +445,6 @@ func setupTestNATSWithJetStream(t *testing.T) (*nats.Conn, jetstream.JetStream) 
 	}
 
 	return conn, js
-}
-
-// createTestKeyValue creates a KeyValue store for testing.
-func createTestKeyValue(t *testing.T, js jetstream.JetStream, cfg BucketConfig) jetstream.KeyValue {
-	t.Helper()
-
-	kvCfg := jetstream.KeyValueConfig{
-		Bucket:       cfg.Name,
-		Description:  cfg.Description,
-		MaxValueSize: cfg.MaxValueSize,
-		TTL:          cfg.TTL,
-		MaxBytes:     cfg.MaxBytes,
-		Replicas:     cfg.Replicas,
-	}
-
-	if cfg.Storage == MemoryStorage {
-		kvCfg.Storage = jetstream.MemoryStorage
-	} else {
-		kvCfg.Storage = jetstream.FileStorage
-	}
-
-	if kvCfg.Replicas == 0 {
-		kvCfg.Replicas = 1
-	}
-
-	kv, err := js.CreateKeyValue(context.Background(), kvCfg)
-	if err != nil {
-		t.Fatalf("failed to create KeyValue: %v", err)
-	}
-
-	return kv
 }
 
 // =============================================================================

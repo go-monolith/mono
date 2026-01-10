@@ -182,6 +182,7 @@ func (a *KVStorageAdapter) WatchWithContext(ctx context.Context, pattern string,
 	}
 
 	// No watch support in base storage
+	a.logger.Debug("watch not available: storage backend does not support watching", "pattern", pattern)
 	return nil, nil
 }
 
@@ -369,6 +370,7 @@ func (a *KVStorageAdapter) KeysWithContext(ctx context.Context) ([]string, error
 	}
 
 	// No keys support in base storage - return empty slice
+	a.logger.Debug("keys not available: storage backend does not support key listing")
 	return []string{}, nil
 }
 
@@ -398,6 +400,7 @@ func (a *KVStorageAdapter) StatusWithContext(ctx context.Context) (*storage.Buck
 	}
 
 	// No status support in base storage
+	a.logger.Debug("status not available: storage backend does not support status")
 	return nil, nil
 }
 
