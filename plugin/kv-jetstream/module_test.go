@@ -76,6 +76,8 @@ type mockBackend struct {
 	keysErr   error
 	watchErr  error
 	statusErr error
+	resetErr  error
+	closeErr  error
 }
 
 // mockEntry stores entry data for mock backend.
@@ -158,6 +160,9 @@ func (m *mockBackend) Delete(key string) error {
 func (m *mockBackend) ResetWithContext(_ context.Context) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.resetErr != nil {
+		return m.resetErr
+	}
 	m.data = make(map[string]*mockEntry)
 	return nil
 }
@@ -167,6 +172,11 @@ func (m *mockBackend) Reset() error {
 }
 
 func (m *mockBackend) Close() error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.closeErr != nil {
+		return m.closeErr
+	}
 	return nil
 }
 
