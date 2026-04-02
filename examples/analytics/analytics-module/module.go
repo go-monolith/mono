@@ -90,7 +90,7 @@ func (m *AnalyticModule) Start(_ context.Context) error {
 	}
 
 	// Create cancellable context for graceful shutdown
-	m.ctx, m.cancel = context.WithCancel(context.Background())
+	m.ctx, m.cancel = context.WithCancel(context.Background()) //nolint:gosec // G118: cancel is stored in m.cancel and called in Stop()
 
 	// Start handler goroutine with WaitGroup tracking
 	m.wg.Add(1)

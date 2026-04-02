@@ -567,7 +567,7 @@ func (m *AccessLogModule) wrapChannelService(
 	proxyOut = make(chan *types.Msg, bufferSizeOut)
 
 	// Create proxy context for lifecycle management
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(context.Background()) //nolint:gosec // G118: cancel is stored in proxy.cancel and called in Stop()
 
 	proxy := &channelProxy{
 		serviceName: serviceName,

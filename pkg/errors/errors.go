@@ -561,7 +561,7 @@ func AggregateErrors(errs []error) error {
 	var sb strings.Builder
 	sb.WriteString("multiple errors occurred:\n")
 	for i, err := range nonNilErrs {
-		sb.WriteString(fmt.Sprintf("  [%d] %v\n", i+1, err))
+		fmt.Fprintf(&sb, "  [%d] %v\n", i+1, err)
 	}
 	return errors.New(strings.TrimRight(sb.String(), "\n"))
 }

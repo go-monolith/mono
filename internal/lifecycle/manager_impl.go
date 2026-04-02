@@ -50,7 +50,7 @@ func NewLifecycleManager(
 	queueGroupOptimisticWindow time.Duration,
 ) LifecycleManager {
 	// Create runtime context for graceful shutdown
-	runtimeCtx, cancelRuntime := context.WithCancel(context.Background())
+	runtimeCtx, cancelRuntime := context.WithCancel(context.Background()) //nolint:gosec // G118: cancelRuntime is stored in lm.cancelRuntime and called in shutdown
 
 	return &lifecycleManager{
 		registry:                   reg,
@@ -903,7 +903,7 @@ func (lm *lifecycleManager) setupStreamConsumer(ctx context.Context, entry *type
 	}
 
 	// Start fetch loop goroutine
-	loopCtx, cancel := context.WithCancel(lm.runtimeCtx)
+	loopCtx, cancel := context.WithCancel(lm.runtimeCtx) //nolint:gosec // G118: cancel is stored in lm.streamConsumers and called in shutdown
 	lm.mu.Lock()
 	lm.streamConsumers[entry.Name] = cancel
 	lm.mu.Unlock()
@@ -962,7 +962,7 @@ func (lm *lifecycleManager) setupEventStreamConsumer(ctx context.Context, entry 
 	}
 
 	// Start fetch loop goroutine
-	loopCtx, cancel := context.WithCancel(lm.runtimeCtx)
+	loopCtx, cancel := context.WithCancel(lm.runtimeCtx) //nolint:gosec // G118: cancel is stored in lm.streamConsumers and called in shutdown
 	// Use sequence ID for unique key to avoid collision with other consumers
 	consumerKey := fmt.Sprintf("event-stream-%d", entry.SequenceID)
 	lm.mu.Lock()
