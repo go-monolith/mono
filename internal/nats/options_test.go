@@ -3,6 +3,7 @@ package nats
 import (
 	"strings"
 	"testing"
+	"time"
 )
 
 // TestDefaultNATSConfig verifies that DefaultNATSConfig returns sensible defaults.
@@ -57,6 +58,11 @@ func TestDefaultNATSConfig(t *testing.T) {
 	expectedMaxPayload := int32(1024 * 1024)
 	if cfg.MaxPayload != expectedMaxPayload {
 		t.Errorf("expected default MaxPayload to be %d (1 MB), got %d", expectedMaxPayload, cfg.MaxPayload)
+	}
+
+	expectedStartupReadyTimeout := 10 * time.Second
+	if cfg.StartupReadyTimeout != expectedStartupReadyTimeout {
+		t.Errorf("expected default StartupReadyTimeout to be %v, got %v", expectedStartupReadyTimeout, cfg.StartupReadyTimeout)
 	}
 }
 
@@ -772,6 +778,92 @@ func TestWithConfigFile(t *testing.T) {
 				}
 				if cfg.ConfigFile != tt.path {
 					t.Errorf("expected ConfigFile to be '%s', got '%s'", tt.path, cfg.ConfigFile)
+				}
+			}
+		})
+	}
+}
+
+// TestWithStartupReadyTimeout verifies ready timeout configuration and validation.
+func TestWithStartupReadyTimeout(t *testing.T) {
+	tests := []struct {
+		name        string
+		timeout     time.Duration
+		wantErr     bool
+		errContains string
+	}{
+		{
+			name:    "valid minimum timeout (3s)",
+			timeout: 3 * time.Second,
+			wantErr: false,
+		},
+		{
+			name:    "valid 10s timeout",
+			timeout: 10 * time.Second,
+			wantErr: false,
+		},
+		{
+			name:    "valid 30s timeout",
+			timeout: 30 * time.Second,
+			wantErr: false,
+		},
+		{
+			name:    "valid maximum timeout (60s)",
+			timeout: 60 * time.Second,
+			wantErr: false,
+		},
+		{
+			name:        "below minimum returns error (2s)",
+			timeout:     2 * time.Second,
+			wantErr:     true,
+			errContains: "ready timeout must be between 3s and 60s",
+		},
+		{
+			name:        "below minimum returns error (500ms)",
+			timeout:     500 * time.Millisecond,
+			wantErr:     true,
+			errContains: "ready timeout must be between 3s and 60s",
+		},
+		{
+			name:        "above maximum returns error",
+			timeout:     61 * time.Second,
+			wantErr:     true,
+			errContains: "ready timeout must be between 3s and 60s",
+		},
+		{
+			name:        "zero returns error",
+			timeout:     0,
+			wantErr:     true,
+			errContains: "ready timeout must be between 3s and 60s",
+		},
+		{
+			name:        "negative returns error",
+			timeout:     -1 * time.Second,
+			wantErr:     true,
+			errContains: "ready timeout must be between 3s and 60s",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := DefaultNATSConfig()
+			opt := WithStartupReadyTimeout(tt.timeout)
+
+			err := opt(cfg)
+
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("expected error but got nil")
+				}
+				if tt.errContains != "" && !strings.Contains(err.Error(), tt.errContains) {
+					t.Errorf("expected error to contain '%s', got '%s'", tt.errContains, err.Error())
+				}
+			} else {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				if cfg.StartupReadyTimeout != tt.timeout {
+					t.Errorf("expected StartupReadyTimeout to be %v, got %v", tt.timeout, cfg.StartupReadyTimeout)
 				}
 			}
 		})

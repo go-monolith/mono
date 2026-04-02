@@ -129,12 +129,13 @@ func TestNATSManager_StartStop(t *testing.T) {
 	// Create manager with custom port to avoid conflicts
 	mgr := &natsManager{
 		config: &NATSConfig{
-			Host:             "127.0.0.1",
-			Port:             port,
-			JetStreamEnabled: false,
-			StorageDir:       "",
-			ClusterEnabled:   false,
-			MaxPayload:       1024 * 1024,
+			Host:                "127.0.0.1",
+			Port:                port,
+			JetStreamEnabled:    false,
+			StorageDir:          "",
+			ClusterEnabled:      false,
+			MaxPayload:          1024 * 1024,
+			StartupReadyTimeout: 10 * time.Second,
 		},
 		logger: logger,
 	}
@@ -208,10 +209,11 @@ func TestNATSManager_StartTwice(t *testing.T) {
 
 	mgr := &natsManager{
 		config: &NATSConfig{
-			Host:             "127.0.0.1",
-			Port:             port,
-			JetStreamEnabled: false,
-			MaxPayload:       1024 * 1024,
+			Host:                "127.0.0.1",
+			Port:                port,
+			JetStreamEnabled:    false,
+			MaxPayload:          1024 * 1024,
+			StartupReadyTimeout: 10 * time.Second,
 		},
 		logger: logger,
 	}
@@ -287,11 +289,12 @@ func TestNATSManager_JetStream(t *testing.T) {
 	// Create manager with JetStream enabled
 	mgr := &natsManager{
 		config: &NATSConfig{
-			Host:             "127.0.0.1",
-			Port:             port,
-			JetStreamEnabled: true,
-			StorageDir:       t.TempDir() + "/jetstream",
-			MaxPayload:       1024 * 1024,
+			Host:                "127.0.0.1",
+			Port:                port,
+			JetStreamEnabled:    true,
+			StorageDir:          t.TempDir() + "/jetstream",
+			MaxPayload:          1024 * 1024,
+			StartupReadyTimeout: 10 * time.Second,
 		},
 		logger: logger,
 	}
@@ -340,10 +343,11 @@ func TestNATSManager_JetStreamDisabled(t *testing.T) {
 	// Create manager without JetStream
 	mgr := &natsManager{
 		config: &NATSConfig{
-			Host:             "127.0.0.1",
-			Port:             port,
-			JetStreamEnabled: false,
-			MaxPayload:       1024 * 1024,
+			Host:                "127.0.0.1",
+			Port:                port,
+			JetStreamEnabled:    false,
+			MaxPayload:          1024 * 1024,
+			StartupReadyTimeout: 10 * time.Second,
 		},
 		logger: logger,
 	}
@@ -384,12 +388,13 @@ func TestNATSManager_JetStreamWithDomain(t *testing.T) {
 	// Create manager with JetStream domain
 	mgr := &natsManager{
 		config: &NATSConfig{
-			Host:             "127.0.0.1",
-			Port:             port,
-			JetStreamEnabled: true,
-			JetStreamDomain:  "test-domain",
-			StorageDir:       t.TempDir() + "/jetstream",
-			MaxPayload:       1024 * 1024,
+			Host:                "127.0.0.1",
+			Port:                port,
+			JetStreamEnabled:    true,
+			JetStreamDomain:     "test-domain",
+			StorageDir:          t.TempDir() + "/jetstream",
+			MaxPayload:          1024 * 1024,
+			StartupReadyTimeout: 10 * time.Second,
 		},
 		logger: logger,
 	}
@@ -427,14 +432,15 @@ func TestNATSManager_Clustering(t *testing.T) {
 	// Create manager with clustering
 	mgr := &natsManager{
 		config: &NATSConfig{
-			Host:           "127.0.0.1",
-			Port:           port,
-			ClusterEnabled: true,
-			ClusterName:    "test-cluster",
-			ClusterHost:    "127.0.0.1",
-			ClusterPort:    port + 100,
-			ClusterRoutes:  []string{fmt.Sprintf("nats://127.0.0.1:%d", port+1000)},
-			MaxPayload:     1024 * 1024,
+			Host:                "127.0.0.1",
+			Port:                port,
+			ClusterEnabled:      true,
+			ClusterName:         "test-cluster",
+			ClusterHost:         "127.0.0.1",
+			ClusterPort:         port + 100,
+			ClusterRoutes:       []string{fmt.Sprintf("nats://127.0.0.1:%d", port+1000)},
+			MaxPayload:          1024 * 1024,
+			StartupReadyTimeout: 10 * time.Second,
 		},
 		logger: logger,
 	}
@@ -469,14 +475,15 @@ func TestNATSManager_InvalidClusterRoute(t *testing.T) {
 	// Create manager with invalid cluster route (missing scheme)
 	mgr := &natsManager{
 		config: &NATSConfig{
-			Host:           "127.0.0.1",
-			Port:           port,
-			ClusterEnabled: true,
-			ClusterName:    "test-cluster",
-			ClusterHost:    "127.0.0.1",
-			ClusterPort:    port + 100,
-			ClusterRoutes:  []string{"://invalid"},
-			MaxPayload:     1024 * 1024,
+			Host:                "127.0.0.1",
+			Port:                port,
+			ClusterEnabled:      true,
+			ClusterName:         "test-cluster",
+			ClusterHost:         "127.0.0.1",
+			ClusterPort:         port + 100,
+			ClusterRoutes:       []string{"://invalid"},
+			MaxPayload:          1024 * 1024,
+			StartupReadyTimeout: 10 * time.Second,
 		},
 		logger: logger,
 	}
@@ -507,9 +514,10 @@ func TestNATSManager_PortAlreadyInUse(t *testing.T) {
 	// Start first server
 	mgr1 := &natsManager{
 		config: &NATSConfig{
-			Host:       "127.0.0.1",
-			Port:       port,
-			MaxPayload: 1024 * 1024,
+			Host:                "127.0.0.1",
+			Port:                port,
+			MaxPayload:          1024 * 1024,
+			StartupReadyTimeout: 10 * time.Second,
 		},
 		logger: logger,
 	}
@@ -529,9 +537,10 @@ func TestNATSManager_PortAlreadyInUse(t *testing.T) {
 	// Try to start second server on same port
 	mgr2 := &natsManager{
 		config: &NATSConfig{
-			Host:       "127.0.0.1",
-			Port:       port,
-			MaxPayload: 1024 * 1024,
+			Host:                "127.0.0.1",
+			Port:                port,
+			MaxPayload:          1024 * 1024,
+			StartupReadyTimeout: 10 * time.Second,
 		},
 		logger: newMockLogger(),
 	}
@@ -552,9 +561,10 @@ func TestNATSManager_BasicPubSub(t *testing.T) {
 
 	mgr := &natsManager{
 		config: &NATSConfig{
-			Host:       "127.0.0.1",
-			Port:       port,
-			MaxPayload: 1024 * 1024,
+			Host:                "127.0.0.1",
+			Port:                port,
+			MaxPayload:          1024 * 1024,
+			StartupReadyTimeout: 10 * time.Second,
 		},
 		logger: logger,
 	}
@@ -619,11 +629,12 @@ func TestNATSManager_InProcessConnection(t *testing.T) {
 	// Create manager with in-process connection and DontListen
 	mgr := &natsManager{
 		config: &NATSConfig{
-			Host:             "127.0.0.1",
-			Port:             4222,
-			DontListen:       true,
-			UseInProcessConn: true,
-			MaxPayload:       1024 * 1024,
+			Host:                "127.0.0.1",
+			Port:                4222,
+			DontListen:          true,
+			UseInProcessConn:    true,
+			MaxPayload:          1024 * 1024,
+			StartupReadyTimeout: 10 * time.Second,
 		},
 		logger: logger,
 	}
@@ -702,11 +713,12 @@ func TestNATSManager_UseInProcessConnOnly(t *testing.T) {
 	// This should allow both TCP and in-process connections
 	mgr := &natsManager{
 		config: &NATSConfig{
-			Host:             "127.0.0.1",
-			Port:             port,
-			DontListen:       false, // TCP listener is enabled
-			UseInProcessConn: true,  // But we'll use in-process connection
-			MaxPayload:       1024 * 1024,
+			Host:                "127.0.0.1",
+			Port:                port,
+			DontListen:          false, // TCP listener is enabled
+			UseInProcessConn:    true,  // But we'll use in-process connection
+			MaxPayload:          1024 * 1024,
+			StartupReadyTimeout: 10 * time.Second,
 		},
 		logger: logger,
 	}
@@ -776,13 +788,14 @@ func TestNATSManager_InProcessWithJetStream(t *testing.T) {
 	// Create manager with in-process connection, DontListen, and JetStream
 	mgr := &natsManager{
 		config: &NATSConfig{
-			Host:             "127.0.0.1",
-			Port:             4222,
-			DontListen:       true,
-			UseInProcessConn: true,
-			JetStreamEnabled: true,
-			StorageDir:       t.TempDir() + "/jetstream",
-			MaxPayload:       1024 * 1024,
+			Host:                "127.0.0.1",
+			Port:                4222,
+			DontListen:          true,
+			UseInProcessConn:    true,
+			JetStreamEnabled:    true,
+			StorageDir:          t.TempDir() + "/jetstream",
+			MaxPayload:          1024 * 1024,
+			StartupReadyTimeout: 10 * time.Second,
 		},
 		logger: logger,
 	}
@@ -823,11 +836,12 @@ func TestNATSManager_Stop_DoubleStop(t *testing.T) {
 
 	mgr := &natsManager{
 		config: &NATSConfig{
-			Host:             "127.0.0.1",
-			Port:             0,
-			DontListen:       true,
-			UseInProcessConn: true,
-			MaxPayload:       1024 * 1024,
+			Host:                "127.0.0.1",
+			Port:                0,
+			DontListen:          true,
+			UseInProcessConn:    true,
+			MaxPayload:          1024 * 1024,
+			StartupReadyTimeout: 10 * time.Second,
 		},
 		logger: logger,
 	}
@@ -862,11 +876,12 @@ func TestNATSManager_Stop_NilConnection(t *testing.T) {
 
 	mgr := &natsManager{
 		config: &NATSConfig{
-			Host:             "127.0.0.1",
-			Port:             0,
-			DontListen:       true,
-			UseInProcessConn: true,
-			MaxPayload:       1024 * 1024,
+			Host:                "127.0.0.1",
+			Port:                0,
+			DontListen:          true,
+			UseInProcessConn:    true,
+			MaxPayload:          1024 * 1024,
+			StartupReadyTimeout: 10 * time.Second,
 		},
 		logger: logger,
 	}
@@ -897,11 +912,12 @@ func TestNATSManager_Start_WithLogging(t *testing.T) {
 
 	mgr := &natsManager{
 		config: &NATSConfig{
-			Host:             "127.0.0.1",
-			Port:             0,
-			DontListen:       true,
-			UseInProcessConn: true,
-			MaxPayload:       1024 * 1024,
+			Host:                "127.0.0.1",
+			Port:                0,
+			DontListen:          true,
+			UseInProcessConn:    true,
+			MaxPayload:          1024 * 1024,
+			StartupReadyTimeout: 10 * time.Second,
 			// Enable all NATS server logging
 			LogDebug:    true,
 			LogTrace:    true,
@@ -934,12 +950,13 @@ func TestNATSManager_JetStream_Error(t *testing.T) {
 
 	mgr := &natsManager{
 		config: &NATSConfig{
-			Host:             "127.0.0.1",
-			Port:             0,
-			DontListen:       true,
-			UseInProcessConn: true,
-			JetStreamEnabled: false, // JetStream NOT enabled
-			MaxPayload:       1024 * 1024,
+			Host:                "127.0.0.1",
+			Port:                0,
+			DontListen:          true,
+			UseInProcessConn:    true,
+			JetStreamEnabled:    false, // JetStream NOT enabled
+			MaxPayload:          1024 * 1024,
+			StartupReadyTimeout: 10 * time.Second,
 		},
 		logger: logger,
 	}
@@ -972,13 +989,14 @@ func TestNATSManager_JetStream_NilClient(t *testing.T) {
 
 	mgr := &natsManager{
 		config: &NATSConfig{
-			Host:             "127.0.0.1",
-			Port:             0,
-			DontListen:       true,
-			UseInProcessConn: true,
-			JetStreamEnabled: true,
-			StorageDir:       t.TempDir() + "/jetstream",
-			MaxPayload:       1024 * 1024,
+			Host:                "127.0.0.1",
+			Port:                0,
+			DontListen:          true,
+			UseInProcessConn:    true,
+			JetStreamEnabled:    true,
+			StorageDir:          t.TempDir() + "/jetstream",
+			MaxPayload:          1024 * 1024,
+			StartupReadyTimeout: 10 * time.Second,
 		},
 		logger: logger,
 	}
@@ -1019,11 +1037,12 @@ func TestNATSManager_Stop_PanicRecovery(t *testing.T) {
 
 	mgr := &natsManager{
 		config: &NATSConfig{
-			Host:             "127.0.0.1",
-			Port:             0,
-			DontListen:       true,
-			UseInProcessConn: true,
-			MaxPayload:       1024 * 1024,
+			Host:                "127.0.0.1",
+			Port:                0,
+			DontListen:          true,
+			UseInProcessConn:    true,
+			MaxPayload:          1024 * 1024,
+			StartupReadyTimeout: 10 * time.Second,
 		},
 		logger: logger,
 	}
@@ -1067,16 +1086,17 @@ func TestNATSManager_Start_InvalidClusterRoute(t *testing.T) {
 
 	mgr := &natsManager{
 		config: &NATSConfig{
-			Host:             "127.0.0.1",
-			Port:             0,
-			DontListen:       true,
-			UseInProcessConn: true,
-			MaxPayload:       1024 * 1024,
-			ClusterEnabled:   true,
-			ClusterName:      "test-cluster",
-			ClusterHost:      "127.0.0.1",
-			ClusterPort:      6222,
-			ClusterRoutes:    []string{"://invalid-url-no-scheme"}, // Invalid URL - missing scheme
+			Host:                "127.0.0.1",
+			Port:                0,
+			DontListen:          true,
+			UseInProcessConn:    true,
+			MaxPayload:          1024 * 1024,
+			StartupReadyTimeout: 10 * time.Second,
+			ClusterEnabled:      true,
+			ClusterName:         "test-cluster",
+			ClusterHost:         "127.0.0.1",
+			ClusterPort:         6222,
+			ClusterRoutes:       []string{"://invalid-url-no-scheme"}, // Invalid URL - missing scheme
 		},
 		logger: logger,
 	}
@@ -1107,11 +1127,12 @@ func TestNATSManager_Start_ConnectionFailure(t *testing.T) {
 	// because we're using an invalid connection approach
 	mgr := &natsManager{
 		config: &NATSConfig{
-			Host:             "127.0.0.1",
-			Port:             0,     // Let OS assign port
-			DontListen:       false, // Start TCP listener
-			UseInProcessConn: false, // Try TCP connection
-			MaxPayload:       1024 * 1024,
+			Host:                "127.0.0.1",
+			Port:                0,     // Let OS assign port
+			DontListen:          false, // Start TCP listener
+			UseInProcessConn:    false, // Try TCP connection
+			MaxPayload:          1024 * 1024,
+			StartupReadyTimeout: 10 * time.Second,
 		},
 		logger: logger,
 	}
@@ -1155,11 +1176,12 @@ func TestNATSManager_Start_ServerReadyTimeout(t *testing.T) {
 	// This test documents the error path even if it's hard to trigger reliably.
 	mgr := &natsManager{
 		config: &NATSConfig{
-			Host:             "127.0.0.1",
-			Port:             0,
-			DontListen:       true,
-			UseInProcessConn: true,
-			MaxPayload:       1024 * 1024,
+			Host:                "127.0.0.1",
+			Port:                0,
+			DontListen:          true,
+			UseInProcessConn:    true,
+			MaxPayload:          1024 * 1024,
+			StartupReadyTimeout: 10 * time.Second,
 		},
 		logger: logger,
 	}
@@ -1201,11 +1223,12 @@ func TestNATSManager_Stop_ConnectionAlreadyClosed(t *testing.T) {
 
 	mgr := &natsManager{
 		config: &NATSConfig{
-			Host:             "127.0.0.1",
-			Port:             0,
-			DontListen:       true,
-			UseInProcessConn: true,
-			MaxPayload:       1024 * 1024,
+			Host:                "127.0.0.1",
+			Port:                0,
+			DontListen:          true,
+			UseInProcessConn:    true,
+			MaxPayload:          1024 * 1024,
+			StartupReadyTimeout: 10 * time.Second,
 		},
 		logger: logger,
 	}
@@ -1238,13 +1261,14 @@ func TestNATSManager_Stop_JetStreamCleared(t *testing.T) {
 
 	mgr := &natsManager{
 		config: &NATSConfig{
-			Host:             "127.0.0.1",
-			Port:             0,
-			DontListen:       true,
-			UseInProcessConn: true,
-			JetStreamEnabled: true,
-			StorageDir:       t.TempDir() + "/jetstream",
-			MaxPayload:       1024 * 1024,
+			Host:                "127.0.0.1",
+			Port:                0,
+			DontListen:          true,
+			UseInProcessConn:    true,
+			JetStreamEnabled:    true,
+			StorageDir:          t.TempDir() + "/jetstream",
+			MaxPayload:          1024 * 1024,
+			StartupReadyTimeout: 10 * time.Second,
 		},
 		logger: logger,
 	}
@@ -1293,11 +1317,12 @@ func TestNATSManager_Start_NewServerError(t *testing.T) {
 		{
 			name: "negative max payload",
 			config: &NATSConfig{
-				Host:             "127.0.0.1",
-				Port:             0,
-				DontListen:       true,
-				UseInProcessConn: true,
-				MaxPayload:       -1, // Invalid
+				Host:                "127.0.0.1",
+				Port:                0,
+				DontListen:          true,
+				UseInProcessConn:    true,
+				MaxPayload:          -1, // Invalid
+				StartupReadyTimeout: 10 * time.Second,
 			},
 		},
 	}
@@ -1343,25 +1368,27 @@ func TestNATSManager_Start_NewServerError_MoreConfigs(t *testing.T) {
 		{
 			name: "cluster port conflict with main port",
 			config: &NATSConfig{
-				Host:             "127.0.0.1",
-				Port:             12345,
-				ClusterEnabled:   true,
-				ClusterName:      "test-cluster",
-				ClusterHost:      "127.0.0.1",
-				ClusterPort:      12345, // Same as main port - should conflict
-				DontListen:       false,
-				UseInProcessConn: false,
-				MaxPayload:       1024 * 1024,
+				Host:                "127.0.0.1",
+				Port:                12345,
+				ClusterEnabled:      true,
+				ClusterName:         "test-cluster",
+				ClusterHost:         "127.0.0.1",
+				ClusterPort:         12345, // Same as main port - should conflict
+				DontListen:          false,
+				UseInProcessConn:    false,
+				MaxPayload:          1024 * 1024,
+				StartupReadyTimeout: 10 * time.Second,
 			},
 		},
 		{
 			name: "extremely large max payload",
 			config: &NATSConfig{
-				Host:             "127.0.0.1",
-				Port:             0,
-				DontListen:       true,
-				UseInProcessConn: true,
-				MaxPayload:       1 << 30, // 1GB - very large
+				Host:                "127.0.0.1",
+				Port:                0,
+				DontListen:          true,
+				UseInProcessConn:    true,
+				MaxPayload:          1 << 30, // 1GB - very large
+				StartupReadyTimeout: 10 * time.Second,
 			},
 		},
 	}
@@ -1397,11 +1424,12 @@ func TestNATSManager_Stop_ConcurrentStops(t *testing.T) {
 
 	mgr := &natsManager{
 		config: &NATSConfig{
-			Host:             "127.0.0.1",
-			Port:             0,
-			DontListen:       true,
-			UseInProcessConn: true,
-			MaxPayload:       1024 * 1024,
+			Host:                "127.0.0.1",
+			Port:                0,
+			DontListen:          true,
+			UseInProcessConn:    true,
+			MaxPayload:          1024 * 1024,
+			StartupReadyTimeout: 10 * time.Second,
 		},
 		logger: logger,
 	}
@@ -1460,11 +1488,12 @@ func TestNATSManager_Stop_ShutdownPanicRecovery(t *testing.T) {
 
 	mgr := &natsManager{
 		config: &NATSConfig{
-			Host:             "127.0.0.1",
-			Port:             0,
-			DontListen:       true,
-			UseInProcessConn: true,
-			MaxPayload:       1024 * 1024,
+			Host:                "127.0.0.1",
+			Port:                0,
+			DontListen:          true,
+			UseInProcessConn:    true,
+			MaxPayload:          1024 * 1024,
+			StartupReadyTimeout: 10 * time.Second,
 		},
 		logger: logger,
 	}

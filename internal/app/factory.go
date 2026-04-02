@@ -138,6 +138,11 @@ func buildNATSOptions(cfg types.NATSOptions) []nats.NATSOption {
 		opts = append(opts, nats.WithMaxPayload(cfg.MaxPayload))
 	}
 
+	// Add ready timeout if configured
+	if cfg.StartupReadyTimeout > 0 {
+		opts = append(opts, nats.WithStartupReadyTimeout(cfg.StartupReadyTimeout))
+	}
+
 	// Add logging configuration if any logging flag is enabled
 	if cfg.LogDebug || cfg.LogTrace || cfg.LogSysTrace {
 		opts = append(opts, nats.WithLogging(cfg.LogDebug, cfg.LogTrace, cfg.LogSysTrace))
