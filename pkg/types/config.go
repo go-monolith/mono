@@ -29,18 +29,19 @@ type MonoFrameworkConfig struct {
 
 // NATSOptions holds NATS server configuration.
 type NATSOptions struct {
-	Host             string
-	Port             int
-	DontListen       bool     // If true, server won't listen on TCP (useful for in-process only). Requires UseInProcessConn=true.
-	UseInProcessConn bool     // If true, client uses in-process connection instead of TCP. Can be used independently or with DontListen.
-	JetStreamEnabled bool     // Track if JetStream is requested
-	JetStreamDomain  string   // JetStream domain for multi-tenancy
-	JetStreamDir     string   // JetStream storage directory
-	ClusterName      string   // NATS cluster name
-	ClusterHost      string   // NATS cluster host for inter-node communication
-	ClusterPort      int      // NATS cluster port for inter-node communication
-	ClusterRoutes    []string // NATS cluster routes (URLs to other cluster nodes)
-	MaxPayload       int32    // Maximum NATS message payload size
+	Host                string
+	Port                int
+	DontListen          bool          // If true, server won't listen on TCP (useful for in-process only). Requires UseInProcessConn=true.
+	UseInProcessConn    bool          // If true, client uses in-process connection instead of TCP. Can be used independently or with DontListen.
+	JetStreamEnabled    bool          // Track if JetStream is requested
+	JetStreamDomain     string        // JetStream domain for multi-tenancy
+	JetStreamDir        string        // JetStream storage directory
+	ClusterName         string        // NATS cluster name
+	ClusterHost         string        // NATS cluster host for inter-node communication
+	ClusterPort         int           // NATS cluster port for inter-node communication
+	ClusterRoutes       []string      // NATS cluster routes (URLs to other cluster nodes)
+	MaxPayload          int32         // Maximum NATS message payload size
+	StartupReadyTimeout time.Duration // Maximum time to wait for NATS server readiness (default: 10s)
 	// NATS server logging flags (passed to SetLoggerV2)
 	LogDebug    bool // If true, enables debug-level NATS server logging
 	LogTrace    bool // If true, enables trace-level NATS server logging

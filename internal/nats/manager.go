@@ -8,7 +8,6 @@ import (
 	"net/url"
 	"runtime/debug"
 	"sync"
-	"time"
 
 	"github.com/go-monolith/mono/pkg/types"
 	"github.com/nats-io/nats-server/v2/server"
@@ -196,8 +195,10 @@ func (m *natsManager) Start(ctx context.Context) error {
 	go ns.Start()
 
 	// Wait for server to be ready
-	if !ns.ReadyForConnections(4 * time.Second) {
-		return fmt.Errorf("NATS server not ready after timeout")
+	if !ns.ReadyForConnections(m.config.StartupReadyTimeout) {
+		ns.Shutdown()
+		m.server = nil
+		return fmt.Errorf("NATS server not ready after %s timeout", m.config.StartupReadyTimeout)
 	}
 
 	logAttrs := []any{

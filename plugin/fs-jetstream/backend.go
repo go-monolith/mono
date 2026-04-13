@@ -302,9 +302,9 @@ func (b *JetStreamBackend) PutReader(key string, reader io.Reader, exp time.Dura
 // convertToStorageObjectInfo converts JetStream ObjectInfo to storage.ObjectInfo.
 func convertToStorageObjectInfo(info *jetstream.ObjectInfo) *storage.ObjectInfo {
 	// Safe uint64 to int64 conversion - cap at MaxInt64 if overflow would occur
-	size := int64(info.Size)
-	if info.Size > math.MaxInt64 {
-		size = math.MaxInt64
+	size := int64(math.MaxInt64)
+	if info.Size <= math.MaxInt64 {
+		size = int64(info.Size)
 	}
 	result := &storage.ObjectInfo{
 		Bucket:      info.Bucket,

@@ -2,6 +2,7 @@ package nats
 
 import (
 	"fmt"
+	"time"
 )
 
 // NATSOption is a functional option for NATS configuration.
@@ -22,6 +23,10 @@ type NATSConfig struct {
 	ClusterPort      int
 	ClusterRoutes    []string
 	MaxPayload       int32
+	// StartupReadyTimeout is the maximum time to wait for the NATS server to be ready for connections.
+	// Defaults to 10 seconds.
+	StartupReadyTimeout time.Duration
+
 	// NATS server logging flags (passed to SetLoggerV2)
 	LogDebug    bool // Enable debug-level NATS server logging
 	LogTrace    bool // Enable trace-level NATS server logging
@@ -50,22 +55,23 @@ type NATSConfig struct {
 // DefaultNATSConfig returns a NATSConfig with sensible defaults.
 func DefaultNATSConfig() *NATSConfig {
 	return &NATSConfig{
-		Host:             "127.0.0.1",
-		Port:             4222,
-		DontListen:       false,
-		UseInProcessConn: false,
-		JetStreamEnabled: false,
-		JetStreamDomain:  "",
-		StorageDir:       "./jetstream",
-		ClusterEnabled:   false,
-		ClusterName:      "",
-		ClusterHost:      "",
-		ClusterPort:      0,
-		ClusterRoutes:    []string{},
-		MaxPayload:       1024 * 1024, // 1 MB default
-		LogDebug:         false,       // Disabled by default
-		LogTrace:         false,       // Disabled by default
-		LogSysTrace:      false,       // Disabled by default
+		Host:                "127.0.0.1",
+		Port:                4222,
+		DontListen:          false,
+		UseInProcessConn:    false,
+		JetStreamEnabled:    false,
+		JetStreamDomain:     "",
+		StorageDir:          "./jetstream",
+		ClusterEnabled:      false,
+		ClusterName:         "",
+		ClusterHost:         "",
+		ClusterPort:         0,
+		ClusterRoutes:       []string{},
+		MaxPayload:          1024 * 1024,      // 1 MB default
+		StartupReadyTimeout: 10 * time.Second, // 10 seconds default
+		LogDebug:            false,            // Disabled by default
+		LogTrace:            false,            // Disabled by default
+		LogSysTrace:         false,            // Disabled by default
 	}
 }
 
@@ -189,6 +195,18 @@ func WithLogging(debug, trace, sysTrace bool) NATSOption {
 		cfg.LogDebug = debug
 		cfg.LogTrace = trace
 		cfg.LogSysTrace = sysTrace
+		return nil
+	}
+}
+
+// WithStartupReadyTimeout sets the maximum time to wait for the NATS server to be ready for connections.
+// The timeout must be between 3 seconds and 60 seconds.
+func WithStartupReadyTimeout(timeout time.Duration) NATSOption {
+	return func(cfg *NATSConfig) error {
+		if timeout < 3*time.Second || timeout > 60*time.Second {
+			return fmt.Errorf("ready timeout must be between 3s and 60s, got %s", timeout)
+		}
+		cfg.StartupReadyTimeout = timeout
 		return nil
 	}
 }

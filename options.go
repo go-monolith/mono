@@ -35,8 +35,9 @@ func DefaultConfig() *types.MonoFrameworkConfig {
 func defaultConfig() *types.MonoFrameworkConfig {
 	return &types.MonoFrameworkConfig{
 		NATSOptions: types.NATSOptions{
-			Host: "127.0.0.1",
-			Port: 4222,
+			Host:                "127.0.0.1",
+			Port:                4222,
+			StartupReadyTimeout: 10 * time.Second,
 		},
 		LoggerOptions: types.LoggerOptions{
 			Level:      types.LogLevelInfo,
@@ -415,6 +416,23 @@ func WithNATSMaxPayload(bytes int32) MonoFrameworkOption {
 				fmt.Sprintf("max payload must be at most %d bytes (8 MB), got %d", maxPayload, bytes))
 		}
 		cfg.NATSOptions.MaxPayload = bytes
+		return nil
+	}
+}
+
+// WithStartupReadyTimeout sets the maximum time to wait for the NATS server to be ready.
+// The timeout must be between 3 seconds and 60 seconds. Default is 10 seconds.
+//
+// Example:
+//
+//	mono.NewMonoApplication(mono.WithStartupReadyTimeout(15 * time.Second))
+func WithStartupReadyTimeout(timeout time.Duration) MonoFrameworkOption {
+	return func(cfg *types.MonoFrameworkConfig) error {
+		if timeout < 3*time.Second || timeout > 60*time.Second {
+			return errors.WrapInvalidConfiguration(0, "WithStartupReadyTimeout", timeout,
+				fmt.Sprintf("ready timeout must be between 3s and 60s, got %s", timeout))
+		}
+		cfg.NATSOptions.StartupReadyTimeout = timeout
 		return nil
 	}
 }

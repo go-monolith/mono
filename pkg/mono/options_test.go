@@ -886,3 +886,72 @@ func TestWithNATSConfigFile_Composition(t *testing.T) {
 		t.Errorf("host = %q, want '0.0.0.0'", cfg.NATSOptions.Host)
 	}
 }
+
+// TestWithStartupReadyTimeout tests NATS ready timeout configuration
+func TestWithStartupReadyTimeout(t *testing.T) {
+	t.Run("default ready timeout", func(t *testing.T) {
+		cfg := mono.DefaultConfig()
+		expected := 10 * time.Second
+		if cfg.NATSOptions.StartupReadyTimeout != expected {
+			t.Errorf("default StartupReadyTimeout = %v, want %v", cfg.NATSOptions.StartupReadyTimeout, expected)
+		}
+	})
+
+	tests := []struct {
+		name      string
+		timeout   time.Duration
+		wantError bool
+		errorMsg  string
+	}{
+		{"valid 3s (minimum)", 3 * time.Second, false, ""},
+		{"valid 10s", 10 * time.Second, false, ""},
+		{"valid 30s", 30 * time.Second, false, ""},
+		{"valid 60s (maximum)", 60 * time.Second, false, ""},
+		{"invalid below minimum (2s)", 2 * time.Second, true, "ready timeout must be between 3s and 60s"},
+		{"invalid below minimum (500ms)", 500 * time.Millisecond, true, "ready timeout must be between 3s and 60s"},
+		{"invalid above maximum (61s)", 61 * time.Second, true, "ready timeout must be between 3s and 60s"},
+		{"invalid zero", 0, true, "ready timeout must be between 3s and 60s"},
+		{"invalid negative", -1 * time.Second, true, "ready timeout must be between 3s and 60s"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := mono.DefaultConfig()
+			err := mono.WithStartupReadyTimeout(tt.timeout)(cfg)
+
+			if tt.wantError {
+				if err == nil {
+					t.Error("expected error, got nil")
+				} else if !strings.Contains(err.Error(), tt.errorMsg) {
+					t.Errorf("error message = %q, want to contain %q", err.Error(), tt.errorMsg)
+				}
+			} else {
+				if err != nil {
+					t.Errorf("unexpected error: %v", err)
+				}
+				if cfg.NATSOptions.StartupReadyTimeout != tt.timeout {
+					t.Errorf("StartupReadyTimeout = %v, want %v", cfg.NATSOptions.StartupReadyTimeout, tt.timeout)
+				}
+			}
+		})
+	}
+}
+
+// TestWithStartupReadyTimeout_ErrorIsConfigurationError tests error type
+func TestWithStartupReadyTimeout_ErrorIsConfigurationError(t *testing.T) {
+	cfg := mono.DefaultConfig()
+	err := mono.WithStartupReadyTimeout(0)(cfg)
+
+	if !monoerrors.IsConfigurationError(err) {
+		t.Error("expected ConfigurationError, got different error type")
+	}
+
+	confErr, ok := monoerrors.GetConfigurationError(err)
+	if !ok {
+		t.Fatal("failed to extract ConfigurationError")
+	}
+
+	if confErr.OptionName != "WithStartupReadyTimeout" {
+		t.Errorf("option name = %q, want 'WithStartupReadyTimeout'", confErr.OptionName)
+	}
+}
