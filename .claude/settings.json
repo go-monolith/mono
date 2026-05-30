@@ -35,7 +35,6 @@
   "enabledPlugins": {
     "gosu-mcp-core@gosu-code": true,
     "voice-coding@gosu-code": true,
-    "gdd@gosu-code": true,
     "gopls-lsp@claude-plugins-official": true,
     "pr-review-toolkit@claude-plugins-official": true,
     "code-simplifier@claude-plugins-official": true
