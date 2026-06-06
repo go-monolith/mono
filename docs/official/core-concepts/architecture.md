@@ -93,7 +93,7 @@ func (m *MyModule) RegisterServices(container mono.ServiceContainer) error {
 **Provides**:
 - Service registration
 - Dependency injection
-- Four service patterns (Channel, Request-Reply, Queue Group, Stream Consumer)
+- Five service patterns (Channel, Request-Reply, Queue Group, Stream Consumer, Cron)
 - Service discovery
 
 ### 4. EventBus (NATS Wrapper)

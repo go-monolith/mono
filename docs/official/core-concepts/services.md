@@ -71,12 +71,14 @@ type ServiceContainer interface {
     RegisterRequestReplyService(name string, handler RequestReplyHandler) error
     RegisterQueueGroupService(name string, pairs ...QGHP) error
     RegisterStreamConsumerService(name string, config StreamConsumerConfig, handler StreamConsumerHandler) error
+    RegisterCronService(name string, config CronServiceConfig, handler CronHandler) error
 
     // Get services (consumer side)
     GetChannelService(serviceName string, consumerModule string) (in chan *Msg, out chan *Msg, err error)
     GetRequestReplyService(name string) (RequestReplyServiceClient, error)
     GetQueueGroupService(name string) (QueueGroupServiceClient, error)
     GetStreamConsumerService(name string) (StreamConsumerServiceClient, error)
+    // (Cron services are server-driven and have no consumer-side client.)
 
     // Query
     Has(name string) bool
@@ -224,7 +226,7 @@ func (m *OrderModule) createOrder(ctx context.Context, order *Order) error {
 
 ## Service Types
 
-The framework supports four service types for different use cases:
+The framework supports five service types for different use cases:
 
 | Service Type | Registration Method | Use Case |
 |-------------|-------------------|----------|
@@ -232,6 +234,7 @@ The framework supports four service types for different use cases:
 | **Request-Reply** | `RegisterRequestReplyService` | Synchronous calls with response |
 | **Queue Group** | `RegisterQueueGroupService` | Async, load-balanced processing |
 | **Stream Consumer** | `RegisterStreamConsumerService` | Durable, at-least-once delivery |
+| **Cron** | `RegisterCronService` | Server-scheduled periodic work (single fire per occurrence) |
 
 For detailed information about each service type, see [Inter-Module Communication](inter-module-communication.md).
 
