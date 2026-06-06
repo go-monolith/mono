@@ -220,6 +220,54 @@ func TestCronServiceIntegration(t *testing.T) {
 		}
 	})
 
+	t.Run("schedule survives restart idempotently", func(t *testing.T) {
+		storageDir := t.TempDir()
+
+		newFW := func() (mono.MonoApplication, *cronTestModule) {
+			module := newCronTestModule("reports", "rollup", mono.CronServiceConfig{
+				Schedule: "@every 1s",
+				Payload:  []byte("tick"),
+			}, 1)
+			fw, err := mono.NewMonoApplication(
+				mono.WithCustomLogger(&noOpsLogger{}),
+				mono.WithJetStreamStorageDir(storageDir),
+				mono.WithNATSDontListen(),
+				mono.WithNATSInProcessConn(),
+			)
+			if err != nil {
+				t.Fatalf("NewMonoApplication failed: %v", err)
+			}
+			if err := fw.Register(module); err != nil {
+				fw.Stop(context.Background())
+				t.Fatalf("Register failed: %v", err)
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			if err := fw.Start(ctx); err != nil {
+				fw.Stop(context.Background())
+				t.Fatalf("Start failed: %v", err)
+			}
+			return fw, module
+		}
+
+		// First boot: the schedule is created and fires.
+		fw1, module1 := newFW()
+		if !module1.waitForTicks(8 * time.Second) {
+			fw1.Stop(context.Background())
+			t.Fatal("first boot: expected a tick")
+		}
+		fw1.Stop(context.Background())
+
+		// Second boot against the same storage: re-creating the stream and
+		// re-publishing the schedule must be idempotent (no error) and the
+		// schedule must keep firing.
+		fw2, module2 := newFW()
+		defer fw2.Stop(context.Background())
+		if !module2.waitForTicks(8 * time.Second) {
+			t.Fatal("second boot: schedule did not survive restart")
+		}
+	})
+
 	t.Run("fails fast without JetStream", func(t *testing.T) {
 		fw, err := mono.NewMonoApplication(
 			mono.WithCustomLogger(&noOpsLogger{}),

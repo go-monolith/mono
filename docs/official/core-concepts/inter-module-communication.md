@@ -678,7 +678,7 @@ The framework enforces consistent naming:
 - Example: `events.order.v1.OrderCreated`
 - Supports wildcards for routing
 
-**Reserved**: `_framework.*` (internal use only)
+**Reserved**: `_mono.*` (internal use only)
 
 ---
 

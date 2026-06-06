@@ -7,8 +7,8 @@ import (
 )
 
 // CronStreamName returns the JetStream stream name backing a cron service. The
-// stream is per-service and carries both the internal schedule/control subjects
-// and the target subject.
+// stream is per-service and carries the schedule/control sub-subjects together
+// with the target service subject.
 func CronStreamName(moduleName, serviceName string) string {
 	return fmt.Sprintf("MONO_CRON_%s_%s", moduleName, serviceName)
 }
@@ -17,28 +17,28 @@ func CronStreamName(moduleName, serviceName string) string {
 // detect orphaned cron streams (schedules with no matching registration).
 const CronStreamNamePrefix = "MONO_CRON_"
 
-// CronScheduleSubject returns the internal subject the schedule message is
-// stored on. It lives under the reserved framework namespace so it never
-// collides with user service/event subjects, and is a legal NATS subject (the
-// framework's kebab-case service-subject validator is intentionally bypassed
-// for it). The durable consumer filters on the target subject only, so the
-// schedule message is never delivered to the handler.
-func CronScheduleSubject(moduleName, serviceName string) string {
-	return fmt.Sprintf("_framework.cron.%s.%s.schedule", moduleName, serviceName)
+// CronScheduleSubject returns the subject the schedule message is stored on,
+// derived from the service subject as "<serviceSubject>.schedule". It is a
+// sub-subject of the standard services.<module>.<service> tree (the same way
+// stream-consumer services allow sub-topics), so it follows the framework's
+// subject convention. The durable consumer filters on the concrete target
+// subject only, so the schedule message is never delivered to the handler.
+func CronScheduleSubject(serviceSubject string) string {
+	return serviceSubject + ".schedule"
 }
 
-// CronControlSubject returns the internal subject used to publish schedule
-// cancellations (purges). The server requires the purge to be published to a
-// subject different from the schedule subject being purged.
-func CronControlSubject(moduleName, serviceName string) string {
-	return fmt.Sprintf("_framework.cron.%s.%s.control", moduleName, serviceName)
+// CronControlSubject returns the subject used to publish schedule cancellations
+// (purges), derived as "<serviceSubject>.control". The server requires the purge
+// to be published to a subject different from the schedule subject being purged.
+func CronControlSubject(serviceSubject string) string {
+	return serviceSubject + ".control"
 }
 
-// CronInternalSubjectsWildcard returns the wildcard covering every internal
-// cron subject for a service (schedule + control). The stream listens on this
-// plus the target subject.
-func CronInternalSubjectsWildcard(moduleName, serviceName string) string {
-	return fmt.Sprintf("_framework.cron.%s.%s.>", moduleName, serviceName)
+// CronSubjectsWildcard returns the wildcard covering the cron sub-subjects
+// (schedule + control) for a service, as "<serviceSubject>.>". The stream
+// listens on this plus the concrete target service subject.
+func CronSubjectsWildcard(serviceSubject string) string {
+	return serviceSubject + ".>"
 }
 
 // Cron schedule header names recognised by the embedded NATS server's message

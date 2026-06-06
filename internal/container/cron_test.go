@@ -55,7 +55,7 @@ func TestRegisterCronService_Valid(t *testing.T) {
 	if want := "services.reports.nightly-rollup"; entry.Subject != want {
 		t.Errorf("target subject = %q, want %q", entry.Subject, want)
 	}
-	if want := "_framework.cron.reports.nightly-rollup.schedule"; entry.ScheduleSubject != want {
+	if want := "services.reports.nightly-rollup.schedule"; entry.ScheduleSubject != want {
 		t.Errorf("schedule subject = %q, want %q", entry.ScheduleSubject, want)
 	}
 }
@@ -173,16 +173,17 @@ func TestFormatServiceType_Cron(t *testing.T) {
 }
 
 func TestCronSubjectHelpers(t *testing.T) {
+	const serviceSubject = "services.mod.job"
 	if got := types.CronStreamName("mod", "job"); got != "MONO_CRON_mod_job" {
 		t.Errorf("CronStreamName = %q", got)
 	}
-	if got := types.CronScheduleSubject("mod", "job"); got != "_framework.cron.mod.job.schedule" {
+	if got := types.CronScheduleSubject(serviceSubject); got != "services.mod.job.schedule" {
 		t.Errorf("CronScheduleSubject = %q", got)
 	}
-	if got := types.CronControlSubject("mod", "job"); got != "_framework.cron.mod.job.control" {
+	if got := types.CronControlSubject(serviceSubject); got != "services.mod.job.control" {
 		t.Errorf("CronControlSubject = %q", got)
 	}
-	if got := types.CronInternalSubjectsWildcard("mod", "job"); got != "_framework.cron.mod.job.>" {
-		t.Errorf("CronInternalSubjectsWildcard = %q", got)
+	if got := types.CronSubjectsWildcard(serviceSubject); got != "services.mod.job.>" {
+		t.Errorf("CronSubjectsWildcard = %q", got)
 	}
 }

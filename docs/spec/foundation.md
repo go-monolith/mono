@@ -80,11 +80,11 @@ Four distinct patterns for inter-module communication:
 
 ### Cron Service Design
 
-- **Subjects**: the schedule message is stored on an internal, framework-owned subject `_framework.cron.<module>.<service>.schedule`; the server republishes the payload to the target service subject `services.<module>.<service>` on every occurrence. The durable consumer filters on the concrete target subject, so the schedule/control messages are never delivered to the handler.
-- **Stream**: one JetStream stream per cron service, `MONO_CRON_<module>_<service>`, with `AllowMsgSchedules` and `AllowRollup` enabled. The schedule rolls up by subject (one schedule per subject), making the startup re-publish idempotent: changing `Schedule`/`Payload`/`TimeZone`/`TTL` and redeploying overwrites the live schedule in place.
+- **Subjects**: cron stays within the standard service subject tree. The schedule message is stored on the `services.<module>.<service>.schedule` sub-subject and purges go to `services.<module>.<service>.control`; the server republishes the payload to the concrete target service subject `services.<module>.<service>` on every occurrence. The durable consumer filters on the concrete target subject, so the schedule/control sub-subjects are never delivered to the handler. The `.schedule` and `.control` sub-topic suffixes are reserved for cron services.
+- **Stream**: one JetStream stream per cron service, `MONO_CRON_<module>_<service>`, listening on `services.<module>.<service>` plus `services.<module>.<service>.>`. Enabling `AllowMsgSchedules` makes the server implicitly enable `AllowRollup` (and clear `DenyPurge`), so the framework does not set them explicitly. The schedule rolls up by subject (one schedule per subject), making the startup re-publish idempotent: changing `Schedule`/`Payload`/`TimeZone`/`TTL` and redeploying overwrites the live schedule in place.
 - **Acknowledgement is framework-owned** (unlike Stream Consumer services, where the handler owns ack): the framework Acks the occurrence when the handler returns nil and Naks it (redelivery up to `MaxDeliver`) on a non-nil error or a recovered panic. The handler must not call `Ack`/`Nak` itself.
 - **Schedule formats**: cron expression (`"0 0 * * *"`), alias (`"@daily"`, `"@hourly"`, …), or interval (`"@every 5m"`, minimum 1s). `TimeZone` applies only to cron expressions (not `@every`/`@at`). `SourceSubject` (mutually exclusive with `Payload`) delivers the last message seen on a subject instead of a static payload.
-- **Retiring a cron service (two-phase)**: set `Deprecated: true` and deploy — the framework purges the server-side schedule (publishing a cancel to `_framework.cron.<module>.<service>.control`) and does not start the consumer, while keeping the registration code. In a later release, remove the `RegisterCronService` call. Removing the call without first deprecating leaves an orphaned durable schedule; the framework logs a warning on startup when it detects a `MONO_CRON_*` stream with no matching registration (it never auto-deletes).
+- **Retiring a cron service (two-phase)**: set `Deprecated: true` and deploy — the framework purges the server-side schedule (publishing a cancel to `services.<module>.<service>.control`) and does not start the consumer, while keeping the registration code. In a later release, remove the `RegisterCronService` call. Removing the call without first deprecating leaves an orphaned durable schedule; the framework logs a warning on startup when it detects a `MONO_CRON_*` stream with no matching registration (it never auto-deletes).
 - **Middleware**: cron handlers are not currently wrapped by the middleware chain (access-log, audit, request-id).
 
 ### Event Consumer Patterns
@@ -116,7 +116,7 @@ The framework enforces standardized subject naming to prevent conflicts:
 
 - **Service subjects**: `services.<module>.<service>` (computed by ServiceContainer, no wildcards)
 - **Event subjects**: `events.<domain>.<event-type>` (supports wildcards for broadcast patterns)
-- **Internal framework**: `_framework.<component>.<operation>` (reserved, modules cannot publish here)
+- **Internal framework**: `_mono.<component>.<operation>` (reserved prefix, modules cannot publish here)
 - **Rules**: Lowercase with hyphens (kebab-case), no spaces or special characters except `.`, `-`, `*`, `>`
 
 ## Monolith-Framework

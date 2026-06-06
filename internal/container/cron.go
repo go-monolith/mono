@@ -56,10 +56,10 @@ func (c *serviceContainer) RegisterCronService(
 		return fmt.Errorf("cron service '%s': SourceSubject must differ from the service subject %q", name, targetSubject)
 	}
 
-	// The schedule message is stored on an internal, framework-owned subject
-	// (distinct from the target) so the durable consumer — which filters on the
-	// concrete target subject — never receives the schedule message itself.
-	scheduleSubject := types.CronScheduleSubject(c.boundModule.Name(), name)
+	// The schedule message is stored on a ".schedule" sub-subject of the service
+	// subject (distinct from the concrete target) so the durable consumer — which
+	// filters on the concrete target subject — never receives it.
+	scheduleSubject := types.CronScheduleSubject(targetSubject)
 
 	entry := &types.ServiceEntry{
 		Type:            types.ServiceTypeCron,

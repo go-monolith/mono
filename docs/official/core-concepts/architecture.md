@@ -229,11 +229,11 @@ Examples:
 
 ### Framework Subjects
 
-Pattern: `_framework.<component>.<operation>`
+Pattern: `_mono.<component>.<operation>`
 
 Examples:
-- `_framework.health.check`
-- `_framework.config.reload`
+- `_mono.health.check`
+- `_mono.config.reload`
 
 **Properties**:
 - Reserved for framework use

@@ -969,21 +969,21 @@ func (lm *lifecycleManager) setupCronService(ctx context.Context, entry *types.S
 	streamName := types.CronStreamName(module, entry.Name)
 	targetSubject := entry.Subject
 	scheduleSubject := entry.ScheduleSubject
-	controlSubject := types.CronControlSubject(module, entry.Name)
+	controlSubject := types.CronControlSubject(targetSubject)
 
-	// The stream covers the internal schedule/control subjects plus the target
-	// subject the server republishes to. Message scheduling requires AllowRollup
-	// (one schedule per subject) and is incompatible with DiscardNew.
-	// MaxMsgsPerSubject bounds the accumulation of delivered ticks without a
-	// stream-wide MaxAge, which could otherwise delete the durable schedule
-	// message for infrequent schedules.
+	// The stream covers the schedule/control sub-subjects plus the concrete
+	// target subject the server republishes to. Enabling AllowMsgSchedules makes
+	// the server implicitly enable AllowRollup (one schedule per subject) and
+	// clear DenyPurge, so neither is set explicitly here. MaxMsgsPerSubject bounds
+	// the accumulation of delivered ticks without a stream-wide MaxAge, which
+	// could otherwise delete the durable schedule message for infrequent
+	// schedules.
 	streamCfg := types.StreamConfig{
 		Name:              streamName,
-		Subjects:          []string{types.CronInternalSubjectsWildcard(module, entry.Name), targetSubject},
+		Subjects:          []string{targetSubject, types.CronSubjectsWildcard(targetSubject)},
 		Retention:         types.LimitsPolicy,
 		Storage:           types.FileStorage,
 		AllowMsgSchedules: true,
-		AllowRollup:       true,
 		MaxMsgsPerSubject: defaultCronMaxMsgsPerSubj,
 		MaxAge:            defaultCronStreamMaxAge,
 	}

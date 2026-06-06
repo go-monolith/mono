@@ -426,14 +426,14 @@ The framework enforces standardized subject naming to prevent conflicts and ensu
 |----------|---------|---------|
 | **Services** | `services.<module>.<service>` | `services.payment.process` |
 | **Events** | `events.<domain>.<version>.<event-type>` | `events.order.v1.created` |
-| **Internal** | `_framework.<component>.<operation>` | `_framework.health.ping` |
+| **Internal** | `_mono.<component>.<operation>` | `_mono.health.ping` |
 
 ### Naming Rules
 
 1. **Lowercase with hyphens** (kebab-case): `order-processing`, not `orderProcessing`
 2. **No spaces or special characters** except `.`, `-`, `*`, `>`
 3. **Wildcards in subscriptions only**: `events.order.>` for all order events
-4. **Reserved prefix**: `_framework.*` for internal framework use
+4. **Reserved prefix**: `_mono.*` for internal framework use
 
 ### Service Subject Construction
 
