@@ -51,6 +51,11 @@ func toJetStreamStreamConfig(cfg types.StreamConfig) (jetstream.StreamConfig, er
 		AllowDirect:          cfg.AllowDirect,
 		MirrorDirect:         cfg.MirrorDirect,
 		Metadata:             cfg.Metadata,
+
+		// Message scheduling / TTL (nats-server v2.14+).
+		AllowMsgSchedules:      cfg.AllowMsgSchedules,
+		AllowMsgTTL:            cfg.AllowMsgTTL,
+		SubjectDeleteMarkerTTL: cfg.SubjectDeleteMarkerTTL,
 	}
 
 	// Validate and convert retention policy

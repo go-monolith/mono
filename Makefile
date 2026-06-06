@@ -162,8 +162,13 @@ run-example-2:
 # Run example 3
 run-example-3:
 	@echo "Running example 3..."
-	@cd examples/analytics && $(GO) build $(BUILD_FLAGS) -o dist/ ./... 
+	@cd examples/analytics && $(GO) build $(BUILD_FLAGS) -o dist/ ./...
 	@examples/analytics/dist/analytics & PID=$$!; sleep 5; kill -2 "$$PID"; wait "$$PID" 2>/dev/null || true
+# Run example 4
+run-example-4:
+	@echo "Running example 4..."
+	@cd examples/cron-scheduler && $(GO) build $(BUILD_FLAGS) -o dist/ ./...
+	@examples/cron-scheduler/dist/cron-scheduler & PID=$$!; sleep 7; kill -2 "$$PID"; wait "$$PID" 2>/dev/null || true
 
 # Pre-commit checks (can be used for pre-commit hook)
 pre-commit: fmt vet test-short lint

@@ -203,7 +203,7 @@ func (c *serviceContainer) registerService(name string, entry *types.ServiceEntr
 	}
 
 	// Validate EventBus is available for NATS-based services
-	if (entry.Type == types.ServiceTypeRequestReply || entry.Type == types.ServiceTypeQueueGroup) && c.eventBus == nil {
+	if (entry.Type == types.ServiceTypeRequestReply || entry.Type == types.ServiceTypeQueueGroup || entry.Type == types.ServiceTypeCron) && c.eventBus == nil {
 		return fmt.Errorf("EventBus must be set before registering %s services", types.FormatServiceType(entry.Type))
 	}
 

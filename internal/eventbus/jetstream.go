@@ -191,6 +191,24 @@ func (j *NatsJetStream) DeleteStream(ctx context.Context, name string) error {
 	return nil
 }
 
+// StreamNames returns the names of all streams known to JetStream.
+//
+// This is exposed as a concrete method (not part of the EventStream interface)
+// so callers can detect it via an optional interface assertion without forcing
+// every EventStream implementation to provide it. It is used for best-effort
+// orphan detection of cron schedule streams.
+func (j *NatsJetStream) StreamNames(ctx context.Context) ([]string, error) {
+	lister := j.js.StreamNames(ctx)
+	var names []string
+	for name := range lister.Name() {
+		names = append(names, name)
+	}
+	if err := lister.Err(); err != nil {
+		return nil, fmt.Errorf("failed to list stream names: %w", err)
+	}
+	return names, nil
+}
+
 // WrapJetStreamMsg wraps a jetstream.Msg into a types.Msg.
 func WrapJetStreamMsg(msg jetstream.Msg) *types.Msg {
 	return &types.Msg{

@@ -35,6 +35,9 @@ func (m *mockServiceContainer) RegisterQueueGroupService(_ string, _ ...types.QG
 func (m *mockServiceContainer) RegisterStreamConsumerService(_ string, _ types.StreamConsumerConfig, _ types.StreamConsumerHandler) error {
 	return nil
 }
+func (m *mockServiceContainer) RegisterCronService(_ string, _ types.CronServiceConfig, _ types.CronHandler) error {
+	return nil
+}
 func (m *mockServiceContainer) GetChannelService(_, _ string) (chan *types.Msg, chan *types.Msg, error) {
 	return nil, nil, nil
 }

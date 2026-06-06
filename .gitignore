@@ -70,3 +70,4 @@ hooks.*.json
 examples/*/analytics
 examples/*/basic
 examples/*/multi-module
+examples/*/cron-scheduler

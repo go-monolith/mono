@@ -290,6 +290,10 @@ func (lm *lifecycleManager) setupNATSSubscriptions(ctx context.Context) error {
 	}
 	lm.mu.RUnlock()
 
+	// Track cron stream names registered this boot for best-effort orphan
+	// detection after all services are set up.
+	registeredCronStreams := make(map[string]struct{})
+
 	for moduleName, moduleContainer := range containers {
 		entries := moduleContainer.Entries()
 
@@ -394,8 +398,21 @@ func (lm *lifecycleManager) setupNATSSubscriptions(ctx context.Context) error {
 				if err := lm.setupStreamConsumer(ctx, entry); err != nil {
 					return fmt.Errorf("failed to setup stream consumer %s: %w", entry.Name, err)
 				}
+
+			case types.ServiceTypeCron:
+				// Setup server-side cron schedule + durable consumer
+				if err := lm.setupCronService(ctx, entry); err != nil {
+					return fmt.Errorf("failed to setup cron service %s: %w", entry.Name, err)
+				}
+				registeredCronStreams[types.CronStreamName(entry.ModuleName, entry.Name)] = struct{}{}
 			}
 		}
+	}
+
+	// Best-effort: warn about cron schedules left orphaned by a removed
+	// registration. Only meaningful when cron services are in use.
+	if len(registeredCronStreams) > 0 {
+		lm.warnOrphanedCronStreams(ctx, registeredCronStreams)
 	}
 
 	// Setup event consumer subscriptions from EventRegistry.
@@ -917,6 +934,273 @@ func (lm *lifecycleManager) setupStreamConsumer(ctx context.Context, entry *type
 		"batch_size", cfg.Fetch.BatchSize)
 
 	return nil
+}
+
+// Default acknowledgement parameters for cron consumers, mirroring the
+// stream-consumer defaults so retry behaviour is consistent across services.
+const (
+	defaultCronAckWait        = 30 * time.Second
+	defaultCronMaxDeliver     = 3
+	defaultCronFetchWait      = 5 * time.Second
+	defaultCronMaxMsgsPerSubj = 256
+	defaultCronStreamMaxAge   = 0 // unbounded: deleting the schedule message would stop the schedule
+)
+
+// setupCronService provisions the server-side cron schedule and, unless the
+// service is deprecated, the durable consumer that delivers each occurrence to
+// the handler. It reuses the JetStream machinery behind RegisterStreamConsumer:
+// a per-service stream with message scheduling enabled, an idempotently
+// (re)published schedule message, and a pull-consumer fetch loop.
+func (lm *lifecycleManager) setupCronService(ctx context.Context, entry *types.ServiceEntry) error {
+	cfg := entry.CronConfig
+	if cfg == nil {
+		return fmt.Errorf("cron config is nil for service %s", entry.Name)
+	}
+	if entry.ScheduleSubject == "" {
+		return fmt.Errorf("cron schedule subject is empty for service %s", entry.Name)
+	}
+
+	es, err := lm.eventBus.EventStream()
+	if err != nil {
+		return fmt.Errorf("cron service %q requires JetStream (enable it via WithJetStreamStorageDir): %w", entry.Name, err)
+	}
+
+	module := entry.ModuleName
+	streamName := types.CronStreamName(module, entry.Name)
+	targetSubject := entry.Subject
+	scheduleSubject := entry.ScheduleSubject
+	controlSubject := types.CronControlSubject(module, entry.Name)
+
+	// The stream covers the internal schedule/control subjects plus the target
+	// subject the server republishes to. Message scheduling requires AllowRollup
+	// (one schedule per subject) and is incompatible with DiscardNew.
+	// MaxMsgsPerSubject bounds the accumulation of delivered ticks without a
+	// stream-wide MaxAge, which could otherwise delete the durable schedule
+	// message for infrequent schedules.
+	streamCfg := types.StreamConfig{
+		Name:              streamName,
+		Subjects:          []string{types.CronInternalSubjectsWildcard(module, entry.Name), targetSubject},
+		Retention:         types.LimitsPolicy,
+		Storage:           types.FileStorage,
+		AllowMsgSchedules: true,
+		AllowRollup:       true,
+		MaxMsgsPerSubject: defaultCronMaxMsgsPerSubj,
+		MaxAge:            defaultCronStreamMaxAge,
+	}
+	if cfg.SourceSubject != "" {
+		streamCfg.Subjects = append(streamCfg.Subjects, cfg.SourceSubject)
+	}
+	if cfg.TTL > 0 {
+		streamCfg.AllowMsgTTL = true
+	}
+
+	if _, err := es.CreateOrUpdateStream(ctx, streamCfg); err != nil {
+		return fmt.Errorf("failed to create cron schedule stream %q (server may not support message schedules; requires nats-server v2.14+): %w", streamName, err)
+	}
+
+	// Deprecated: cancel the schedule and do not start a consumer. The purge is
+	// idempotent — the server accepts it even when no schedule exists.
+	if cfg.Deprecated {
+		if err := lm.purgeCronSchedule(ctx, es, controlSubject, scheduleSubject); err != nil {
+			return fmt.Errorf("failed to purge deprecated cron schedule %q: %w", entry.Name, err)
+		}
+		lm.logger.Info("Cron service deprecated; schedule purged",
+			"service", entry.Name,
+			"schedule_subject", scheduleSubject)
+		return nil
+	}
+
+	// Publish the schedule message. Rollup-by-subject makes re-publishing on
+	// every boot idempotent: a changed Schedule/Payload/TimeZone/TTL overwrites
+	// the prior schedule in place.
+	if err := lm.publishCronSchedule(ctx, es, entry); err != nil {
+		return fmt.Errorf("failed to publish cron schedule %q: %w", entry.Name, err)
+	}
+
+	// Durable pull consumer filtered on the concrete target subject so it never
+	// receives the internal schedule/control messages.
+	consumerName := sanitizeConsumerName(module + "-" + entry.Name + "-cron")
+	consumerCfg := types.ConsumerConfig{
+		Name:          consumerName,
+		FilterSubject: targetSubject,
+		AckPolicy:     types.AckExplicitPolicy,
+		AckWait:       defaultCronAckWait,
+		MaxDeliver:    defaultCronMaxDeliver,
+	}
+	consumer, err := es.CreateOrUpdateConsumer(ctx, streamName, consumerCfg)
+	if err != nil {
+		return fmt.Errorf("failed to create cron consumer %q: %w", consumerName, err)
+	}
+
+	// Key the cancel func by a module-qualified, type-prefixed key so a cron
+	// service never collides with a same-named service in another module (or a
+	// stream consumer), which would overwrite the cancel func and leak this
+	// fetch loop past shutdown.
+	loopCtx, cancel := context.WithCancel(lm.runtimeCtx) //nolint:gosec // G118: cancel is stored in lm.streamConsumers and called in shutdown
+	consumerKey := fmt.Sprintf("cron-%s-%s", entry.ModuleName, entry.Name)
+	lm.mu.Lock()
+	lm.streamConsumers[consumerKey] = cancel
+	lm.mu.Unlock()
+
+	go lm.runCronConsumerLoop(loopCtx, consumer, entry)
+
+	lm.logger.Info("Cron service started",
+		"service", entry.Name,
+		"stream", streamName,
+		"consumer", consumerName,
+		"schedule", cfg.Schedule,
+		"target_subject", targetSubject)
+
+	return nil
+}
+
+// publishCronSchedule publishes the schedule message that drives the server-side
+// scheduler. The schedule headers flow to the wire unchanged through the
+// existing EventStream.PublishMsg path.
+func (lm *lifecycleManager) publishCronSchedule(ctx context.Context, es types.EventStream, entry *types.ServiceEntry) error {
+	cfg := entry.CronConfig
+	hdr := types.Header{
+		types.HeaderNatsSchedule:       []string{cfg.Schedule},
+		types.HeaderNatsScheduleTarget: []string{entry.Subject},
+	}
+	if cfg.TimeZone != "" {
+		hdr[types.HeaderNatsScheduleTimeZone] = []string{cfg.TimeZone}
+	}
+	if cfg.TTL > 0 {
+		hdr[types.HeaderNatsScheduleTTL] = []string{cfg.TTL.String()}
+	}
+	if cfg.SourceSubject != "" {
+		hdr[types.HeaderNatsScheduleSource] = []string{cfg.SourceSubject}
+	}
+	_, err := es.PublishMsg(ctx, &types.Msg{
+		Subject: entry.ScheduleSubject,
+		Data:    cfg.Payload,
+		Header:  hdr,
+	})
+	return err
+}
+
+// purgeCronSchedule cancels a server-side schedule. The purge must be published
+// to a subject different from the schedule subject (here the control subject),
+// naming the schedule to purge via the Nats-Scheduler header.
+func (lm *lifecycleManager) purgeCronSchedule(ctx context.Context, es types.EventStream, controlSubject, scheduleSubject string) error {
+	_, err := es.PublishMsg(ctx, &types.Msg{
+		Subject: controlSubject,
+		Header: types.Header{
+			types.HeaderNatsScheduleNext: []string{types.HeaderNatsScheduleNextPurge},
+			types.HeaderNatsScheduler:    []string{scheduleSubject},
+		},
+	})
+	return err
+}
+
+// runCronConsumerLoop fetches scheduled occurrences one at a time and dispatches
+// each to the handler. Unlike the stream-consumer loop, the framework owns
+// acknowledgement here (see dispatchCronTick).
+func (lm *lifecycleManager) runCronConsumerLoop(ctx context.Context, consumer jetstream.Consumer, entry *types.ServiceEntry) {
+	for {
+		select {
+		case <-ctx.Done():
+			lm.logger.Info("Cron consumer loop stopping", "service", entry.Name)
+			return
+		default:
+			if ctx.Err() != nil {
+				lm.logger.Info("Cron consumer loop cancelled", "service", entry.Name)
+				return
+			}
+
+			msgs, err := consumer.Fetch(1, jetstream.FetchMaxWait(defaultCronFetchWait))
+			if err != nil {
+				if ctx.Err() != nil {
+					lm.logger.Info("Cron consumer loop cancelled", "service", entry.Name)
+					return
+				}
+				if !errors.Is(err, nats.ErrTimeout) {
+					lm.logger.Error("Cron fetch error", "service", entry.Name, "error", err)
+					select {
+					case <-ctx.Done():
+						return
+					case <-time.After(time.Second):
+					}
+				}
+				continue
+			}
+
+			for msg := range msgs.Messages() {
+				if ctx.Err() != nil {
+					return
+				}
+				lm.dispatchCronTick(ctx, entry, eventbus.WrapJetStreamMsg(msg))
+			}
+
+			if msgs.Error() != nil && !errors.Is(msgs.Error(), nats.ErrTimeout) {
+				lm.logger.Error("Cron fetch batch error", "service", entry.Name, "error", msgs.Error())
+			}
+		}
+	}
+}
+
+// dispatchCronTick invokes the cron handler and acknowledges the occurrence on
+// the handler's behalf: Ack on nil, Nak on error (including a recovered panic).
+func (lm *lifecycleManager) dispatchCronTick(ctx context.Context, entry *types.ServiceEntry, msg *types.Msg) {
+	if err := lm.invokeCronHandler(ctx, entry, msg); err != nil {
+		lm.logger.Error("Cron handler error", "service", entry.Name, "error", err)
+		if nakErr := msg.Nak(); nakErr != nil {
+			lm.logger.Error("Cron Nak failed", "service", entry.Name, "error", nakErr)
+		}
+		return
+	}
+	if ackErr := msg.Ack(); ackErr != nil {
+		lm.logger.Error("Cron Ack failed", "service", entry.Name, "error", ackErr)
+	}
+}
+
+// invokeCronHandler calls the handler, converting a panic into an error so the
+// loop survives and the occurrence is redelivered.
+func (lm *lifecycleManager) invokeCronHandler(ctx context.Context, entry *types.ServiceEntry, msg *types.Msg) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("cron handler panicked: %v", r)
+		}
+	}()
+	return entry.CronHandler(ctx, msg)
+}
+
+// cronStreamNamesLister is the optional capability used to enumerate streams for
+// best-effort orphan detection. The concrete NatsJetStream implements it.
+type cronStreamNamesLister interface {
+	StreamNames(ctx context.Context) ([]string, error)
+}
+
+// warnOrphanedCronStreams logs a warning for any framework-managed cron stream
+// that has no matching registration this boot (a schedule that may still be
+// firing server-side because its RegisterCronService call was removed without
+// first setting Deprecated). It never deletes anything.
+func (lm *lifecycleManager) warnOrphanedCronStreams(ctx context.Context, registered map[string]struct{}) {
+	es, err := lm.eventBus.EventStream()
+	if err != nil {
+		return
+	}
+	lister, ok := es.(cronStreamNamesLister)
+	if !ok {
+		return
+	}
+	// Note: this enumerates every stream in the JetStream account once at
+	// startup. It is best-effort and only runs when cron services are in use.
+	names, err := lister.StreamNames(ctx)
+	if err != nil {
+		lm.logger.Debug("Could not list streams for cron orphan check", "error", err)
+		return
+	}
+	for _, name := range names {
+		if !strings.HasPrefix(name, types.CronStreamNamePrefix) {
+			continue
+		}
+		if _, ok := registered[name]; !ok {
+			lm.logger.Warn("Orphaned cron schedule stream detected (no matching registration); it may still be firing. To retire it cleanly, re-add the service with Deprecated:true to purge the schedule, or delete the stream manually",
+				"stream", name)
+		}
+	}
 }
 
 // setupEventStreamConsumer sets up a JetStream stream consumer for an event

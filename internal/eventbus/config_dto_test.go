@@ -372,6 +372,46 @@ func TestToJetStreamStreamConfig(t *testing.T) {
 			t.Errorf("expected Replicas 3, got %d", jsCfg.Replicas)
 		}
 	})
+
+	t.Run("message scheduling fields mapped", func(t *testing.T) {
+		cfg := types.StreamConfig{
+			Name:                   "CRON_STREAM",
+			Subjects:               []string{"cron.>"},
+			AllowMsgSchedules:      true,
+			AllowMsgTTL:            true,
+			AllowRollup:            true,
+			SubjectDeleteMarkerTTL: 2 * time.Second,
+		}
+
+		jsCfg, err := toJetStreamStreamConfig(cfg)
+		if err != nil {
+			t.Fatalf("toJetStreamStreamConfig failed: %v", err)
+		}
+		if !jsCfg.AllowMsgSchedules {
+			t.Error("expected AllowMsgSchedules to be mapped true")
+		}
+		if !jsCfg.AllowMsgTTL {
+			t.Error("expected AllowMsgTTL to be mapped true")
+		}
+		if jsCfg.SubjectDeleteMarkerTTL != 2*time.Second {
+			t.Errorf("expected SubjectDeleteMarkerTTL 2s, got %v", jsCfg.SubjectDeleteMarkerTTL)
+		}
+	})
+
+	t.Run("message scheduling fields default off", func(t *testing.T) {
+		cfg := types.StreamConfig{
+			Name:     "PLAIN_STREAM",
+			Subjects: []string{"plain.>"},
+		}
+
+		jsCfg, err := toJetStreamStreamConfig(cfg)
+		if err != nil {
+			t.Fatalf("toJetStreamStreamConfig failed: %v", err)
+		}
+		if jsCfg.AllowMsgSchedules || jsCfg.AllowMsgTTL || jsCfg.SubjectDeleteMarkerTTL != 0 {
+			t.Error("expected scheduling fields to be zero-valued by default")
+		}
+	})
 }
 
 // TestToJetStreamStreamSource tests stream source conversion
