@@ -64,18 +64,23 @@ func CronSubjectsWildcard(serviceSubject string) string {
 // A standard five-field cron expression ("0 0 * * *") gets "0" prepended as
 // the seconds field, preserving its conventional meaning (fire at second
 // zero). Named aliases ("@daily"), intervals ("@every 5m"), and expressions
-// that already have six fields are returned unchanged. Anything else (for
-// example a malformed field count) is also returned unchanged and left to the
-// server to reject, which remains the authoritative validator.
+// that already have six fields are returned unchanged apart from whitespace.
+// Anything else (for example a malformed field count) is also passed through
+// and left to the server to reject, which remains the authoritative
+// validator. Leading and trailing whitespace is trimmed on every path, and
+// internal whitespace is collapsed to single spaces in cron expressions.
 func NormalizeCronSchedule(schedule string) string {
 	trimmed := strings.TrimSpace(schedule)
 	if strings.HasPrefix(trimmed, "@") {
-		return schedule
+		return trimmed
 	}
-	if fields := strings.Fields(trimmed); len(fields) == 5 {
+	fields := strings.Fields(trimmed)
+	if len(fields) == 5 {
 		return "0 " + strings.Join(fields, " ")
 	}
-	return schedule
+	// Six-field, malformed, or empty — collapse whitespace the same way as
+	// the five-field path and let the server validate the field count.
+	return strings.Join(fields, " ")
 }
 
 // Cron schedule header names recognised by the embedded NATS server's message

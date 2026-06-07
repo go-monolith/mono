@@ -33,6 +33,16 @@ func TestNormalizeCronSchedule(t *testing.T) {
 			want:     "15 0 0 * * *",
 		},
 		{
+			name:     "six-field with surrounding whitespace trimmed",
+			schedule: "  15 0 0  * * *  ",
+			want:     "15 0 0 * * *",
+		},
+		{
+			name:     "alias with surrounding whitespace trimmed",
+			schedule: " @daily ",
+			want:     "@daily",
+		},
+		{
 			name:     "alias unchanged",
 			schedule: "@daily",
 			want:     "@daily",
