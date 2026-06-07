@@ -331,7 +331,7 @@ Acknowledgement is owned by the framework: return `nil` to Ack the occurrence, o
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `Schedule` | `string` | Required. Cron expression (`"0 0 * * *"`), alias (`"@daily"`), or interval (`"@every 5m"`, min 1s) |
+| `Schedule` | `string` | Required. Cron expression — standard five-field (`"0 0 * * *"` = daily at midnight) or six-field seconds-first (`"0 0 0 * * *"`; five-field forms get a `"0"` seconds field prepended) — alias (`"@daily"`), or interval (`"@every 5m"`, min 1s) |
 | `Payload` | `[]byte` | Static payload delivered each occurrence (mutually exclusive with `SourceSubject`) |
 | `SourceSubject` | `string` | Deliver the last message seen on this subject instead of a static payload |
 | `TimeZone` | `string` | Optional IANA time zone (cron expressions only; not `@every`) |

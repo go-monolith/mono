@@ -60,6 +60,28 @@ func TestRegisterCronService_Valid(t *testing.T) {
 	}
 }
 
+func TestRegisterCronService_NormalizesFiveFieldSchedule(t *testing.T) {
+	c := newBoundCronContainer(t, "reports")
+
+	cfg := types.CronServiceConfig{
+		Schedule: "0 0 * * *", // standard five-field form
+		Payload:  []byte("x"),
+	}
+	if err := c.RegisterCronService("nightly", cfg, noopCronHandler); err != nil {
+		t.Fatalf("RegisterCronService failed: %v", err)
+	}
+
+	for _, e := range c.Entries() {
+		if e.Name == "nightly" {
+			if want := "0 0 0 * * *"; e.CronConfig.Schedule != want {
+				t.Errorf("stored schedule = %q, want normalized %q", e.CronConfig.Schedule, want)
+			}
+			return
+		}
+	}
+	t.Fatal("service entry not found")
+}
+
 func TestRegisterCronService_Validation(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -76,6 +98,12 @@ func TestRegisterCronService_Validation(t *testing.T) {
 		{
 			name:    "empty schedule",
 			config:  types.CronServiceConfig{Payload: []byte("x")},
+			handler: noopCronHandler,
+			wantErr: true,
+		},
+		{
+			name:    "whitespace-only schedule",
+			config:  types.CronServiceConfig{Schedule: "   ", Payload: []byte("x")},
 			handler: noopCronHandler,
 			wantErr: true,
 		},
@@ -105,7 +133,13 @@ func TestRegisterCronService_Validation(t *testing.T) {
 		},
 		{
 			name:    "valid with timezone and ttl",
-			config:  types.CronServiceConfig{Schedule: "0 0 * * *", TimeZone: "UTC", TTL: time.Minute, Payload: []byte("x")},
+			config:  types.CronServiceConfig{Schedule: "0 0 0 * * *", TimeZone: "UTC", TTL: time.Minute, Payload: []byte("x")},
+			handler: noopCronHandler,
+			wantErr: false,
+		},
+		{
+			name:    "valid five-field cron expression",
+			config:  types.CronServiceConfig{Schedule: "0 0 * * *", Payload: []byte("x")},
 			handler: noopCronHandler,
 			wantErr: false,
 		},

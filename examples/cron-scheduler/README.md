@@ -24,9 +24,11 @@ func (m *HeartbeatModule) RegisterServices(c mono.ServiceContainer) error {
 
 - **Requires JetStream**: enable it via `WithJetStreamStorageDir(...)`. Registering a cron service
   without JetStream fails fast at startup.
-- **Schedule formats**: a cron expression (`"0 0 * * *"`), a named alias (`"@daily"`, `"@hourly"`,
-  …), or an interval (`"@every 5m"`, minimum 1s). A `TimeZone` may only be used with cron
-  expressions (not `@every`).
+- **Schedule formats**: a cron expression in the standard five-field format (`"0 0 * * *"` = daily
+  at midnight) or the six-field seconds-first format (`"0 0 0 * * *"`; five-field expressions are
+  normalized by prepending a `"0"` seconds field), a named alias (`"@daily"`, `"@hourly"`, …), or
+  an interval (`"@every 5m"`, minimum 1s). A `TimeZone` may only be used with cron expressions
+  (not `@every`).
 - **Acknowledgement is framework-owned**: return `nil` to Ack the occurrence, or a non-nil error to
   Nak it (redelivered up to the consumer's `MaxDeliver`). Do **not** call `msg.Ack()` yourself.
 - **Idempotent**: the schedule is (re)published on every startup, so changing the `Schedule`,

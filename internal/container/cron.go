@@ -23,6 +23,11 @@ const minScheduleTTL = time.Second
 // Validation is fail-fast: the handler must be non-nil, Schedule must be set,
 // Payload and SourceSubject are mutually exclusive, TimeZone (when set) must be
 // a valid IANA location, and TTL (when set) must be at least one second.
+//
+// Standard five-field cron expressions are normalized to the six-field
+// seconds-first format the NATS scheduler expects (see
+// types.NormalizeCronSchedule); the schedule pattern itself is validated by
+// the server.
 func (c *serviceContainer) RegisterCronService(
 	name string,
 	config types.CronServiceConfig,
@@ -31,6 +36,11 @@ func (c *serviceContainer) RegisterCronService(
 	if handler == nil {
 		return fmt.Errorf("handler is required for cron service '%s'", name)
 	}
+	// Accept standard five-field cron expressions by normalizing them to the
+	// six-field seconds-first format the NATS scheduler expects. config is a
+	// copy, so this never mutates the caller's value. Normalizing first also
+	// lets the emptiness check below catch whitespace-only schedules.
+	config.Schedule = types.NormalizeCronSchedule(config.Schedule)
 	if config.Schedule == "" {
 		return fmt.Errorf("schedule is required for cron service '%s'", name)
 	}
