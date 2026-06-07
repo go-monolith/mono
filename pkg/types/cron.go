@@ -57,14 +57,36 @@ func CronSubjectsWildcard(serviceSubject string) string {
 	return serviceSubject + ".>"
 }
 
+// NormalizeCronSchedule normalizes a schedule pattern to the six-field
+// seconds-first cron format understood by the embedded NATS message scheduler
+// (nats-server v2.14+, ADR-51).
+//
+// A standard five-field cron expression ("0 0 * * *") gets "0" prepended as
+// the seconds field, preserving its conventional meaning (fire at second
+// zero). Named aliases ("@daily"), intervals ("@every 5m"), and expressions
+// that already have six fields are returned unchanged. Anything else (for
+// example a malformed field count) is also returned unchanged and left to the
+// server to reject, which remains the authoritative validator.
+func NormalizeCronSchedule(schedule string) string {
+	trimmed := strings.TrimSpace(schedule)
+	if strings.HasPrefix(trimmed, "@") {
+		return schedule
+	}
+	if fields := strings.Fields(trimmed); len(fields) == 5 {
+		return "0 " + strings.Join(fields, " ")
+	}
+	return schedule
+}
+
 // Cron schedule header names recognised by the embedded NATS server's message
 // scheduler (nats-server v2.14+, ADR-51). These are written on the schedule
 // message that the framework publishes to the schedule subject; the server
 // uses them to drive the recurring republish of the payload to the target
 // subject.
 const (
-	// HeaderNatsSchedule carries the schedule pattern: a cron expression
-	// ("0 0 * * *"), a named alias ("@daily"), or an interval ("@every 5m").
+	// HeaderNatsSchedule carries the schedule pattern: a six-field
+	// seconds-first cron expression ("0 0 0 * * *"), a named alias
+	// ("@daily"), or an interval ("@every 5m").
 	HeaderNatsSchedule = "Nats-Schedule"
 
 	// HeaderNatsScheduleTarget names the subject the server republishes the
@@ -115,8 +137,13 @@ type CronHandler func(ctx context.Context, msg *Msg) error
 // acknowledgement (at-least-once).
 type CronServiceConfig struct {
 	// Schedule is the schedule pattern. Required (even when Deprecated). One of:
-	// a cron expression ("0 0 * * *"), a named alias ("@daily", "@hourly", ...),
-	// or an interval ("@every 5m"). The pattern is validated by the server.
+	// a cron expression, a named alias ("@daily", "@hourly", ...), or an
+	// interval ("@every 5m"). Cron expressions may use either the standard
+	// five-field format ("0 0 * * *" = daily at midnight) or the six-field
+	// seconds-first format the NATS scheduler natively understands
+	// ("0 0 0 * * *"); five-field expressions are normalized by prepending a
+	// "0" seconds field (see NormalizeCronSchedule). The pattern is validated
+	// by the server.
 	Schedule string
 
 	// Payload is the static message body delivered to the handler on each

@@ -384,7 +384,7 @@ func (m *ReportModule) handleRollup(ctx context.Context, msg *mono.Msg) error {
 
 | Form | Example | Notes |
 |------|---------|-------|
-| Cron expression | `"0 0 * * *"` | Supports an optional `TimeZone` (IANA) |
+| Cron expression | `"0 0 * * *"` (= daily at midnight) | Standard five-field or six-field **seconds-first** form; five-field expressions are normalized by prepending a `"0"` seconds field. Supports an optional `TimeZone` (IANA) |
 | Named alias | `"@daily"`, `"@hourly"`, `"@weekly"` | Convenience aliases |
 | Interval | `"@every 5m"` | Minimum 1s; `TimeZone` not applicable |
 
