@@ -102,6 +102,12 @@ func TestRegisterCronService_Validation(t *testing.T) {
 			wantErr: true,
 		},
 		{
+			name:    "whitespace-only schedule",
+			config:  types.CronServiceConfig{Schedule: "   ", Payload: []byte("x")},
+			handler: noopCronHandler,
+			wantErr: true,
+		},
+		{
 			name:    "payload and source mutually exclusive",
 			config:  types.CronServiceConfig{Schedule: "@daily", Payload: []byte("x"), SourceSubject: "events.metrics"},
 			handler: noopCronHandler,

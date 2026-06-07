@@ -36,13 +36,14 @@ func (c *serviceContainer) RegisterCronService(
 	if handler == nil {
 		return fmt.Errorf("handler is required for cron service '%s'", name)
 	}
+	// Accept standard five-field cron expressions by normalizing them to the
+	// six-field seconds-first format the NATS scheduler expects. config is a
+	// copy, so this never mutates the caller's value. Normalizing first also
+	// lets the emptiness check below catch whitespace-only schedules.
+	config.Schedule = types.NormalizeCronSchedule(config.Schedule)
 	if config.Schedule == "" {
 		return fmt.Errorf("schedule is required for cron service '%s'", name)
 	}
-	// Accept standard five-field cron expressions by normalizing them to the
-	// six-field seconds-first format the NATS scheduler expects. config is a
-	// copy, so this never mutates the caller's value.
-	config.Schedule = types.NormalizeCronSchedule(config.Schedule)
 	if len(config.Payload) > 0 && config.SourceSubject != "" {
 		return fmt.Errorf("cron service '%s': Payload and SourceSubject are mutually exclusive", name)
 	}
