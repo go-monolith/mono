@@ -1130,7 +1130,9 @@ func (lm *lifecycleManager) runCronConsumerLoop(ctx context.Context, consumer je
 				if ctx.Err() != nil {
 					// Nak the in-flight occurrence so redelivery starts
 					// immediately on the next run instead of waiting for AckWait.
-					_ = msg.Nak()
+					if nakErr := msg.Nak(); nakErr != nil {
+						lm.logger.Error("Cron Nak on cancel failed", "service", entry.Name, "error", nakErr)
+					}
 					return
 				}
 				lm.dispatchCronTick(ctx, entry, eventbus.WrapJetStreamMsg(msg))
