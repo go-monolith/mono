@@ -36,6 +36,7 @@ Service communication creates a **direct dependency** between modules. Use these
 | **Request-Reply** | ~1ms | None | Synchronous service calls | Yes |
 | **Queue Group** | ~1ms | None | Load-balanced async work | No |
 | **Stream Consumer** | ~1ms | JetStream | Durable message processing | No |
+| **Cron** | scheduled | JetStream | Periodic / scheduled work | No |
 
 ### Declaring Service Dependencies
 
@@ -340,6 +341,79 @@ err := helper.PublishStreamConsumerService(
 
 ---
 
+### Pattern 5: Cron Services
+
+Periodic work driven by a **server-side** cron schedule (NATS JetStream message scheduler, nats-server v2.14+). The schedule lives on the server, so in a multi-node cluster **exactly one** message fires per occurrence — no client-side ticker and no leader election. Each occurrence is delivered through a durable pull consumer with explicit acknowledgement (at-least-once).
+
+#### When to Use
+
+- Recurring/periodic work: nightly rollups, cache warmups, heartbeat emits, downsampling
+- You need a single fire per occurrence across a cluster (no double-firing)
+- You want the schedule to survive restarts and be managed declaratively in code
+
+> Requires JetStream (`WithJetStreamStorageDir(...)`). Registering a cron service without JetStream fails fast at startup.
+
+#### Example
+
+Cron has **no consumer side** — it is driven entirely by the server-side schedule, so there is nothing to retrieve or publish. A module just registers the service:
+
+```go
+func (m *ReportModule) RegisterServices(container mono.ServiceContainer) error {
+    return container.RegisterCronService(
+        "nightly-rollup",
+        mono.CronServiceConfig{
+            Schedule: "@daily",                     // cron, alias, or "@every 5m"
+            Payload:  []byte(`{"job":"rollup"}`),   // static payload delivered each tick
+        },
+        m.handleRollup,
+    )
+}
+
+// Acknowledgement is owned by the framework: return nil to Ack the occurrence,
+// or a non-nil error to Nak it (redelivered up to MaxDeliver). Do NOT call
+// msg.Ack()/Nak() yourself.
+func (m *ReportModule) handleRollup(ctx context.Context, msg *mono.Msg) error {
+    if err := m.runRollup(ctx, msg.Data); err != nil {
+        return err // framework Naks -> redelivery
+    }
+    return nil // framework Acks
+}
+```
+
+#### Schedule Formats
+
+| Form | Example | Notes |
+|------|---------|-------|
+| Cron expression | `"0 0 * * *"` | Supports an optional `TimeZone` (IANA) |
+| Named alias | `"@daily"`, `"@hourly"`, `"@weekly"` | Convenience aliases |
+| Interval | `"@every 5m"` | Minimum 1s; `TimeZone` not applicable |
+
+Additional `CronServiceConfig` options: `TimeZone` (cron expressions only), `TTL` (per-occurrence message TTL, ≥1s), `SourceSubject` (deliver the last message seen on a subject instead of a static `Payload` — mutually exclusive with `Payload`), and `Deprecated` (see below).
+
+#### Updating and Retiring a Schedule
+
+- **Update**: change `Schedule`/`Payload`/`TimeZone`/`TTL` and redeploy — the schedule is re-published idempotently and overwritten in place (rollup by subject).
+- **Retire (two-phase, revertible)**: set `Deprecated: true` and deploy — the framework purges the server-side schedule and does not start the consumer, while keeping the registration code. In a later release, delete the `RegisterCronService` call. Removing the call without first deprecating leaves an orphaned durable schedule; the framework logs a warning on startup when it detects one.
+
+```go
+container.RegisterCronService("nightly-rollup", mono.CronServiceConfig{
+    Schedule:   "@daily",
+    Payload:    []byte(`{"job":"rollup"}`),
+    Deprecated: true, // stop the schedule on deploy, keep the code (set back to false to re-arm)
+}, m.handleRollup)
+```
+
+#### Characteristics
+
+- ✓ Server-side schedule: single fire per occurrence across a cluster
+- ✓ Durable, at-least-once delivery with framework-owned ack (Ack on nil, Nak on error/panic)
+- ✓ Idempotent updates; survives restarts
+- ✓ Safe two-phase retirement via `Deprecated`
+- ✗ Requires JetStream and nats-server v2.14+
+- ✗ Not wrapped by the middleware chain (access-log, audit, request-id)
+
+---
+
 ## Part 2: Event Communication Patterns
 
 Event communication enables **loose coupling** between modules. Emitters declare events they publish; any interested module can consume them **without creating a dependency**.
@@ -447,7 +521,7 @@ func (m *NotificationModule) handleOrderCreated(ctx context.Context, msg *mono.M
 
 ---
 
-### Pattern 5: EventConsumer (NATS Core)
+### Pattern 6: EventConsumer (NATS Core)
 
 Fire-and-forget event consumption via standard NATS subscriptions.
 
@@ -518,7 +592,7 @@ func (m *NotificationModule) handleOrderCreated(ctx context.Context, msg *mono.M
 
 ---
 
-### Pattern 6: EventStreamConsumer (JetStream)
+### Pattern 7: EventStreamConsumer (JetStream)
 
 Durable event consumption via JetStream pull consumers.
 
@@ -622,6 +696,7 @@ func (m *AuditModule) handleOrderEvents(ctx context.Context, msgs []*mono.Msg) e
 ```
 ┌─ Is this a direct service call (caller needs result)?
 │  ├─ YES → Use Service Communication (Part 1)
+│  │  ├─ Periodic / scheduled work? → Cron
 │  │  ├─ Need durability? → Stream Consumer
 │  │  ├─ Need response? → Request-Reply
 │  │  ├─ Need highest performance? → Channel
@@ -648,6 +723,7 @@ Additional considerations:
 | Audit trail for compliance | EventStreamConsumer | No |
 | High-throughput analytics | Channel | Yes |
 | Inventory updates (durable) | Stream Consumer | Yes |
+| Nightly rollup (scheduled) | Cron | Yes |
 
 ---
 
@@ -661,6 +737,7 @@ Typical latencies on modern hardware:
 | Request-Reply | ~1ms | ~10K msgs/sec | None |
 | Queue Group | ~1ms | ~10K msgs/sec | None |
 | Stream Consumer | ~5ms | ~5K msgs/sec | JetStream |
+| Cron | schedule-driven | per-schedule | JetStream |
 | EventConsumer | ~1ms | ~10K msgs/sec | None |
 | EventStreamConsumer | ~5ms | ~5K msgs/sec | JetStream |
 
@@ -678,7 +755,7 @@ The framework enforces consistent naming:
 - Example: `events.order.v1.OrderCreated`
 - Supports wildcards for routing
 
-**Reserved**: `_framework.*` (internal use only)
+**Reserved**: `_mono.*` (internal use only)
 
 ---
 

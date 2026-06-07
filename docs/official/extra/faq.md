@@ -53,7 +53,7 @@ func main() {
 
 ### Q: How do modules communicate with each other?
 
-**A:** The Monolith Framework provides four communication patterns through NATS:
+**A:** The Monolith Framework provides five communication patterns through NATS:
 
 1. **Channel Services** - In-process Go channels for bidirectional communication (lowest latency, single process only)
 
@@ -94,6 +94,16 @@ m.eventBus.Publish(ctx, &OrderCreatedEvent{...})
 
 // Module B registers consumer
 m.eventBus.RegisterStreamConsumer(&OrderCreatedEvent{}, m.handleOrderCreated)
+```
+
+5. **Cron Services** - Server-scheduled periodic work via the JetStream message scheduler (single fire per occurrence across a cluster, requires JetStream)
+
+```go
+// Register a server-side schedule; the handler runs on each occurrence.
+m.container.RegisterCronService("nightly-rollup", mono.CronServiceConfig{
+    Schedule: "@daily",
+    Payload:  []byte(`{"job":"rollup"}`),
+}, m.handleRollup)
 ```
 
 **Best practice:** Choose based on requirements:

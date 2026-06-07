@@ -443,6 +443,22 @@ type StreamConfig struct {
 	// message.
 	AllowRollup bool `json:"allow_rollup_hdrs,omitempty"`
 
+	// AllowMsgSchedules enables server-side message schedules on the stream.
+	// When enabled, a schedule message (carrying the Nats-Schedule header) is
+	// stored under its subject and the server republishes its payload to the
+	// target subject on every scheduled occurrence. Requires nats-server
+	// v2.14+. Message scheduling additionally requires AllowRollup to be set
+	// and is incompatible with a DiscardNew discard policy.
+	AllowMsgSchedules bool `json:"allow_msg_schedules,omitempty"`
+
+	// AllowMsgTTL enables header-initiated per-message TTLs (the Nats-TTL and
+	// Nats-Schedule-TTL headers). Requires nats-server v2.14+.
+	AllowMsgTTL bool `json:"allow_msg_ttl,omitempty"`
+
+	// SubjectDeleteMarkerTTL sets the TTL applied to subject delete markers.
+	// Must be at least one second when set. Requires nats-server v2.14+.
+	SubjectDeleteMarkerTTL time.Duration `json:"subject_delete_marker_ttl,omitempty"`
+
 	// Compression specifies the message storage compression algorithm.
 	// Defaults to NoCompression.
 	Compression StoreCompression `json:"compression"`

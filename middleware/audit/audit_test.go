@@ -87,6 +87,9 @@ func (m *mockServiceContainer) MustGetQueueGroupService(_ string) types.QueueGro
 func (m *mockServiceContainer) RegisterStreamConsumerService(_ string, _ types.StreamConsumerConfig, _ types.StreamConsumerHandler) error {
 	return nil
 }
+func (m *mockServiceContainer) RegisterCronService(_ string, _ types.CronServiceConfig, _ types.CronHandler) error {
+	return nil
+}
 func (m *mockServiceContainer) GetStreamConsumerService(_ string) (types.StreamConsumerServiceClient, error) {
 	return nil, errors.ErrServiceNotFound
 }

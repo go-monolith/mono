@@ -9,10 +9,12 @@ import (
 
 // ServiceContainer provides dependency injection with name-based registration.
 //
-// The Service Container supports three types of services:
+// The Service Container supports five types of services:
 // - Channel services: Bidirectional Go channel communication (in-process)
 // - RequestReply services: Synchronous NATS request/response pattern
 // - Queue Group services: Asynchronous NATS queue subscription pattern
+// - Stream Consumer services: JetStream durable pull consumer (at-least-once)
+// - Cron services: Server-side cron-scheduled handler (JetStream message scheduler)
 //
 // See docs/spec/foundation.md for detailed design documentation.
 type ServiceContainer interface {
@@ -68,6 +70,18 @@ type ServiceContainer interface {
 	// GetStreamConsumerService retrieves a stream consumer service client
 	// that can publish messages to the stream for consumption.
 	GetStreamConsumerService(name string) (StreamConsumerServiceClient, error)
+
+	// RegisterCronService registers a cron-scheduled service backed by the
+	// embedded NATS JetStream message scheduler (nats-server v2.14+). The
+	// schedule is registered server-side, so exactly one message fires per
+	// occurrence across a cluster. Each occurrence is delivered to the handler
+	// through a durable pull consumer with explicit acknowledgement. Requires
+	// JetStream to be enabled. There is no client to retrieve: the service is
+	// driven entirely by the server-side schedule.
+	//
+	// Note: cron handlers are not currently wrapped by the middleware chain
+	// (access-log, audit, request-id); the handler is invoked directly.
+	RegisterCronService(name string, config CronServiceConfig, handler CronHandler) error
 
 	// Has checks if a service with the given name is registered
 	Has(name string) bool
@@ -174,6 +188,9 @@ type ServiceEntry struct {
 	QueueHandlers         []QGHP                // Multiple handler pairs for QueueGroup services
 	StreamConsumerConfig  *StreamConsumerConfig // For StreamConsumer type
 	StreamConsumerHandler StreamConsumerHandler // For StreamConsumer type
+	CronConfig            *CronServiceConfig    // For Cron type
+	CronHandler           CronHandler           // For Cron type
+	ScheduleSubject       string                // For Cron type: internal schedule subject
 	ModuleName            string
 	Subject               string
 	Created               time.Time
@@ -187,6 +204,7 @@ const (
 	ServiceTypeRequestReply
 	ServiceTypeQueueGroup
 	ServiceTypeStreamConsumer // JetStream durable pull consumer
+	ServiceTypeCron           // Server-side cron-scheduled service (JetStream message scheduler)
 )
 
 // FormatServiceType converts a ServiceType to its lowercase snake_case string representation
@@ -202,6 +220,8 @@ func FormatServiceType(serviceType ServiceType) string {
 		return "queue_group"
 	case ServiceTypeStreamConsumer:
 		return "stream_consumer"
+	case ServiceTypeCron:
+		return "cron"
 	default:
 		return fmt.Sprintf("unknown(%d)", serviceType)
 	}

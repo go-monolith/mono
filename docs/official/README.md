@@ -30,7 +30,7 @@ Powered by NATS.io's distributed architecture, your application can seamlessly e
 - **NATS.io Powered** - Built on NATS distributed messaging for high scalability and resilience
 - **Embedded or External NATS** - Run embedded for development or single instance deployment, connect to production NATS clusters for HA deployments
 - **Event-Driven Communication** - Publish/subscribe patterns for loose coupling
-- **Four Service Patterns** - Channel, Request-Reply, Queue Group, and Stream Consumer services
+- **Five Service Patterns** - Channel, Request-Reply, Queue Group, Stream Consumer, and Cron services
 - **JetStream Persistence** - Durable messaging with at-least-once delivery guarantees
 - **Lifecycle Management** - Automatic dependency resolution and ordered startup/shutdown
 - **Built-in Middleware** - Access logging, audit trails, and request ID injection

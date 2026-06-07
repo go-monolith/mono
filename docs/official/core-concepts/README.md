@@ -53,6 +53,7 @@ The framework's heart.
 | **Request-Reply Services** | Synchronous service calls | Medium | When you need immediate response |
 | **Queue Groups** | Load-balanced async processing | Medium | Distributed work, fire-and-forget |
 | **Stream Consumers** | Durable message processing | High | When message loss is unacceptable |
+| **Cron Services** | Server-scheduled periodic work | Medium | Recurring jobs, single fire per occurrence |
 | **Events** | Loose coupling via pub/sub | Medium | Broadcasting to many consumers |
 
 ## Learning Path

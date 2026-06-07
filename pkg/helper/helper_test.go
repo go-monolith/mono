@@ -171,6 +171,14 @@ func (m *mockServiceContainer) RegisterStreamConsumerService(name string, config
 	return nil
 }
 
+func (m *mockServiceContainer) RegisterCronService(name string, _ types.CronServiceConfig, _ types.CronHandler) error {
+	if m.returnError != nil {
+		return m.returnError
+	}
+	m.registeredServiceNames = append(m.registeredServiceNames, name)
+	return nil
+}
+
 func (m *mockServiceContainer) GetChannelService(_ string, _ string) (chan *types.Msg, chan *types.Msg, error) {
 	return nil, nil, nil
 }

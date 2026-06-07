@@ -10,6 +10,7 @@ func RegisterChannelService(name string, in chan *Msg, out chan *Msg) error
 func RegisterRequestReplyService(name string, handler RequestReplyHandler) error
 func RegisterQueueGroupService(name string, pairs ...QGHP) error
 func RegisterStreamConsumerService(name string, config StreamConsumerConfig, handler StreamConsumerHandler) error
+func RegisterCronService(name string, config CronServiceConfig, handler CronHandler) error
 
 // Discovery methods
 func GetChannelService(name string, consumer string) (chan *Msg, chan *Msg, error)
@@ -24,7 +25,7 @@ func GetStreamConsumerService(name string) (StreamConsumerServiceClient, error)
 
 ## Overview
 
-Each module receives a `ServiceContainer` for registering services that other modules can call. Services support four communication patterns: in-process channels, request-reply, queue groups, and stream consumers.
+Each module receives a `ServiceContainer` for registering services that other modules can call. Services support five communication patterns: in-process channels, request-reply, queue groups, stream consumers, and cron (server-scheduled) services.
 
 ## Service Registration Methods
 
@@ -300,6 +301,74 @@ For type-safe handlers, use the `TypedStreamConsumerHandler`:
 type TypedStreamConsumerHandler[T any] func(ctx context.Context, payloads []T, msgs []*Msg) error
 ```
 
+### RegisterCronService
+
+```go
+func (container ServiceContainer) RegisterCronService(
+    name string,
+    config CronServiceConfig,
+    handler CronHandler,
+) error
+```
+
+Registers a cron-scheduled service backed by the embedded NATS JetStream message scheduler (nats-server v2.14+). The schedule is registered **server-side**, so in a multi-node cluster exactly one message fires per occurrence (no client-side ticker, no leader election). Each occurrence is delivered through a durable pull consumer with explicit acknowledgement.
+
+Requires JetStream (`WithJetStreamStorageDir(...)`); registering a cron service without JetStream fails fast at startup. Cron services are server-driven and have **no** consumer-side client (there is no `GetCronService`).
+
+**Parameters:**
+- `name` - Service name. The handler receives ticks on `services.<module>.<name>`.
+- `config` - `CronServiceConfig` (schedule, payload/source, time zone, TTL, deprecation)
+- `handler` - Function invoked on each scheduled occurrence
+
+**Handler Signature:**
+```go
+type CronHandler func(ctx context.Context, msg *Msg) error
+```
+
+Acknowledgement is owned by the framework: return `nil` to Ack the occurrence, or a non-nil error to Nak it (redelivered up to `MaxDeliver`). The handler must **not** call `msg.Ack()`/`Nak()` itself. A recovered panic is treated as an error (Nak).
+
+**CronServiceConfig:**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `Schedule` | `string` | Required. Cron expression (`"0 0 * * *"`), alias (`"@daily"`), or interval (`"@every 5m"`, min 1s) |
+| `Payload` | `[]byte` | Static payload delivered each occurrence (mutually exclusive with `SourceSubject`) |
+| `SourceSubject` | `string` | Deliver the last message seen on this subject instead of a static payload |
+| `TimeZone` | `string` | Optional IANA time zone (cron expressions only; not `@every`) |
+| `TTL` | `time.Duration` | Optional per-occurrence message TTL (≥ 1s) |
+| `Deprecated` | `bool` | When true, purge the schedule on deploy and don't start the consumer (keep the code) |
+
+**Returns:**
+- `error` - Nil on success; non-nil if validation fails (e.g. empty `Schedule`, both `Payload` and `SourceSubject` set, invalid `TimeZone`)
+
+**Use Cases:**
+- Periodic work: nightly rollups, cache warmups, heartbeat emits, downsampling
+- Single fire per occurrence across a cluster
+- Schedules that survive restarts and are managed declaratively in code
+
+**Example:**
+```go
+func (m *ReportModule) RegisterServices(container mono.ServiceContainer) error {
+    return container.RegisterCronService(
+        "nightly-rollup",
+        mono.CronServiceConfig{
+            Schedule: "@daily",
+            Payload:  []byte(`{"job":"rollup"}`),
+        },
+        m.handleRollup,
+    )
+}
+
+func (m *ReportModule) handleRollup(ctx context.Context, msg *mono.Msg) error {
+    if err := m.runRollup(ctx, msg.Data); err != nil {
+        return err // framework Naks -> redelivery
+    }
+    return nil // framework Acks
+}
+```
+
+Re-publishing the schedule on every startup is idempotent (rollup by subject), so changing `Schedule`/`Payload`/`TimeZone`/`TTL` and redeploying overwrites the live schedule in place. To retire a service, set `Deprecated: true` and deploy (purges the schedule, keeps the code), then remove the `RegisterCronService` call in a later release.
+
 ## Service Discovery Methods
 
 ### GetChannelService
@@ -536,6 +605,7 @@ const (
     ServiceTypeRequestReply
     ServiceTypeQueueGroup
     ServiceTypeStreamConsumer
+    ServiceTypeCron
 )
 ```
 

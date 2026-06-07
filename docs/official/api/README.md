@@ -34,8 +34,8 @@ See [Module API](module.md) for detailed documentation.
 Manages service registration and discovery within a module.
 
 - **Interface**: `ServiceContainer`
-- **Service Types**: Channel, Request-Reply, Queue Group, Stream Consumer
-- **Registration**: `RegisterChannelService()`, `RegisterRequestReplyService()`, `RegisterQueueGroupService()`, `RegisterStreamConsumerService()`
+- **Service Types**: Channel, Request-Reply, Queue Group, Stream Consumer, Cron
+- **Registration**: `RegisterChannelService()`, `RegisterRequestReplyService()`, `RegisterQueueGroupService()`, `RegisterStreamConsumerService()`, `RegisterCronService()`
 - **Consumption**: `GetChannelService()`, `GetRequestReplyService()`, `GetQueueGroupService()`, `GetStreamConsumerService()`
 
 See [Service Container API](container.md) for detailed documentation.
@@ -221,6 +221,7 @@ const (
     ServiceTypeRequestReply        // NATS request-reply pattern
     ServiceTypeQueueGroup          // NATS queue group pattern
     ServiceTypeStreamConsumer      // JetStream durable consumer pattern
+    ServiceTypeCron                // Server-scheduled cron pattern (JetStream)
 )
 ```
 

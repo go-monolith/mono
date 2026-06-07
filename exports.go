@@ -130,6 +130,7 @@ const (
 	ServiceTypeRequestReply   = types.ServiceTypeRequestReply
 	ServiceTypeQueueGroup     = types.ServiceTypeQueueGroup
 	ServiceTypeStreamConsumer = types.ServiceTypeStreamConsumer
+	ServiceTypeCron           = types.ServiceTypeCron
 )
 
 // FormatServiceType returns a human-readable string for the service type.
@@ -155,6 +156,10 @@ type StreamConsumerHandler = types.StreamConsumerHandler
 
 // StreamConsumerServiceClient is a client for stream consumer services.
 type StreamConsumerServiceClient = types.StreamConsumerServiceClient
+
+// CronHandler handles a single cron-scheduled occurrence. The framework owns
+// acknowledgement: return nil to Ack, non-nil to Nak.
+type CronHandler = types.CronHandler
 
 // =============================================================================
 // Logger Types
@@ -268,6 +273,10 @@ type ConsumerConfig = types.ConsumerConfig
 
 // StreamConsumerConfig configures a JetStream durable pull consumer service.
 type StreamConsumerConfig = types.StreamConsumerConfig
+
+// CronServiceConfig configures a cron-scheduled service backed by the embedded
+// NATS JetStream message scheduler.
+type CronServiceConfig = types.CronServiceConfig
 
 // FetchConfig configures the fetch behavior for JetStream pull consumers.
 type FetchConfig = types.FetchConfig

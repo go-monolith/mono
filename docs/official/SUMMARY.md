@@ -61,4 +61,5 @@
 - [Multi-Module](../../examples/multi-module/README.md)
 - [Analytics (Channel Services)](../../examples/analytics/README.md)
 - [Event Emitter](../../examples/event-emitter/README.md)
+- [Cron Scheduler](../../examples/cron-scheduler/README.md)
 - [NATS Config File](../../examples/nats-config/README.md)
