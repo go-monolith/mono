@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -4957,5 +4958,240 @@ func TestGetErrorTypeName(t *testing.T) {
 				t.Errorf("getErrorTypeName(%T) = %q, want %q", tt.err, result, tt.expected)
 			}
 		})
+	}
+}
+
+// =============================================================================
+// Cron delivery tests (runCronConsumerLoop, dispatchCronTick, invokeCronHandler)
+// =============================================================================
+
+// recordingAcker records Ack/Nak calls. It is used as types.Msg.NatsMsg so the
+// reflection-based Msg.Ack()/Nak() observe it.
+type recordingAcker struct {
+	mu   sync.Mutex
+	acks int
+	naks int
+}
+
+func (r *recordingAcker) Ack() error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.acks++
+	return nil
+}
+
+func (r *recordingAcker) Nak() error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.naks++
+	return nil
+}
+
+func (r *recordingAcker) counts() (ack int, nak int) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.acks, r.naks
+}
+
+// recordingJetStreamMsg wraps mockJetStreamMsg to record Nak calls (used to
+// verify in-flight Nak on context cancellation inside the loop).
+type recordingJetStreamMsg struct {
+	*mockJetStreamMsg
+	nakCount int32
+}
+
+func (m *recordingJetStreamMsg) Nak() error {
+	atomic.AddInt32(&m.nakCount, 1)
+	return nil
+}
+
+func newCronTestManager() *lifecycleManager {
+	return &lifecycleManager{
+		logger:          &mockLogger{},
+		streamConsumers: make(map[string]context.CancelFunc),
+		runtimeCtx:      context.Background(),
+		mu:              sync.RWMutex{},
+	}
+}
+
+func TestInvokeCronHandler(t *testing.T) {
+	lm := newCronTestManager()
+
+	t.Run("success returns nil", func(t *testing.T) {
+		entry := &types.ServiceEntry{Name: "job", CronHandler: func(_ context.Context, _ *types.Msg) error {
+			return nil
+		}}
+		if err := lm.invokeCronHandler(context.Background(), entry, &types.Msg{}); err != nil {
+			t.Fatalf("expected nil error, got %v", err)
+		}
+	})
+
+	t.Run("handler error propagates", func(t *testing.T) {
+		want := errors.New("boom")
+		entry := &types.ServiceEntry{Name: "job", CronHandler: func(_ context.Context, _ *types.Msg) error {
+			return want
+		}}
+		if err := lm.invokeCronHandler(context.Background(), entry, &types.Msg{}); !errors.Is(err, want) {
+			t.Fatalf("expected %v, got %v", want, err)
+		}
+	})
+
+	t.Run("panic converted to error", func(t *testing.T) {
+		entry := &types.ServiceEntry{Name: "job", CronHandler: func(_ context.Context, _ *types.Msg) error {
+			panic("kaboom")
+		}}
+		err := lm.invokeCronHandler(context.Background(), entry, &types.Msg{})
+		if err == nil {
+			t.Fatal("expected error from recovered panic, got nil")
+		}
+		if !strings.Contains(err.Error(), "panic") {
+			t.Fatalf("expected panic error, got %v", err)
+		}
+	})
+}
+
+func TestDispatchCronTick(t *testing.T) {
+	lm := newCronTestManager()
+
+	t.Run("ack on success", func(t *testing.T) {
+		rec := &recordingAcker{}
+		entry := &types.ServiceEntry{Name: "job", CronHandler: func(_ context.Context, _ *types.Msg) error {
+			return nil
+		}}
+		lm.dispatchCronTick(context.Background(), entry, &types.Msg{NatsMsg: rec})
+		if ack, nak := rec.counts(); ack != 1 || nak != 0 {
+			t.Fatalf("expected 1 ack 0 nak, got %d ack %d nak", ack, nak)
+		}
+	})
+
+	t.Run("nak on handler error", func(t *testing.T) {
+		rec := &recordingAcker{}
+		entry := &types.ServiceEntry{Name: "job", CronHandler: func(_ context.Context, _ *types.Msg) error {
+			return errors.New("fail")
+		}}
+		lm.dispatchCronTick(context.Background(), entry, &types.Msg{NatsMsg: rec})
+		if ack, nak := rec.counts(); ack != 0 || nak != 1 {
+			t.Fatalf("expected 0 ack 1 nak, got %d ack %d nak", ack, nak)
+		}
+	})
+
+	t.Run("nak on panic", func(t *testing.T) {
+		rec := &recordingAcker{}
+		entry := &types.ServiceEntry{Name: "job", CronHandler: func(_ context.Context, _ *types.Msg) error {
+			panic("p")
+		}}
+		lm.dispatchCronTick(context.Background(), entry, &types.Msg{NatsMsg: rec})
+		if ack, nak := rec.counts(); ack != 0 || nak != 1 {
+			t.Fatalf("expected 0 ack 1 nak on panic, got %d ack %d nak", ack, nak)
+		}
+	})
+}
+
+func TestRunCronConsumerLoop_CtxCancel(t *testing.T) {
+	lm := newCronTestManager()
+	consumer := &mockJetStreamConsumer{}
+	entry := &types.ServiceEntry{Name: "cron-job", ModuleName: "m", CronHandler: func(_ context.Context, _ *types.Msg) error {
+		return nil
+	}}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		lm.runCronConsumerLoop(ctx, consumer, entry)
+		close(done)
+	}()
+
+	time.Sleep(50 * time.Millisecond)
+	cancel()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("cron loop did not exit on context cancellation")
+	}
+}
+
+func TestRunCronConsumerLoop_FetchTimeout(t *testing.T) {
+	lm := newCronTestManager()
+	consumer := &mockJetStreamConsumer{fetchTimeout: true} // returns nats.ErrTimeout
+	entry := &types.ServiceEntry{Name: "cron-job", ModuleName: "m", CronHandler: func(_ context.Context, _ *types.Msg) error {
+		return nil
+	}}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+
+	done := make(chan struct{})
+	go func() {
+		lm.runCronConsumerLoop(ctx, consumer, entry)
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("cron loop did not exit after fetch timeouts and ctx cancel")
+	}
+}
+
+func TestRunCronConsumerLoop_DeliversTick(t *testing.T) {
+	lm := newCronTestManager()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var handled int32
+	entry := &types.ServiceEntry{Name: "cron-job", ModuleName: "m", CronHandler: func(_ context.Context, msg *types.Msg) error {
+		atomic.AddInt32(&handled, 1)
+		cancel() // stop after the first delivery
+		return nil
+	}}
+	consumer := &mockJetStreamConsumer{fetchMessages: []jetstream.Msg{&mockJetStreamMsg{data: []byte("tick")}}}
+
+	done := make(chan struct{})
+	go func() {
+		lm.runCronConsumerLoop(ctx, consumer, entry)
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("cron loop did not exit")
+	}
+	if atomic.LoadInt32(&handled) == 0 {
+		t.Fatal("cron handler was never invoked")
+	}
+}
+
+func TestRunCronConsumerLoop_NaksInFlightOnCancel(t *testing.T) {
+	lm := newCronTestManager()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// The handler cancels the context during the first message, so the second
+	// message in the batch hits the cancellation check and must be Nak'd.
+	entry := &types.ServiceEntry{Name: "cron-job", ModuleName: "m", CronHandler: func(_ context.Context, _ *types.Msg) error {
+		cancel()
+		return nil
+	}}
+	inFlight := &recordingJetStreamMsg{mockJetStreamMsg: &mockJetStreamMsg{data: []byte("second")}}
+	consumer := &mockJetStreamConsumer{fetchMessages: []jetstream.Msg{
+		&mockJetStreamMsg{data: []byte("first")},
+		inFlight,
+	}}
+
+	done := make(chan struct{})
+	go func() {
+		lm.runCronConsumerLoop(ctx, consumer, entry)
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("cron loop did not exit")
+	}
+	if got := atomic.LoadInt32(&inFlight.nakCount); got != 1 {
+		t.Fatalf("expected in-flight message Nak'd once on cancel, got %d", got)
 	}
 }

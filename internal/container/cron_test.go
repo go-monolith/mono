@@ -177,6 +177,10 @@ func TestCronSubjectHelpers(t *testing.T) {
 	if got := types.CronStreamName("mod", "job"); got != "MONO_CRON_mod_job" {
 		t.Errorf("CronStreamName = %q", got)
 	}
+	// Stream names must not contain dots/spaces/wildcards; segments are sanitized.
+	if got := types.CronStreamName("billing.v2", "nightly job"); got != "MONO_CRON_billing_v2_nightly_job" {
+		t.Errorf("CronStreamName(sanitized) = %q, want MONO_CRON_billing_v2_nightly_job", got)
+	}
 	if got := types.CronScheduleSubject(serviceSubject); got != "services.mod.job.schedule" {
 		t.Errorf("CronScheduleSubject = %q", got)
 	}

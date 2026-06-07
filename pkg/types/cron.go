@@ -3,14 +3,30 @@ package types
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
+)
+
+// cronNameSanitizer replaces characters that are invalid in a JetStream stream
+// name (most importantly the subject separator ".") with underscores.
+var cronNameSanitizer = strings.NewReplacer(
+	".", "_",
+	" ", "_",
+	"*", "_",
+	">", "_",
+	"/", "_",
+	"\\", "_",
+	"\t", "_",
 )
 
 // CronStreamName returns the JetStream stream name backing a cron service. The
 // stream is per-service and carries the schedule/control sub-subjects together
-// with the target service subject.
+// with the target service subject. Module/service segments are sanitized because
+// JetStream stream names may not contain dots, spaces, or wildcard characters.
 func CronStreamName(moduleName, serviceName string) string {
-	return fmt.Sprintf("MONO_CRON_%s_%s", moduleName, serviceName)
+	return fmt.Sprintf("MONO_CRON_%s_%s",
+		cronNameSanitizer.Replace(moduleName),
+		cronNameSanitizer.Replace(serviceName))
 }
 
 // CronStreamNamePrefix is the prefix shared by every cron stream. It is used to

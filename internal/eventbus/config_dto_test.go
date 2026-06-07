@@ -379,7 +379,6 @@ func TestToJetStreamStreamConfig(t *testing.T) {
 			Subjects:               []string{"cron.>"},
 			AllowMsgSchedules:      true,
 			AllowMsgTTL:            true,
-			AllowRollup:            true,
 			SubjectDeleteMarkerTTL: 2 * time.Second,
 		}
 

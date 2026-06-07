@@ -1128,6 +1128,9 @@ func (lm *lifecycleManager) runCronConsumerLoop(ctx context.Context, consumer je
 
 			for msg := range msgs.Messages() {
 				if ctx.Err() != nil {
+					// Nak the in-flight occurrence so redelivery starts
+					// immediately on the next run instead of waiting for AckWait.
+					_ = msg.Nak()
 					return
 				}
 				lm.dispatchCronTick(ctx, entry, eventbus.WrapJetStreamMsg(msg))
