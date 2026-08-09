@@ -3,6 +3,13 @@ include $(HOME)/.Makefile
 # Variables
 GO := go
 GOLANGCI_LINT := golangci-lint
+# Single source of truth for the golangci-lint version; must match the
+# `version:` pin in .github/workflows/golangci-lint.yaml so local lint
+# results match CI regardless of which install target is used.
+GOLANGCI_LINT_VERSION := v2.11.4
+# Pinned golang.org/x/tools version for goimports, so formatting tooling
+# upgrades are deliberate rather than silently picked up via @latest.
+GOIMPORTS_VERSION := v0.48.0
 GOFMT := gofmt
 GOIMPORTS := goimports
 COVERAGE_FILE := coverage.out
@@ -13,7 +20,7 @@ BUILD_FLAGS := -v
 TEST_FLAGS := -v -race
 BENCH_FLAGS := -benchmem
 
-.PHONY: help test test-short test-all test-coverage test-verbose lint lint-fix fmt vet build clean bench bench-json bench-json-inprocess bench-json-socket install-tools check mod-tidy mod-download mod-verify pre-commit test-integration
+.PHONY: help test test-short test-all test-coverage test-verbose lint lint-fix fmt vet build clean bench bench-json bench-json-inprocess bench-json-socket install install-tools check mod-tidy mod-download mod-verify pre-commit test-integration
 
 # Default target
 .DEFAULT_GOAL := help
@@ -21,8 +28,8 @@ BENCH_FLAGS := -benchmem
 # Install development tools for Go
 install:
 	@echo "Installing development tools..."
-	@curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/HEAD/install.sh | sh -s -- -b $(go env GOPATH)/bin v2.7.2
-	@$(GO) install golang.org/x/tools/cmd/goimports@latest
+	@curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/HEAD/install.sh | sh -s -- -b $$($(GO) env GOPATH)/bin $(GOLANGCI_LINT_VERSION)
+	@$(GO) install golang.org/x/tools/cmd/goimports@$(GOIMPORTS_VERSION)
 	@echo "✓ Development tools installed successfully"
 
 # Run unit tests only (excludes test/ directory)
@@ -145,8 +152,8 @@ mod-verify:
 # Install development tools
 install-tools:
 	@echo "Installing development tools..."
-	@$(GO) install github.com/golangci/golangci-lint/cmd/golangci-lint@latest
-	@$(GO) install golang.org/x/tools/cmd/goimports@latest
+	@$(GO) install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION)
+	@$(GO) install golang.org/x/tools/cmd/goimports@$(GOIMPORTS_VERSION)
 	@echo "✓ Development tools installed successfully"
 
 # Run example 1

@@ -1460,7 +1460,7 @@ func getErrorTypeName(err error) string {
 	if t == nil {
 		return ""
 	}
-	if t.Kind() == reflect.Ptr {
+	if t.Kind() == reflect.Pointer {
 		t = t.Elem()
 	}
 
