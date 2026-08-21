@@ -33,7 +33,20 @@ EXCLUDE_RE='^github\.com/go-monolith/mono/(examples|bench|test)/'
 # from a single package would be a few hundred and would still yield a
 # plausible-looking percentage, so refuse to measure one at all rather than
 # report a number computed over almost nothing.
-MIN_STATEMENTS="${COVERAGE_MIN_STATEMENTS:-4000}"
+#
+# The primary signal is the number of distinct packages, because that is stable
+# across toolchains in a way the statement count is not: the same tree reports
+# 3807 in-scope statements under Go 1.26 and 5226 under Go 1.27, since the
+# compiler's statement-counting granularity changes between releases. A floor
+# calibrated on one toolchain therefore fails spuriously on another, while the
+# package count stays put. A full run covers roughly 18 in-scope packages; a
+# truncated single-package run covers one.
+MIN_PACKAGES="${COVERAGE_MIN_PACKAGES:-10}"
+
+# Secondary backstop, deliberately far below the smallest figure any supported
+# toolchain reports, so it catches an obviously empty profile without needing
+# recalibration every Go release.
+MIN_STATEMENTS="${COVERAGE_MIN_STATEMENTS:-2000}"
 
 if [ ! -f "$PROFILE" ]; then
 	echo "coverage-gate: no coverage profile at '$PROFILE'" >&2
@@ -50,9 +63,15 @@ fi
 head -n 1 "$PROFILE" >"$FILTERED"
 grep -Ev "$EXCLUDE_RE" <(tail -n +2 "$PROFILE") >>"$FILTERED" || true
 
+# Package of a profile line: everything up to the last "/" of the file path,
+# which is the field before the first ":".
+packages="$(awk 'NR > 1 { sub(/:.*/, "", $1); sub(/\/[^\/]*$/, "", $1); print $1 }' "$FILTERED" | sort -u | wc -l)"
 statements="$(awk 'NR > 1 { total += $2 } END { print total + 0 }' "$FILTERED")"
-if [ "$statements" -lt "$MIN_STATEMENTS" ]; then
-	echo "coverage-gate: only $statements in-scope statements in '$PROFILE' (expected at least $MIN_STATEMENTS)." >&2
+
+if [ "$packages" -lt "$MIN_PACKAGES" ] || [ "$statements" -lt "$MIN_STATEMENTS" ]; then
+	echo "coverage-gate: '$PROFILE' is too small to measure." >&2
+	echo "  in-scope packages: $packages (need at least $MIN_PACKAGES)" >&2
+	echo "  in-scope statements: $statements (need at least $MIN_STATEMENTS)" >&2
 	echo "That profile is truncated or stale — measuring it would report a meaningless percentage." >&2
 	echo "Re-run a full profile with: make test-coverage-ci" >&2
 	exit 1
