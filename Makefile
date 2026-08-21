@@ -6,21 +6,37 @@ GOLANGCI_LINT := golangci-lint
 # Single source of truth for the golangci-lint version; must match the
 # `version:` pin in .github/workflows/golangci-lint.yaml so local lint
 # results match CI regardless of which install target is used.
-GOLANGCI_LINT_VERSION := v2.11.4
+#
+# Must also be built with a Go release at least as new as the toolchain CI
+# uses: golangci-lint parses the standard library from source, so an older
+# binary panics with "file requires newer Go version" the moment `stable`
+# advances. v2.13.1 is the first release built with go1.27.
+GOLANGCI_LINT_VERSION := v2.13.1
 # Pinned golang.org/x/tools version for goimports, so formatting tooling
 # upgrades are deliberate rather than silently picked up via @latest.
 GOIMPORTS_VERSION := v0.48.0
+# Pinned actionlint version, for the same reason: a new release adding a rule
+# should break the build on a deliberate bump rather than on an unrelated day.
+ACTIONLINT_VERSION := v1.7.12
 GOFMT := gofmt
 GOIMPORTS := goimports
+ACTIONLINT := actionlint
 COVERAGE_FILE := coverage.out
 COVERAGE_HTML := coverage.html
+# Profile with the out-of-scope packages stripped; written by
+# scripts/coverage-gate.sh, which owns the exclusion list.
+COVERAGE_FILTERED := coverage.filtered.out
+# Minimum statement coverage enforced by `test-coverage-check`. Assigned with
+# ?= so it can be overridden from the environment or the command line, e.g.
+# `make COVERAGE_THRESHOLD=90 test-coverage-check`.
+COVERAGE_THRESHOLD ?= 80
 
 # Go build flags
 BUILD_FLAGS := -v
 TEST_FLAGS := -v -race
 BENCH_FLAGS := -benchmem
 
-.PHONY: help test test-short test-all test-coverage test-verbose lint lint-fix fmt vet build clean bench bench-json bench-json-inprocess bench-json-socket install install-tools check mod-tidy mod-download mod-verify pre-commit test-integration
+.PHONY: help test test-short test-all test-coverage test-coverage-ci test-coverage-check test-verbose lint lint-go lint-actions lint-fix fmt vet build clean bench bench-json bench-json-inprocess bench-json-socket install install-tools install-actionlint check mod-tidy mod-download mod-verify pre-commit test-integration
 
 # Default target
 .DEFAULT_GOAL := help
@@ -30,6 +46,7 @@ install:
 	@echo "Installing development tools..."
 	@curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/HEAD/install.sh | sh -s -- -b $$($(GO) env GOPATH)/bin $(GOLANGCI_LINT_VERSION)
 	@$(GO) install golang.org/x/tools/cmd/goimports@$(GOIMPORTS_VERSION)
+	@$(GO) install github.com/rhysd/actionlint/cmd/actionlint@$(ACTIONLINT_VERSION)
 	@echo "✓ Development tools installed successfully"
 
 # Run unit tests only (excludes test/ directory)
@@ -74,10 +91,56 @@ test-coverage:
 	@echo "Coverage report generated: $(COVERAGE_HTML)"
 	@echo "View it with: open $(COVERAGE_HTML)"
 
-# Run linter
-lint:
+# Produce a coverage profile for CI and for the coverage gate.
+#
+# Differs from test-coverage in three ways: no -v (the full verbose log of a
+# -race run buries everything else in the CI output), no HTML report, and the
+# same 3-attempt retry as the `test` target — the unit suite is flaky enough
+# under -race that a single-shot run would regularly leave the gate with no
+# profile to measure.
+test-coverage-ci:
+	@echo "Running unit tests with coverage (up to 3 attempts)..."
+	@for i in 1 2 3; do \
+		echo "Attempt $$i/3"; \
+		if $(GO) test -race -covermode=atomic -coverprofile=$(COVERAGE_FILE) ./...; then \
+			echo "Coverage profile written to $(COVERAGE_FILE) on attempt $$i"; \
+			exit 0; \
+		fi; \
+	done; \
+	echo "Coverage run failed after 3 attempts"; \
+	exit 1
+
+# Enforce the coverage floor. The gate script owns the exclusion list.
+test-coverage-check: test-coverage-ci
+	@./scripts/coverage-gate.sh $(COVERAGE_FILE) $(COVERAGE_THRESHOLD)
+
+# Run all linters
+lint: lint-go lint-actions
+
+# Run the Go linter
+lint-go:
 	@echo "Running golangci-lint..."
 	@$(GOLANGCI_LINT) run ./...
+
+# Lint the GitHub Actions workflows.
+#
+# actionlint checks what a YAML parser cannot: undefined matrix properties,
+# expression type errors, unknown action inputs, invalid `if:` conditions. When
+# shellcheck is on PATH it also lints every `run:` block, which is where the
+# release workflow's benchmark parsing lives — so install shellcheck too if you
+# want the full check locally (CI has it).
+#
+# Missing tooling is an error rather than a skip: a linter that quietly does
+# nothing reports success it has not earned.
+lint-actions:
+	@echo "Running actionlint..."
+	@command -v $(ACTIONLINT) >/dev/null 2>&1 || { \
+		echo "actionlint not found on PATH. Install it with: make install"; \
+		echo "(and ensure \$$(go env GOPATH)/bin is on your PATH)"; \
+		exit 1; \
+	}
+	@$(ACTIONLINT)
+	@echo "✓ Workflows passed actionlint"
 
 # Run linter with auto-fix
 lint-fix:
@@ -123,7 +186,7 @@ bench-all-save-json:
 # Clean build artifacts
 clean:
 	@echo "Cleaning build artifacts..."
-	@rm -f $(COVERAGE_FILE) $(COVERAGE_HTML)
+	@rm -f $(COVERAGE_FILE) $(COVERAGE_FILTERED) $(COVERAGE_HTML)
 	@$(GO) clean -cache -testcache -modcache ./...
 	@echo "Clean completed successfully"
 
@@ -149,11 +212,19 @@ mod-verify:
 	@$(GO) mod verify
 	@echo "Dependencies verified successfully"
 
+# Install actionlint only.
+#
+# CI's lint job uses this rather than hardcoding a version in the workflow, so
+# ACTIONLINT_VERSION stays the single source of truth for the pin.
+install-actionlint:
+	@$(GO) install github.com/rhysd/actionlint/cmd/actionlint@$(ACTIONLINT_VERSION)
+
 # Install development tools
 install-tools:
 	@echo "Installing development tools..."
 	@$(GO) install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION)
 	@$(GO) install golang.org/x/tools/cmd/goimports@$(GOIMPORTS_VERSION)
+	@$(GO) install github.com/rhysd/actionlint/cmd/actionlint@$(ACTIONLINT_VERSION)
 	@echo "✓ Development tools installed successfully"
 
 # Run example 1

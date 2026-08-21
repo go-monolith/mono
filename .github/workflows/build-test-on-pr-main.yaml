@@ -46,4 +46,35 @@ jobs:
       run: make test
 
     - name: Run Go integration tests
-      run: make test-integration  
+      run: make test-integration
+
+    # Coverage runs on a single matrix leg. The figure does not vary by Go
+    # version in any way worth measuring, and running it on all six would send
+    # Codecov six duplicate uploads of the same commit.
+    #
+    # Split into profile / upload / gate rather than one `make
+    # test-coverage-check` step so that a run which fails the floor still
+    # publishes the numbers that explain why.
+    - name: Coverage profile
+      if: matrix.go-version == '1.26'
+      run: make test-coverage-ci
+
+    # Reporting, not gating. Pull requests from forks cannot read the
+    # repository secret, so continue-on-error covers the whole step —
+    # fail_ci_if_error alone does not cover a failed CLI download.
+    - name: Upload coverage to Codecov
+      if: matrix.go-version == '1.26'
+      continue-on-error: true
+      uses: codecov/codecov-action@v5
+      with:
+        token: ${{ secrets.CODECOV_TOKEN }}
+        # The unfiltered profile: Codecov applies the `ignore` rules in
+        # codecov.yml itself.
+        files: coverage.out
+        disable_search: true
+        slug: go-monolith/mono
+        fail_ci_if_error: false
+
+    - name: Coverage floor
+      if: matrix.go-version == '1.26'
+      run: ./scripts/coverage-gate.sh coverage.out

@@ -53,6 +53,24 @@ jobs:
       - name: Run integration tests
         run: make test-integration
 
+      # This is what gives Codecov a main-branch base report; without it the
+      # per-pull-request coverage deltas have nothing to diff against.
+      - name: Coverage profile
+        run: make test-coverage-ci
+
+      - name: Upload coverage to Codecov
+        continue-on-error: true
+        uses: codecov/codecov-action@v5
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: coverage.out
+          disable_search: true
+          slug: go-monolith/mono
+          fail_ci_if_error: false
+
+      - name: Coverage floor
+        run: ./scripts/coverage-gate.sh coverage.out
+
       - name: Run benchmarks
         run: make bench-all-save-json
 
@@ -174,9 +192,11 @@ jobs:
           } > bench_release_notes.md
 
           # Store for multiline output
-          echo "notes_file=bench_release_notes.md" >> "$GITHUB_OUTPUT"
-          echo "total=$TOTAL_BENCHMARKS" >> "$GITHUB_OUTPUT"
-          echo "framework_total=$FRAMEWORK_BENCHMARKS" >> "$GITHUB_OUTPUT"
+          {
+            echo "notes_file=bench_release_notes.md"
+            echo "total=$TOTAL_BENCHMARKS"
+            echo "framework_total=$FRAMEWORK_BENCHMARKS"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Calculate next version
         id: version
