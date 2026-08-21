@@ -4815,7 +4815,6 @@ func TestLifecycleManager_StreamConsumerSetupError(t *testing.T) {
 					},
 					Consumer: types.ConsumerConfig{
 						Name:        "test-consumer",
-						Durable:     "test-consumer",
 						Description: "test consumer",
 					},
 				},

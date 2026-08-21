@@ -6,7 +6,12 @@ GOLANGCI_LINT := golangci-lint
 # Single source of truth for the golangci-lint version; must match the
 # `version:` pin in .github/workflows/golangci-lint.yaml so local lint
 # results match CI regardless of which install target is used.
-GOLANGCI_LINT_VERSION := v2.11.4
+#
+# Must also be built with a Go release at least as new as the toolchain CI
+# uses: golangci-lint parses the standard library from source, so an older
+# binary panics with "file requires newer Go version" the moment `stable`
+# advances. v2.13.1 is the first release built with go1.27.
+GOLANGCI_LINT_VERSION := v2.13.1
 # Pinned golang.org/x/tools version for goimports, so formatting tooling
 # upgrades are deliberate rather than silently picked up via @latest.
 GOIMPORTS_VERSION := v0.48.0
