@@ -1,0 +1,45 @@
+# Codecov configuration for github.com/go-monolith/mono
+#
+# Codecov reports the number; scripts/coverage-gate.sh is what enforces it.
+# The project status below mirrors the gate's floor so the Codecov check and
+# the CI job agree rather than contradict each other.
+
+coverage:
+  status:
+    project:
+      default:
+        # Same floor as COVERAGE_THRESHOLD in the Makefile.
+        target: 80%
+        # Absorbs the sub-percent jitter of a -race run without letting a real
+        # regression through.
+        threshold: 1%
+    patch:
+      default:
+        # Informational: a strict per-diff target turns documentation and
+        # refactoring pull requests red for no useful reason. The project
+        # floor is the check that means something.
+        informational: true
+
+# Comment only when the diff actually moves coverage, so documentation and
+# workflow pull requests stay quiet.
+comment:
+  layout: "condensed_header, diff, files"
+  require_changes: true
+
+# A Go coverage profile names files by import path, so every line in
+# coverage.out starts with the module path, while the `ignore` globs below are
+# root-anchored. Stripping the prefix here is what makes them match at all.
+fixes:
+  - "github.com/go-monolith/mono/::"
+
+# Packages excluded from the reported figure. Keep this list in lockstep with
+# EXCLUDE_RE in scripts/coverage-gate.sh — the two drifting apart is how the
+# badge and the gate end up reporting different numbers.
+#
+#   examples/  documentation programs, no tests by design
+#   bench/     benchmarks and the benchmark JSON parser
+#   test/      integration suite, run separately under -tags=integration
+ignore:
+  - "examples/**"
+  - "bench/**"
+  - "test/**"

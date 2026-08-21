@@ -14,13 +14,20 @@ GOFMT := gofmt
 GOIMPORTS := goimports
 COVERAGE_FILE := coverage.out
 COVERAGE_HTML := coverage.html
+# Profile with the out-of-scope packages stripped; written by
+# scripts/coverage-gate.sh, which owns the exclusion list.
+COVERAGE_FILTERED := coverage.filtered.out
+# Minimum statement coverage enforced by `test-coverage-check`. Assigned with
+# ?= so it can be overridden from the environment or the command line, e.g.
+# `make COVERAGE_THRESHOLD=90 test-coverage-check`.
+COVERAGE_THRESHOLD ?= 80
 
 # Go build flags
 BUILD_FLAGS := -v
 TEST_FLAGS := -v -race
 BENCH_FLAGS := -benchmem
 
-.PHONY: help test test-short test-all test-coverage test-verbose lint lint-fix fmt vet build clean bench bench-json bench-json-inprocess bench-json-socket install install-tools check mod-tidy mod-download mod-verify pre-commit test-integration
+.PHONY: help test test-short test-all test-coverage test-coverage-ci test-coverage-check test-verbose lint lint-fix fmt vet build clean bench bench-json bench-json-inprocess bench-json-socket install install-tools check mod-tidy mod-download mod-verify pre-commit test-integration
 
 # Default target
 .DEFAULT_GOAL := help
@@ -74,6 +81,29 @@ test-coverage:
 	@echo "Coverage report generated: $(COVERAGE_HTML)"
 	@echo "View it with: open $(COVERAGE_HTML)"
 
+# Produce a coverage profile for CI and for the coverage gate.
+#
+# Differs from test-coverage in three ways: no -v (the full verbose log of a
+# -race run buries everything else in the CI output), no HTML report, and the
+# same 3-attempt retry as the `test` target — the unit suite is flaky enough
+# under -race that a single-shot run would regularly leave the gate with no
+# profile to measure.
+test-coverage-ci:
+	@echo "Running unit tests with coverage (up to 3 attempts)..."
+	@for i in 1 2 3; do \
+		echo "Attempt $$i/3"; \
+		if $(GO) test -race -covermode=atomic -coverprofile=$(COVERAGE_FILE) ./...; then \
+			echo "Coverage profile written to $(COVERAGE_FILE) on attempt $$i"; \
+			exit 0; \
+		fi; \
+	done; \
+	echo "Coverage run failed after 3 attempts"; \
+	exit 1
+
+# Enforce the coverage floor. The gate script owns the exclusion list.
+test-coverage-check: test-coverage-ci
+	@./scripts/coverage-gate.sh $(COVERAGE_FILE) $(COVERAGE_THRESHOLD)
+
 # Run linter
 lint:
 	@echo "Running golangci-lint..."
@@ -123,7 +153,7 @@ bench-all-save-json:
 # Clean build artifacts
 clean:
 	@echo "Cleaning build artifacts..."
-	@rm -f $(COVERAGE_FILE) $(COVERAGE_HTML)
+	@rm -f $(COVERAGE_FILE) $(COVERAGE_FILTERED) $(COVERAGE_HTML)
 	@$(GO) clean -cache -testcache -modcache ./...
 	@echo "Clean completed successfully"
 
