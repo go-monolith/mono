@@ -8,6 +8,7 @@ import (
 
 	"github.com/go-monolith/mono"
 	monoerrors "github.com/go-monolith/mono/pkg/errors"
+	"github.com/go-monolith/mono/pkg/types"
 )
 
 // TestDefaultConfig verifies default configuration values
@@ -953,5 +954,106 @@ func TestWithStartupReadyTimeout_ErrorIsConfigurationError(t *testing.T) {
 
 	if confErr.OptionName != "WithStartupReadyTimeout" {
 		t.Errorf("option name = %q, want 'WithStartupReadyTimeout'", confErr.OptionName)
+	}
+}
+
+func TestWithNATSAutoTLS(t *testing.T) {
+	valid := func() types.AutoTLSConfig {
+		return types.AutoTLSConfig{
+			Domains:   []string{"nats.example.com"},
+			Email:     "ops@example.com",
+			CacheDir:  "/var/lib/mono/acme",
+			AcceptTOS: true,
+		}
+	}
+
+	tests := []struct {
+		name      string
+		mutate    func(*types.AutoTLSConfig)
+		wantError bool
+		errorMsg  string
+	}{
+		{"valid minimal config", func(*types.AutoTLSConfig) {}, false, ""},
+		{"no domains", func(c *types.AutoTLSConfig) { c.Domains = nil }, true, "at least one domain"},
+		{"wildcard domain", func(c *types.AutoTLSConfig) { c.Domains = []string{"*.example.com"} }, true, "dns-01"},
+		{"domain with port", func(c *types.AutoTLSConfig) { c.Domains = []string{"nats.example.com:4222"} }, true, "bare hostname"},
+		{"not fully qualified", func(c *types.AutoTLSConfig) { c.Domains = []string{"localhost"} }, true, "fully qualified"},
+		{"uppercase domain", func(c *types.AutoTLSConfig) { c.Domains = []string{"NATS.example.com"} }, true, "lowercase"},
+		{"duplicate domain", func(c *types.AutoTLSConfig) {
+			c.Domains = []string{"nats.example.com", "nats.example.com"}
+		}, true, "duplicate"},
+		{"missing cache dir", func(c *types.AutoTLSConfig) { c.CacheDir = "" }, true, "cache directory is required"},
+		{"TOS not accepted", func(c *types.AutoTLSConfig) { c.AcceptTOS = false }, true, "AcceptTOS"},
+		{"bad challenge address", func(c *types.AutoTLSConfig) { c.HTTPChallengeAddr = "nope" }, true, "challenge address"},
+		{"negative renew-before", func(c *types.AutoTLSConfig) { c.RenewBefore = -time.Hour }, true, "renew-before"},
+		{"bad directory URL", func(c *types.AutoTLSConfig) { c.DirectoryURL = "ftp://acme.example.com" }, true, "scheme must be https"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			autoTLS := valid()
+			tt.mutate(&autoTLS)
+
+			cfg := mono.DefaultConfig()
+			err := mono.WithNATSAutoTLS(autoTLS)(cfg)
+
+			if tt.wantError {
+				if err == nil {
+					t.Fatal("expected error, got nil")
+				}
+				if !monoerrors.IsConfigurationError(err) {
+					t.Errorf("error = %v, want a configuration error", err)
+				}
+				if !strings.Contains(err.Error(), tt.errorMsg) {
+					t.Errorf("error message = %q, want to contain %q", err.Error(), tt.errorMsg)
+				}
+				if cfg.NATSOptions.AutoTLS != nil {
+					t.Error("AutoTLS was stored despite failing validation")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if cfg.NATSOptions.AutoTLS == nil {
+				t.Fatal("AutoTLS is nil after a successful option")
+			}
+			if cfg.NATSOptions.AutoTLS.Domains[0] != autoTLS.Domains[0] {
+				t.Errorf("Domains[0] = %q, want %q", cfg.NATSOptions.AutoTLS.Domains[0], autoTLS.Domains[0])
+			}
+			if cfg.NATSOptions.AutoTLS.Email != autoTLS.Email {
+				t.Errorf("Email = %q, want %q", cfg.NATSOptions.AutoTLS.Email, autoTLS.Email)
+			}
+			if cfg.NATSOptions.AutoTLS.CacheDir != autoTLS.CacheDir {
+				t.Errorf("CacheDir = %q, want %q", cfg.NATSOptions.AutoTLS.CacheDir, autoTLS.CacheDir)
+			}
+			if !cfg.NATSOptions.AutoTLS.AcceptTOS {
+				t.Error("AcceptTOS was not carried through")
+			}
+		})
+	}
+}
+
+func TestWithNATSAutoTLS_DefensiveCopy(t *testing.T) {
+	autoTLS := types.AutoTLSConfig{
+		Domains:   []string{"a.example.com", "b.example.com"},
+		CacheDir:  "/var/lib/mono/acme",
+		AcceptTOS: true,
+	}
+	cfg := mono.DefaultConfig()
+	if err := mono.WithNATSAutoTLS(autoTLS)(cfg); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	autoTLS.Domains[0] = "mutated.example.com"
+
+	if got := cfg.NATSOptions.AutoTLS.Domains[0]; got != "a.example.com" {
+		t.Errorf("stored Domains[0] = %q, want the value at option-apply time", got)
+	}
+}
+
+func TestWithNATSAutoTLS_DisabledByDefault(t *testing.T) {
+	if cfg := mono.DefaultConfig(); cfg.NATSOptions.AutoTLS != nil {
+		t.Errorf("AutoTLS = %v by default, want nil", cfg.NATSOptions.AutoTLS)
 	}
 }

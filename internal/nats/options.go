@@ -3,6 +3,8 @@ package nats
 import (
 	"fmt"
 	"time"
+
+	"github.com/go-monolith/mono/pkg/types"
 )
 
 // NATSOption is a functional option for NATS configuration.
@@ -50,6 +52,11 @@ type NATSConfig struct {
 	// or are additive (JetStream, Clustering) so they don't need explicit tracking.
 	HostSet bool // true if Host was explicitly set via WithHost option
 	PortSet bool // true if Port was explicitly set via WithPort option
+
+	// AutoTLS holds the ACME certificate configuration for the client
+	// listener. Nil means AutoTLS is disabled; the pointer itself is the
+	// "explicitly set" marker, so no companion AutoTLSSet flag is needed.
+	AutoTLS *types.AutoTLSConfig
 }
 
 // DefaultNATSConfig returns a NATSConfig with sensible defaults.
@@ -228,6 +235,24 @@ func WithConfigFile(path string) NATSOption {
 			return fmt.Errorf("config file path cannot be empty")
 		}
 		cfg.ConfigFile = path
+		return nil
+	}
+}
+
+// WithAutoTLS enables automatic ACME (Let's Encrypt) certificate management for
+// the NATS client listener.
+//
+// The configuration is validated immediately and stored as a deep copy, so
+// later mutation of the caller's Domains slice cannot affect the framework.
+func WithAutoTLS(autoTLS *types.AutoTLSConfig) NATSOption {
+	return func(cfg *NATSConfig) error {
+		if autoTLS == nil {
+			return fmt.Errorf("AutoTLS config cannot be nil")
+		}
+		if err := autoTLS.Validate(); err != nil {
+			return fmt.Errorf("invalid AutoTLS configuration: %w", err)
+		}
+		cfg.AutoTLS = autoTLS.Clone()
 		return nil
 	}
 }

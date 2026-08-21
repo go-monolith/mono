@@ -4,6 +4,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/go-monolith/mono/pkg/types"
 )
 
 // TestDefaultNATSConfig verifies that DefaultNATSConfig returns sensible defaults.
@@ -898,4 +900,75 @@ func TestWithConfigFileComposition(t *testing.T) {
 	if cfg.Host != "0.0.0.0" {
 		t.Errorf("expected Host to be '0.0.0.0', got '%s'", cfg.Host)
 	}
+}
+
+func TestWithAutoTLS(t *testing.T) {
+	validConfig := func() *types.AutoTLSConfig {
+		return &types.AutoTLSConfig{
+			Domains:   []string{"nats.example.com"},
+			Email:     "ops@example.com",
+			CacheDir:  "/var/lib/mono/acme",
+			AcceptTOS: true,
+		}
+	}
+
+	t.Run("stores a valid config", func(t *testing.T) {
+		cfg := DefaultNATSConfig()
+		autoTLS := validConfig()
+
+		if err := WithAutoTLS(autoTLS)(cfg); err != nil {
+			t.Fatalf("WithAutoTLS() error = %v", err)
+		}
+		if cfg.AutoTLS == nil {
+			t.Fatal("AutoTLS is nil after applying the option")
+		}
+		if cfg.AutoTLS.CacheDir != autoTLS.CacheDir {
+			t.Errorf("CacheDir = %q, want %q", cfg.AutoTLS.CacheDir, autoTLS.CacheDir)
+		}
+	})
+
+	t.Run("disabled by default", func(t *testing.T) {
+		if cfg := DefaultNATSConfig(); cfg.AutoTLS != nil {
+			t.Errorf("AutoTLS = %v by default, want nil", cfg.AutoTLS)
+		}
+	})
+
+	t.Run("rejects nil", func(t *testing.T) {
+		cfg := DefaultNATSConfig()
+		if err := WithAutoTLS(nil)(cfg); err == nil {
+			t.Error("WithAutoTLS(nil) error = nil, want an error")
+		}
+	})
+
+	t.Run("rejects an invalid config", func(t *testing.T) {
+		cfg := DefaultNATSConfig()
+		invalid := validConfig()
+		invalid.Domains = nil
+
+		err := WithAutoTLS(invalid)(cfg)
+		if err == nil {
+			t.Fatal("WithAutoTLS() error = nil, want a validation error")
+		}
+		if !strings.Contains(err.Error(), "invalid AutoTLS configuration") {
+			t.Errorf("error = %q, want it to be wrapped with context", err)
+		}
+		if cfg.AutoTLS != nil {
+			t.Error("AutoTLS was stored despite failing validation")
+		}
+	})
+
+	t.Run("stores a defensive copy of the domains", func(t *testing.T) {
+		cfg := DefaultNATSConfig()
+		autoTLS := validConfig()
+		autoTLS.Domains = []string{"a.example.com", "b.example.com"}
+
+		if err := WithAutoTLS(autoTLS)(cfg); err != nil {
+			t.Fatalf("WithAutoTLS() error = %v", err)
+		}
+		autoTLS.Domains[0] = "mutated.example.com"
+
+		if cfg.AutoTLS.Domains[0] != "a.example.com" {
+			t.Errorf("stored Domains[0] = %q, want the value at option-apply time", cfg.AutoTLS.Domains[0])
+		}
+	})
 }
