@@ -27,3 +27,18 @@ jobs:
         uses: golangci/golangci-lint-action@v8
         with:
           version: v2.11.4
+
+      # Workflow files are the one part of the repository that CI cannot
+      # validate by running it: a typo in a matrix reference or an `if:`
+      # condition fails open, silently skipping the step it guards rather than
+      # erroring. actionlint catches those statically.
+      #
+      # Installed and run through the Makefile so ACTIONLINT_VERSION stays the
+      # single source of truth. Hardcoding the version here as well would
+      # recreate exactly the kind of two-copy drift internal/covergate exists to
+      # catch. Ubuntu runners ship shellcheck, which actionlint picks up
+      # automatically to lint every `run:` block.
+      - name: actionlint
+        run: |
+          make install-actionlint
+          PATH="$(go env GOPATH)/bin:$PATH" make lint-actions

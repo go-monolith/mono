@@ -192,9 +192,11 @@ jobs:
           } > bench_release_notes.md
 
           # Store for multiline output
-          echo "notes_file=bench_release_notes.md" >> "$GITHUB_OUTPUT"
-          echo "total=$TOTAL_BENCHMARKS" >> "$GITHUB_OUTPUT"
-          echo "framework_total=$FRAMEWORK_BENCHMARKS" >> "$GITHUB_OUTPUT"
+          {
+            echo "notes_file=bench_release_notes.md"
+            echo "total=$TOTAL_BENCHMARKS"
+            echo "framework_total=$FRAMEWORK_BENCHMARKS"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Calculate next version
         id: version

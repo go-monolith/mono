@@ -40,10 +40,19 @@ make test-coverage      # Generate coverage report (opens coverage.html)
 ```bash
 make fmt                # Format code (gofmt + goimports)
 make vet                # Run go vet
-make lint               # Run golangci-lint
+make lint               # Run all linters (Go + GitHub Actions workflows)
+make lint-go            # Run golangci-lint only
+make lint-actions       # Run actionlint over .github/workflows only
 make lint-fix           # Run linter with auto-fix
 make check              # Run all quality checks (fmt, vet, lint, test-short)
 ```
+
+`make lint-actions` needs `actionlint`, which `make install` provides. Workflow
+files are the one part of the repository CI cannot validate by running it: a
+typo in a matrix reference or an `if:` condition fails open, silently skipping
+the step it guards instead of erroring. actionlint catches that statically, and
+it also runs `shellcheck` over every `run:` block when shellcheck is on PATH —
+worth installing locally, since CI has it and will catch what you don't.
 
 ### Building
 
@@ -125,7 +134,7 @@ mono-framework/
 ### Go Conventions
 
 - **Formatting**: All code must pass `gofmt` and `go vet`
-- **Linting**: All code must pass `golangci-lint`
+- **Linting**: All code must pass `golangci-lint`; workflow files must pass `actionlint`
 - **Naming**: Follow Go naming conventions (CamelCase for exports, camelCase for unexported)
 
 ### Documentation

@@ -10,8 +10,12 @@ GOLANGCI_LINT_VERSION := v2.11.4
 # Pinned golang.org/x/tools version for goimports, so formatting tooling
 # upgrades are deliberate rather than silently picked up via @latest.
 GOIMPORTS_VERSION := v0.48.0
+# Pinned actionlint version, for the same reason: a new release adding a rule
+# should break the build on a deliberate bump rather than on an unrelated day.
+ACTIONLINT_VERSION := v1.7.12
 GOFMT := gofmt
 GOIMPORTS := goimports
+ACTIONLINT := actionlint
 COVERAGE_FILE := coverage.out
 COVERAGE_HTML := coverage.html
 # Profile with the out-of-scope packages stripped; written by
@@ -27,7 +31,7 @@ BUILD_FLAGS := -v
 TEST_FLAGS := -v -race
 BENCH_FLAGS := -benchmem
 
-.PHONY: help test test-short test-all test-coverage test-coverage-ci test-coverage-check test-verbose lint lint-fix fmt vet build clean bench bench-json bench-json-inprocess bench-json-socket install install-tools check mod-tidy mod-download mod-verify pre-commit test-integration
+.PHONY: help test test-short test-all test-coverage test-coverage-ci test-coverage-check test-verbose lint lint-go lint-actions lint-fix fmt vet build clean bench bench-json bench-json-inprocess bench-json-socket install install-tools install-actionlint check mod-tidy mod-download mod-verify pre-commit test-integration
 
 # Default target
 .DEFAULT_GOAL := help
@@ -37,6 +41,7 @@ install:
 	@echo "Installing development tools..."
 	@curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/HEAD/install.sh | sh -s -- -b $$($(GO) env GOPATH)/bin $(GOLANGCI_LINT_VERSION)
 	@$(GO) install golang.org/x/tools/cmd/goimports@$(GOIMPORTS_VERSION)
+	@$(GO) install github.com/rhysd/actionlint/cmd/actionlint@$(ACTIONLINT_VERSION)
 	@echo "✓ Development tools installed successfully"
 
 # Run unit tests only (excludes test/ directory)
@@ -104,10 +109,33 @@ test-coverage-ci:
 test-coverage-check: test-coverage-ci
 	@./scripts/coverage-gate.sh $(COVERAGE_FILE) $(COVERAGE_THRESHOLD)
 
-# Run linter
-lint:
+# Run all linters
+lint: lint-go lint-actions
+
+# Run the Go linter
+lint-go:
 	@echo "Running golangci-lint..."
 	@$(GOLANGCI_LINT) run ./...
+
+# Lint the GitHub Actions workflows.
+#
+# actionlint checks what a YAML parser cannot: undefined matrix properties,
+# expression type errors, unknown action inputs, invalid `if:` conditions. When
+# shellcheck is on PATH it also lints every `run:` block, which is where the
+# release workflow's benchmark parsing lives — so install shellcheck too if you
+# want the full check locally (CI has it).
+#
+# Missing tooling is an error rather than a skip: a linter that quietly does
+# nothing reports success it has not earned.
+lint-actions:
+	@echo "Running actionlint..."
+	@command -v $(ACTIONLINT) >/dev/null 2>&1 || { \
+		echo "actionlint not found on PATH. Install it with: make install"; \
+		echo "(and ensure \$$(go env GOPATH)/bin is on your PATH)"; \
+		exit 1; \
+	}
+	@$(ACTIONLINT)
+	@echo "✓ Workflows passed actionlint"
 
 # Run linter with auto-fix
 lint-fix:
@@ -179,11 +207,19 @@ mod-verify:
 	@$(GO) mod verify
 	@echo "Dependencies verified successfully"
 
+# Install actionlint only.
+#
+# CI's lint job uses this rather than hardcoding a version in the workflow, so
+# ACTIONLINT_VERSION stays the single source of truth for the pin.
+install-actionlint:
+	@$(GO) install github.com/rhysd/actionlint/cmd/actionlint@$(ACTIONLINT_VERSION)
+
 # Install development tools
 install-tools:
 	@echo "Installing development tools..."
 	@$(GO) install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION)
 	@$(GO) install golang.org/x/tools/cmd/goimports@$(GOIMPORTS_VERSION)
+	@$(GO) install github.com/rhysd/actionlint/cmd/actionlint@$(ACTIONLINT_VERSION)
 	@echo "✓ Development tools installed successfully"
 
 # Run example 1
