@@ -29,6 +29,12 @@ const challengeReadHeaderTimeout = 10 * time.Second
 // but when it does happen a 2s budget guarantees failure.
 const autoTLSHandshakeTimeout = 10.0
 
+// acmeRequestTimeout bounds a single HTTP request to the ACME certificate
+// authority. An order is made of many such requests, so this is deliberately
+// much smaller than AutoTLSConfig.StartupIssueTimeout, which bounds the whole
+// issuance. See newACMEClient for why it must always be set.
+const acmeRequestTimeout = 30 * time.Second
+
 // autoTLS owns the autocert manager and the HTTP listener that answers ACME
 // http-01 challenges for the embedded NATS server.
 //
@@ -67,23 +73,49 @@ func newAutoTLS(cfg *types.AutoTLSConfig, logger types.Logger) (*autoTLS, error)
 		Email:       cfg.Email,
 		RenewBefore: cfg.RenewBefore, // zero means the autocert default
 	}
-	if cfg.DirectoryURL != "" || cfg.DirectoryCAPool != nil {
-		client := &acme.Client{DirectoryURL: cfg.DirectoryURL}
-		if cfg.DirectoryCAPool != nil {
-			client.HTTPClient = &http.Client{
-				Timeout: 30 * time.Second,
-				Transport: &http.Transport{
-					TLSClientConfig: &tls.Config{
-						RootCAs:    cfg.DirectoryCAPool,
-						MinVersion: tls.VersionTLS12,
-					},
-				},
-			}
-		}
-		mgr.Client = client
-	}
+	mgr.Client = newACMEClient(cfg)
 
 	return &autoTLS{cfg: cfg, mgr: mgr, logger: logger}, nil
+}
+
+// newACMEClient builds the low-level ACME client.
+//
+// It is always constructed, even when no directory URL or CA pool is
+// configured, because the zero-value client acme falls back to uses
+// http.DefaultClient, which has no timeout at all. A request to a slow or
+// half-open certificate authority would then hang for as long as autocert's
+// own five-minute ceiling allows, holding a TCP connection open long past the
+// point where startup has given up on it. An explicit per-request timeout
+// bounds every ACME call instead.
+//
+// acmeRequestTimeout is per request, not per order: an order is many requests,
+// so this must not be confused with AutoTLSConfig.StartupIssueTimeout, which
+// bounds the whole issuance.
+func newACMEClient(cfg *types.AutoTLSConfig) *acme.Client {
+	transport, ok := http.DefaultTransport.(*http.Transport)
+	if !ok {
+		// Only reachable if something replaced http.DefaultTransport.
+		transport = &http.Transport{}
+	}
+	transport = transport.Clone()
+	if cfg.DirectoryCAPool != nil {
+		transport.TLSClientConfig = &tls.Config{
+			RootCAs:    cfg.DirectoryCAPool,
+			MinVersion: tls.VersionTLS12,
+		}
+	}
+
+	directoryURL := cfg.DirectoryURL
+	if directoryURL == "" {
+		directoryURL = autocert.DefaultACMEDirectory
+	}
+	return &acme.Client{
+		DirectoryURL: directoryURL,
+		HTTPClient: &http.Client{
+			Timeout:   acmeRequestTimeout,
+			Transport: transport,
+		},
+	}
 }
 
 // tlsConfig returns the configuration installed on server.Options.TLSConfig.
@@ -177,6 +209,12 @@ func (a *autoTLS) prewarm(ctx context.Context) error {
 	// any deadline on the caller's, so the timeout has to be enforced from the
 	// outside. Passing a context.WithTimeout down would look correct and do
 	// nothing.
+	//
+	// The consequence is that the issuance cannot actually be cancelled once
+	// started; it can only be abandoned. Two things keep that bounded: every
+	// ACME request carries acmeRequestTimeout (see newACMEClient), and
+	// autocert caps a single GetCertificate call at five minutes. reapAbandoned
+	// makes the abandonment visible rather than silent.
 	done := make(chan error, 1)
 	go func() { done <- a.issueAll() }()
 
@@ -187,12 +225,44 @@ func (a *autoTLS) prewarm(ctx context.Context) error {
 	case err := <-done:
 		return err
 	case <-timer.C:
+		a.reapAbandoned(done, fmt.Sprintf("startup issue timeout of %s elapsed", timeout))
 		return fmt.Errorf("timed out after %s obtaining ACME certificates for %v: "+
 			"check that the domains resolve to this host and that the challenge address %q is reachable on port 80",
 			timeout, a.cfg.Domains, a.cfg.ChallengeAddr())
 	case <-ctx.Done():
+		a.reapAbandoned(done, "startup was cancelled")
 		return fmt.Errorf("cancelled while obtaining ACME certificates: %w", ctx.Err())
 	}
+}
+
+// reapAbandoned reports that an in-flight certificate request has been given up
+// on, and logs its eventual outcome.
+//
+// Startup has already failed by the time this runs, so the result is no longer
+// wanted - but the request cannot be cancelled (see prewarm), and silently
+// dropping it would hide a repeating leak from operators. A supervised restart
+// loop that keeps timing out would otherwise accumulate invisible in-flight
+// requests, all racing on the same on-disk cache.
+//
+// The watcher goroutine always terminates: issueAll is bounded by
+// acmeRequestTimeout per request and by autocert's five-minute ceiling overall,
+// and the channel is buffered so the producer never blocks on the send.
+func (a *autoTLS) reapAbandoned(done <-chan error, reason string) {
+	a.logger.Warn("abandoning an in-flight ACME certificate request",
+		"reason", reason,
+		"domains", a.cfg.Domains,
+		"note", "the request cannot be cancelled; it will end on its own within five minutes")
+
+	go func() {
+		switch err := <-done; {
+		case err != nil:
+			a.logger.Warn("abandoned ACME certificate request finished with an error", "error", err)
+		default:
+			a.logger.Info("abandoned ACME certificate request completed after startup gave up; "+
+				"the certificate is cached and a later start will reuse it",
+				"domains", a.cfg.Domains)
+		}
+	}()
 }
 
 // issueAll fetches a certificate for each domain in turn.

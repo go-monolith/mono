@@ -74,6 +74,15 @@ func NewNATSManager(logger types.Logger, opts ...NATSOption) (NATSManager, error
 	if config.AutoTLS != nil && config.DontListen {
 		return nil, fmt.Errorf("invalid configuration: AutoTLS cannot be combined with DontListen: there is no TCP listener for the certificate to protect")
 	}
+	// buildNATSOptions turns UseInProcessConn on whenever AutoTLS is set, so
+	// the public API cannot reach this. It guards a direct caller of this
+	// package: without it, the TCP branch of Start would dial plaintext
+	// nats:// against a listener that now requires TLS, and the only symptom
+	// would be an opaque connection failure.
+	if config.AutoTLS != nil && !config.UseInProcessConn {
+		return nil, fmt.Errorf("invalid configuration: AutoTLS requires UseInProcessConn: " +
+			"the framework's own client cannot satisfy hostname verification over a loopback TCP dial")
+	}
 
 	return &natsManager{
 		config: config,

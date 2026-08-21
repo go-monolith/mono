@@ -2018,3 +2018,38 @@ func writeSelfSignedPair(t *testing.T, certPath, keyPath string) {
 		t.Fatalf("failed to write key: %v", err)
 	}
 }
+
+// TestNATSManager_AutoTLS_RequiresInProcessConn verifies the fail-fast guard for
+// a direct user of this package.
+//
+// buildNATSOptions turns UseInProcessConn on whenever AutoTLS is set, so the
+// public API cannot reach this. Without the guard, a caller composing
+// WithAutoTLS without WithInProcessConn would get the TCP branch of Start
+// dialling plaintext nats:// against a TLS-only listener, and the only symptom
+// would be an opaque connection failure.
+func TestNATSManager_AutoTLS_RequiresInProcessConn(t *testing.T) {
+	port, err := findAvailablePort()
+	if err != nil {
+		t.Fatalf("failed to find available port: %v", err)
+	}
+
+	_, err = NewNATSManager(newMockLogger(),
+		WithPort(port),
+		WithAutoTLS(autoTLSTestConfig(t)),
+	)
+	if err == nil {
+		t.Fatal("NewNATSManager() error = nil, want AutoTLS to require UseInProcessConn")
+	}
+	if !strings.Contains(err.Error(), "UseInProcessConn") {
+		t.Errorf("error = %q, want it to name UseInProcessConn", err)
+	}
+
+	// The same configuration with the in-process transport is accepted.
+	if _, err := NewNATSManager(newMockLogger(),
+		WithPort(port),
+		WithInProcessConn(),
+		WithAutoTLS(autoTLSTestConfig(t)),
+	); err != nil {
+		t.Errorf("NewNATSManager() with UseInProcessConn error = %v, want nil", err)
+	}
+}

@@ -61,8 +61,22 @@ func TestNewAutoTLS(t *testing.T) {
 		if at.mgr.RenewBefore != cfg.RenewBefore {
 			t.Errorf("RenewBefore = %v, want %v", at.mgr.RenewBefore, cfg.RenewBefore)
 		}
-		if at.mgr.Client != nil {
-			t.Errorf("Client = %v, want nil when neither DirectoryURL nor DirectoryCAPool is set", at.mgr.Client)
+		// The client is always constructed, even with no directory URL or CA
+		// pool: acme falls back to http.DefaultClient otherwise, which has no
+		// timeout and would let a half-open CA hold a connection open long
+		// after startup has given up.
+		if at.mgr.Client == nil {
+			t.Fatal("Client is nil, want an acme.Client with a bounded HTTP client")
+		}
+		if at.mgr.Client.DirectoryURL != autocert.DefaultACMEDirectory {
+			t.Errorf("DirectoryURL = %q, want the Let's Encrypt production default %q",
+				at.mgr.Client.DirectoryURL, autocert.DefaultACMEDirectory)
+		}
+		if at.mgr.Client.HTTPClient == nil {
+			t.Fatal("HTTPClient is nil, want a client with an explicit request timeout")
+		}
+		if at.mgr.Client.HTTPClient.Timeout != acmeRequestTimeout {
+			t.Errorf("HTTPClient.Timeout = %v, want %v", at.mgr.Client.HTTPClient.Timeout, acmeRequestTimeout)
 		}
 
 		ctx := context.Background()
@@ -88,8 +102,17 @@ func TestNewAutoTLS(t *testing.T) {
 		if at.mgr.Client.DirectoryURL != cfg.DirectoryURL {
 			t.Errorf("DirectoryURL = %q, want %q", at.mgr.Client.DirectoryURL, cfg.DirectoryURL)
 		}
-		if at.mgr.Client.HTTPClient != nil {
-			t.Error("HTTPClient is set, want nil when no DirectoryCAPool is configured")
+		if at.mgr.Client.HTTPClient == nil || at.mgr.Client.HTTPClient.Timeout != acmeRequestTimeout {
+			t.Error("HTTPClient must carry the request timeout even without a DirectoryCAPool")
+		}
+		// Without a CA pool the transport keeps the standard library defaults,
+		// so RootCAs stays nil and the system trust store is used.
+		tr, ok := at.mgr.Client.HTTPClient.Transport.(*http.Transport)
+		if !ok {
+			t.Fatalf("Transport type = %T, want *http.Transport", at.mgr.Client.HTTPClient.Transport)
+		}
+		if tr.TLSClientConfig != nil && tr.TLSClientConfig.RootCAs != nil {
+			t.Error("RootCAs is pinned, want the system pool when no DirectoryCAPool is configured")
 		}
 	})
 
@@ -421,6 +444,110 @@ func TestAutoTLSPrewarm(t *testing.T) {
 			t.Errorf("error = %q, want a cancellation message", err)
 		}
 	})
+}
+
+// TestAutoTLSPrewarmAbandonmentIsLogged verifies that giving up on an in-flight
+// certificate request is reported rather than silent.
+//
+// autocert offers no way to cancel a running GetCertificate, so the request can
+// only be abandoned. A supervised restart loop that keeps timing out would
+// otherwise accumulate invisible in-flight requests racing on the same cache.
+func TestAutoTLSPrewarmAbandonmentIsLogged(t *testing.T) {
+	block := make(chan struct{})
+	acmeSrv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		<-block
+	}))
+	defer func() {
+		close(block)
+		acmeSrv.Close()
+	}()
+
+	cfg := validAutoTLSConfig(t)
+	cfg.DirectoryURL = acmeSrv.URL + "/dir"
+	cfg.StartupIssueTimeout = 150 * time.Millisecond
+
+	logger := newMockLogger()
+	at, err := newAutoTLS(cfg, logger)
+	if err != nil {
+		t.Fatalf("newAutoTLS() error = %v", err)
+	}
+	if err := at.start(); err != nil {
+		t.Fatalf("start() error = %v", err)
+	}
+	defer at.stop(context.Background())
+
+	if err := at.prewarm(context.Background()); err == nil {
+		t.Fatal("prewarm() error = nil, want a timeout")
+	}
+	if !logger.hasMessage("WARN", "abandoning an in-flight ACME certificate request") {
+		t.Error("expected a WARN log when an in-flight request is abandoned")
+	}
+}
+
+// TestNewACMEClientAlwaysBounded is the regression guard for the fix to the
+// review finding: before it, only the DirectoryCAPool branch produced an
+// HTTPClient, so the common configurations fell back to http.DefaultClient,
+// which has no timeout.
+func TestNewACMEClientAlwaysBounded(t *testing.T) {
+	tests := []struct {
+		name    string
+		mutate  func(*types.AutoTLSConfig)
+		wantURL string
+	}{
+		{
+			name:    "no directory URL and no CA pool",
+			mutate:  func(*types.AutoTLSConfig) {},
+			wantURL: autocert.DefaultACMEDirectory,
+		},
+		{
+			name:    "directory URL only",
+			mutate:  func(c *types.AutoTLSConfig) { c.DirectoryURL = "https://acme.test.invalid/dir" },
+			wantURL: "https://acme.test.invalid/dir",
+		},
+		{
+			name:    "CA pool only",
+			mutate:  func(c *types.AutoTLSConfig) { c.DirectoryCAPool = x509.NewCertPool() },
+			wantURL: autocert.DefaultACMEDirectory,
+		},
+		{
+			name: "directory URL and CA pool",
+			mutate: func(c *types.AutoTLSConfig) {
+				c.DirectoryURL = "https://acme.test.invalid/dir"
+				c.DirectoryCAPool = x509.NewCertPool()
+			},
+			wantURL: "https://acme.test.invalid/dir",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := validAutoTLSConfig(t)
+			tt.mutate(cfg)
+
+			client := newACMEClient(cfg)
+			if client.DirectoryURL != tt.wantURL {
+				t.Errorf("DirectoryURL = %q, want %q", client.DirectoryURL, tt.wantURL)
+			}
+			if client.HTTPClient == nil {
+				t.Fatal("HTTPClient is nil: acme would fall back to http.DefaultClient, which has no timeout")
+			}
+			if client.HTTPClient.Timeout != acmeRequestTimeout {
+				t.Errorf("HTTPClient.Timeout = %v, want %v", client.HTTPClient.Timeout, acmeRequestTimeout)
+			}
+			tr, ok := client.HTTPClient.Transport.(*http.Transport)
+			if !ok {
+				t.Fatalf("Transport type = %T, want *http.Transport", client.HTTPClient.Transport)
+			}
+			if cfg.DirectoryCAPool != nil && tr.TLSClientConfig.RootCAs != cfg.DirectoryCAPool {
+				t.Error("RootCAs is not the configured DirectoryCAPool")
+			}
+			// The clone must keep the standard library's connection pooling
+			// rather than silently dropping it.
+			if tr.Proxy == nil {
+				t.Error("Transport lost http.DefaultTransport's settings; it should be a clone")
+			}
+		})
+	}
 }
 
 // TestAutoTLSIssueTimeoutDefault documents the default startup fetch budget.
