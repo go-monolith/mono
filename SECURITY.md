@@ -164,10 +164,17 @@ be reachable from the certificate authority for both issuance and every
 renewal. `CacheDir` must survive restarts: losing it forces reissuance on every
 boot and will exhaust the certificate authority's rate limits.
 
-AutoTLS covers the client listener only. Cluster, gateway, leafnode, websocket
-and MQTT connections are unaffected, and a certificate cache is not safe to
-share between clustered nodes. See the
-[AutoTLS design](docs/spec/foundation.md) for the full scope.
+**AutoTLS covers client-to-server connections only.** Cluster routes, gateways,
+leafnodes, websocket and MQTT listeners each read their own TLS configuration
+and are unaffected, so traffic between cluster nodes remains unencrypted unless
+you configure it separately — supply an internal CA through a
+`cluster { tls { ... } }` block in a `WithNATSConfigFile` configuration. A
+public ACME certificate is a poor fit for routes: they are peer-to-peer and
+conventionally use mutual TLS, which needs a client certificate autocert does
+not issue, and they are usually dialled by private address, which such a
+certificate does not cover. A certificate cache is also not safe to share
+between clustered nodes. See the [AutoTLS design](docs/spec/foundation.md) for
+the full scope.
 
 ## Security Updates
 

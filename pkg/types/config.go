@@ -59,8 +59,17 @@ type NATSOptions struct {
 }
 
 // AutoTLSConfig configures automatic TLS certificate provisioning for the
-// embedded NATS server using the ACME protocol (Let's Encrypt and compatible
-// certificate authorities), backed by golang.org/x/crypto/acme/autocert.
+// embedded NATS server's client listener using the ACME protocol (Let's Encrypt
+// and compatible certificate authorities), backed by
+// golang.org/x/crypto/acme/autocert.
+//
+// Scope: client-to-server connections only. Route (cluster), gateway, leafnode,
+// websocket and MQTT listeners each read their own separate TLS configuration
+// and are unaffected, so traffic between cluster nodes stays plaintext unless
+// it is configured separately. Routes are peer-to-peer and conventionally use
+// mutual TLS, which requires a client certificate autocert does not issue; use
+// an internal CA supplied through a cluster{tls{...}} block in a NATS config
+// file for that.
 //
 // When enabled, the framework serves the ACME http-01 challenge from a
 // framework-owned HTTP listener and installs a tls.Config with a lazy
@@ -74,7 +83,8 @@ type NATSOptions struct {
 // docs/spec/foundation.md for the full design.
 //
 // Enabling AutoTLS makes TLS mandatory for external NATS clients: plaintext
-// TCP connections are rejected once a certificate is configured.
+// TCP connections are rejected once a certificate is configured. Route
+// connections are not affected either way.
 type AutoTLSConfig struct {
 	// Domains is the list of fully qualified domain names to obtain
 	// certificates for. At least one entry is required.

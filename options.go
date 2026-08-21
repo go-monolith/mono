@@ -157,6 +157,11 @@ func WithNATSConfigFile(path string) MonoFrameworkOption {
 // WithNATSAutoTLS enables automatic ACME (Let's Encrypt) TLS certificates for
 // the embedded NATS server's client listener.
 //
+// Scope: client-to-server connections only. Cluster routes, gateways,
+// leafnodes, websocket and MQTT listeners are unaffected and stay plaintext
+// unless configured separately - see types.AutoTLSConfig for why an ACME
+// certificate does not fit the route path.
+//
 // The framework starts an HTTP listener (":80" by default, see
 // AutoTLSConfig.HTTPChallengeAddr) that answers ACME http-01 challenges for the
 // whole lifetime of the application - renewals re-run the challenge - and

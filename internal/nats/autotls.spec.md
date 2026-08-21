@@ -12,6 +12,15 @@ Give the embedded NATS server's client listener a certificate that is obtained
 and renewed automatically over ACME, so operators do not have to provision
 certificate files out of band and restart to pick up renewals.
 
+**Scope is the client listener only.** The certificate is installed on
+`server.Options.TLSConfig`, which nats-server consults for client-to-server
+connections. Routes, gateways, leafnodes, websocket and MQTT each read their own
+`TLSConfig` field and are untouched, so cluster traffic stays plaintext whether
+or not AutoTLS is enabled. That boundary is deliberate: `route.go` passes the
+same `opts.Cluster.TLSConfig` to both handshake roles, so the soliciting node
+acts as a TLS client and would present no certificate, since an autocert config
+supplies only `GetCertificate`.
+
 The file owns exactly two things: the `autocert.Manager` and the HTTP listener
 that answers ACME http-01 challenges. Everything else — option validation,
 translation, and lifecycle sequencing — lives elsewhere and is listed under

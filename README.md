@@ -17,7 +17,7 @@ Mono Framework enables building applications as a collection of loosely-coupled 
 - **Event-Driven Communication** - Publish/subscribe patterns for inter-module messaging
 - **Four Service Patterns** - Channel, Request-Reply, Queue Group, and Stream Consumer
 - **JetStream Persistence** - Durable messaging with at-least-once delivery guarantees
-- **Automatic TLS** - Let's Encrypt certificates obtained and renewed over ACME, with no restart
+- **Automatic TLS** - Let's Encrypt certificates for client connections, obtained and renewed over ACME with no restart
 - **Lifecycle Management** - Automatic dependency resolution and ordered startup/shutdown
 - **Built-in Middleware** - Access logging, audit trails, and request ID injection
 - **Plugin System** - Extensible architecture for custom functionality
@@ -131,7 +131,7 @@ Modules communicate through NATS messaging patterns rather than direct method ca
 | [multi-module](examples/multi-module/) | Order system with dependencies and service patterns |
 | [analytics](examples/analytics/) | Channel services for high-performance in-process communication |
 | [event-emitter](examples/event-emitter/) | Event publishing with EventEmitter and EventConsumer |
-| [auto-tls](examples/auto-tls/) | Automatic Let's Encrypt certificates for the embedded NATS server |
+| [auto-tls](examples/auto-tls/) | Automatic Let's Encrypt certificates for client-to-server connections |
 
 ## Built-in Components
 
@@ -151,7 +151,7 @@ The framework includes built-in security features:
 - **Sensitive Data Redaction** - Automatic redaction of passwords, tokens, API keys, and credentials from logs
 - **Audit Logging** - Security event tracking with optional hash chaining for tamper detection
 - **Input Validation** - Validation helpers for service handlers
-- **Automatic TLS (AutoTLS)** - ACME certificates for the embedded NATS server, renewed in the background
+- **Automatic TLS (AutoTLS)** - ACME certificates for client-to-server NATS connections, renewed in the background
 
 Enable AutoTLS with:
 
@@ -170,7 +170,18 @@ app, err := mono.NewMonoApplication(
 It serves the ACME http-01 challenge from its own listener on port 80, so the
 domain must resolve to this host and port 80 must be reachable. Enabling it
 makes TLS mandatory for external clients, which must connect by hostname over
-`tls://`. See the [AutoTLS example](examples/auto-tls/) and the
+`tls://`.
+
+> **Scope: client-to-server connections only.** AutoTLS secures the NATS client
+> listener. Route (cluster), gateway, leafnode, websocket and MQTT listeners have
+> their own separate TLS configuration and are not affected, so traffic between
+> cluster nodes stays plaintext unless you configure it yourself — supply an
+> internal CA through a `cluster { tls { ... } }` block in a
+> [NATS config file](examples/nats-config/). A public ACME certificate is not a
+> good fit for routes: they are peer-to-peer and conventionally use mutual TLS,
+> which needs a client certificate autocert does not issue.
+
+See the [AutoTLS example](examples/auto-tls/) and the
 [AutoTLS design](docs/spec/foundation.md).
 
 For security best practices and vulnerability reporting, see [SECURITY.md](SECURITY.md).

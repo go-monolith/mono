@@ -26,6 +26,14 @@ app, err := mono.NewMonoApplication(
 
 ## Key points
 
+- **Client-to-server connections only**: the certificate is installed on the
+  NATS client listener. Route (cluster), gateway, leafnode, websocket and MQTT
+  listeners each have their own separate TLS configuration and are untouched, so
+  traffic between cluster nodes stays plaintext unless you configure it
+  yourself. Routes are peer-to-peer and conventionally use mutual TLS, which
+  needs a client certificate autocert does not issue — use an internal CA and a
+  `cluster { tls { ... } }` block in a [NATS config file](../nats-config/)
+  instead.
 - **http-01 only**: the framework serves the challenge from its own listener on
   port 80, for the whole life of the process — every renewal re-runs the
   challenge. tls-alpn-01 would need the listener on port 443, and autocert does
