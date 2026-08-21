@@ -34,7 +34,9 @@ fixes:
 
 # Packages excluded from the reported figure. Keep this list in lockstep with
 # EXCLUDE_RE in scripts/coverage-gate.sh — the two drifting apart is how the
-# badge and the gate end up reporting different numbers.
+# badge and the gate end up reporting different numbers. internal/covergate
+# enforces that; it parses these entries, so changing their shape fails those
+# tests.
 #
 #   examples/  documentation programs, no tests by design
 #   bench/     benchmarks and the benchmark JSON parser

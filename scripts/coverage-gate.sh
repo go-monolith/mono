@@ -21,7 +21,8 @@ FILTERED="${COVERAGE_FILTERED:-coverage.filtered.out}"
 
 # Packages excluded from the floor. Keep this list in lockstep with the
 # `ignore:` list in codecov.yml — the two drifting apart is how the badge and
-# the gate end up reporting different numbers.
+# the gate end up reporting different numbers. internal/covergate enforces
+# that; it parses this assignment, so changing its shape fails those tests.
 #
 #   examples/  documentation programs, no tests by design
 #   bench/     benchmarks and the benchmark JSON parser

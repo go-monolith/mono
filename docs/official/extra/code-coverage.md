@@ -52,7 +52,11 @@ This list lives in two places and the two must stay in lockstep:
 - `EXCLUDE_RE` in [`scripts/coverage-gate.sh`](../../../scripts/coverage-gate.sh) — governs the enforced floor
 - `ignore:` in [`codecov.yml`](../../../codecov.yml) — governs the badge and the dashboard
 
-If they drift apart, the badge and the gate report different numbers. `codecov.yml` also needs its `fixes:` entry, which strips the `github.com/go-monolith/mono/` import-path prefix that Go writes into every profile line; without it Codecov's root-anchored ignore globs match nothing.
+If they drift apart the badge and the gate report different numbers for the same commit, and nothing at runtime notices. That lockstep is enforced by [`internal/covergate`](../../../internal/covergate/exclusions_test.go), a test-only package that parses both files and fails when they name different directories. It runs under `make test`, `make test-short` and `make check`, so a mismatch fails CI rather than sitting undetected.
+
+The same tests also check that both files agree with the module path in `go.mod`. `codecov.yml` needs its `fixes:` entry to strip the `github.com/go-monolith/mono/` import-path prefix that Go writes into every profile line — without it Codecov's root-anchored ignore globs match nothing, and every exclusion silently becomes a no-op.
+
+Changing the exclusions therefore means editing both files together. If the shape of either changes enough that the guard can no longer parse it, the guard fails loudly and asks to be updated — that is deliberate, since a drift guard that quietly parses nothing is worse than no guard at all.
 
 ## Coverage in CI
 
