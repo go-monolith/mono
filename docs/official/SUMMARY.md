@@ -63,3 +63,4 @@
 - [Event Emitter](../../examples/event-emitter/README.md)
 - [Cron Scheduler](../../examples/cron-scheduler/README.md)
 - [NATS Config File](../../examples/nats-config/README.md)
+- [AutoTLS (ACME / Let's Encrypt)](../../examples/auto-tls/README.md)

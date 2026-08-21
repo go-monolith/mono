@@ -17,6 +17,7 @@ Mono Framework enables building applications as a collection of loosely-coupled 
 - **Event-Driven Communication** - Publish/subscribe patterns for inter-module messaging
 - **Four Service Patterns** - Channel, Request-Reply, Queue Group, and Stream Consumer
 - **JetStream Persistence** - Durable messaging with at-least-once delivery guarantees
+- **Automatic TLS** - Let's Encrypt certificates obtained and renewed over ACME, with no restart
 - **Lifecycle Management** - Automatic dependency resolution and ordered startup/shutdown
 - **Built-in Middleware** - Access logging, audit trails, and request ID injection
 - **Plugin System** - Extensible architecture for custom functionality
@@ -130,6 +131,7 @@ Modules communicate through NATS messaging patterns rather than direct method ca
 | [multi-module](examples/multi-module/) | Order system with dependencies and service patterns |
 | [analytics](examples/analytics/) | Channel services for high-performance in-process communication |
 | [event-emitter](examples/event-emitter/) | Event publishing with EventEmitter and EventConsumer |
+| [auto-tls](examples/auto-tls/) | Automatic Let's Encrypt certificates for the embedded NATS server |
 
 ## Built-in Components
 
@@ -149,6 +151,27 @@ The framework includes built-in security features:
 - **Sensitive Data Redaction** - Automatic redaction of passwords, tokens, API keys, and credentials from logs
 - **Audit Logging** - Security event tracking with optional hash chaining for tamper detection
 - **Input Validation** - Validation helpers for service handlers
+- **Automatic TLS (AutoTLS)** - ACME certificates for the embedded NATS server, renewed in the background
+
+Enable AutoTLS with:
+
+```go
+app, err := mono.NewMonoApplication(
+    mono.WithNATSHost("0.0.0.0"),
+    mono.WithNATSAutoTLS(types.AutoTLSConfig{
+        Domains:   []string{"nats.example.com"},
+        Email:     "ops@example.com",
+        CacheDir:  "/var/lib/mono/acme",
+        AcceptTOS: true,
+    }),
+)
+```
+
+It serves the ACME http-01 challenge from its own listener on port 80, so the
+domain must resolve to this host and port 80 must be reachable. Enabling it
+makes TLS mandatory for external clients, which must connect by hostname over
+`tls://`. See the [AutoTLS example](examples/auto-tls/) and the
+[AutoTLS design](docs/spec/foundation.md).
 
 For security best practices and vulnerability reporting, see [SECURITY.md](SECURITY.md).
 

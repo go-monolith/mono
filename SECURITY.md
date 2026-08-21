@@ -111,7 +111,9 @@ When using the Mono Framework, follow these practices:
 
 For production deployments with external NATS access:
 
-- Enable TLS for NATS connections
+- Enable TLS for NATS connections — `WithNATSAutoTLS` obtains and renews a
+  Let's Encrypt certificate automatically, or supply a `tls{}` block through
+  `WithNATSConfigFile` to use your own certificate files
 - Use authentication for NATS clients
 - Configure firewall rules to restrict access
 - Consider network isolation for the embedded NATS server
@@ -142,6 +144,30 @@ The embedded NATS server by default:
 - Does not use TLS
 
 For production, configure appropriate security settings.
+
+TLS is opt-in through `WithNATSAutoTLS`. Enable it with:
+
+```go
+mono.WithNATSAutoTLS(types.AutoTLSConfig{
+    Domains:   []string{"nats.example.com"},
+    Email:     "ops@example.com",
+    CacheDir:  "/var/lib/mono/acme",
+    AcceptTOS: true,
+})
+```
+
+Once enabled, TLS becomes mandatory for external clients — plaintext
+connections are rejected — and clients must connect by hostname over `tls://`,
+because the certificate is selected from the TLS SNI extension. The framework
+serves the ACME http-01 challenge from its own listener on port 80, which must
+be reachable from the certificate authority for both issuance and every
+renewal. `CacheDir` must survive restarts: losing it forces reissuance on every
+boot and will exhaust the certificate authority's rate limits.
+
+AutoTLS covers the client listener only. Cluster, gateway, leafnode, websocket
+and MQTT connections are unaffected, and a certificate cache is not safe to
+share between clustered nodes. See the
+[AutoTLS design](docs/spec/foundation.md) for the full scope.
 
 ## Security Updates
 
