@@ -11,6 +11,9 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptest"
+	"net/http/httputil"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -47,47 +50,20 @@ const (
 	// the framework and not something else.
 	pebbleChallengePort = 5002
 	pebbleDirectoryURL  = "https://localhost:14000/dir"
-	pebbleRootURL       = "https://localhost:15000/roots/0"
-	pebbleMinicaPath    = "/test/certs/pebble.minica.pem"
+	// Pebble's order and finalize paths, which share the same order id. Used by
+	// startPebbleProxy to rebuild the Location header Pebble omits.
+	pebbleOrderPrefix    = "/my-order/"
+	pebbleFinalizePrefix = "/finalize-order/"
+	pebbleRootURL        = "https://localhost:15000/roots/0"
+	pebbleMinicaPath     = "/test/certs/pebble.minica.pem"
 )
 
-// pebbleOptInEnv gates this test. See requireDocker for why it is not run by
-// default.
-const pebbleOptInEnv = "MONO_ACME_PEBBLE_TEST"
-
-// requireDocker skips the test unless it has been explicitly opted into and a
-// usable Docker daemon is present.
+// requireDocker skips the test unless a usable Docker daemon is present.
 //
-// KNOWN UPSTREAM BLOCKER - this test cannot currently pass against Pebble, and
-// that is not a defect in this framework.
-//
-// golang.org/x/crypto/acme reads an order's URL exclusively from the Location
-// header of the response (see responseOrder in acme/rfc8555.go). RFC 8555
-// mandates Location on order *creation* but not on the finalize response, and
-// Pebble omits it there while answering with "status": "processing". So
-// CreateOrderCert falls into WaitOrder with an empty URL and fails with
-//
-//	Post "": unsupported protocol scheme ""
-//
-// Boulder, which is what Let's Encrypt production and staging actually run,
-// does send Location on finalize, so autocert works against the real CA. The
-// gap only appears against Pebble.
-//
-// Everything up to that point has been verified to work against Pebble: the
-// http-01 challenge is served from the framework's own listener, Pebble marks
-// the authorization VALID, and it issues the certificate. Only autocert's
-// retrieval of the issued certificate fails.
-//
-// The test is kept, gated, so the remaining assertions are ready the moment
-// the upstream gap closes. Run it with:
-//
-//	MONO_ACME_PEBBLE_TEST=1 make test-integration
+// The skip is deliberately narrow: on a Linux host with Docker - which is what
+// CI runs - this test executes a full ACME order and must pass, not skip.
 func requireDocker(t *testing.T) {
 	t.Helper()
-	if os.Getenv(pebbleOptInEnv) == "" {
-		t.Skipf("set %s=1 to run the Pebble ACME test; it is off by default because "+
-			"x/crypto/acme cannot retrieve a finalized order from Pebble (see the comment on requireDocker)", pebbleOptInEnv)
-	}
 	if runtime.GOOS != "linux" {
 		t.Skip("Pebble ACME test requires Docker host networking, which is Linux-only")
 	}
@@ -99,6 +75,79 @@ func requireDocker(t *testing.T) {
 	if out, err := exec.CommandContext(ctx, "docker", "info").CombinedOutput(); err != nil {
 		t.Skipf("docker daemon unavailable (%v); skipping Pebble ACME test: %s", err, out)
 	}
+}
+
+// startPebbleProxy fronts Pebble with a TLS reverse proxy that supplies the one
+// header Pebble omits, and returns the proxy's directory URL and the pool that
+// trusts it.
+//
+// WHY THIS EXISTS. Pebble's FinalizeOrder answers 200 with
+// "status": "processing" and no Location header (wfe/wfe.go). RFC 8555 mandates
+// Location on order *creation* but not on finalize, so Pebble is compliant -
+// but golang.org/x/crypto/acme reads an order's URL exclusively from that
+// header (responseOrder, acme/rfc8555.go), so CreateOrderCert falls into
+// WaitOrder with an empty URL and fails with
+//
+//	Post "": unsupported protocol scheme ""
+//
+// Boulder, which is what Let's Encrypt actually runs, evidently does send it -
+// autocert is used against Let's Encrypt in production at scale - so the gap
+// appears only against Pebble. It is unfixed as of x/crypto v0.55.0, and
+// golang/go#39284 is closed as not-planned.
+//
+// The proxy supplies the header the real CA would have sent, and nothing else.
+// It is guarded on the header being absent, so it becomes inert the moment
+// x/crypto stops depending on it - there is nothing here to remember to remove.
+//
+// This works because Pebble mints its absolute URLs from request.Host and
+// honours X-Forwarded-Proto (relativeEndpoint, wfe/wfe.go), so forwarding with
+// the proxy's own Host makes every subsequent ACME call - including finalize -
+// route back through the proxy.
+func startPebbleProxy(t *testing.T, upstreamPool *x509.CertPool) (directoryURL string, proxyPool *x509.CertPool) {
+	t.Helper()
+
+	upstream, err := url.Parse("https://localhost:14000")
+	if err != nil {
+		t.Fatalf("failed to parse the Pebble upstream URL: %v", err)
+	}
+
+	const proxyHostHeader = "X-Mono-Proxy-Host"
+
+	rp := httputil.NewSingleHostReverseProxy(upstream)
+	rp.Transport = &http.Transport{
+		TLSClientConfig: &tls.Config{RootCAs: upstreamPool, MinVersion: tls.VersionTLS12},
+	}
+	setUpstream := rp.Director
+	rp.Director = func(r *http.Request) {
+		host := r.Host // the proxy's own address, before the director rewrites it
+		setUpstream(r)
+		r.Host = host
+		r.Header.Set("X-Forwarded-Proto", "https")
+		// Carried through so ModifyResponse can rebuild a proxy-facing URL;
+		// resp.Request.URL points at the upstream by then.
+		r.Header.Set(proxyHostHeader, host)
+	}
+	rp.ModifyResponse = func(resp *http.Response) error {
+		path := resp.Request.URL.Path
+		if !strings.HasPrefix(path, pebbleFinalizePrefix) || resp.Header.Get("Location") != "" {
+			return nil
+		}
+		// Pebble's order and finalize URLs share the same opaque id.
+		orderID := strings.TrimPrefix(path, pebbleFinalizePrefix)
+		resp.Header.Set("Location", "https://"+resp.Request.Header.Get(proxyHostHeader)+pebbleOrderPrefix+orderID)
+		return nil
+	}
+	rp.ErrorHandler = func(w http.ResponseWriter, _ *http.Request, err error) {
+		t.Errorf("Pebble proxy failed to forward a request: %v", err)
+		w.WriteHeader(http.StatusBadGateway)
+	}
+
+	srv := httptest.NewTLSServer(rp)
+	t.Cleanup(srv.Close)
+
+	pool := x509.NewCertPool()
+	pool.AddCert(srv.Certificate())
+	return srv.URL + "/dir", pool
 }
 
 // startPebble runs a Pebble container on the host network and returns the CA
@@ -258,6 +307,10 @@ func TestAutoTLS_PebbleEndToEnd(t *testing.T) {
 	requireDocker(t)
 	directoryPool, issuedPool := startPebble(t)
 
+	// Pebble is reached through a proxy that supplies the Location header it
+	// omits on finalize; see startPebbleProxy for the full rationale.
+	directoryURL, proxyPool := startPebbleProxy(t, directoryPool)
+
 	natsPort := freePort(t)
 	cacheDir := filepath.Join(t.TempDir(), "acme")
 
@@ -266,8 +319,8 @@ func TestAutoTLS_PebbleEndToEnd(t *testing.T) {
 		Email:             "ops@" + pebbleDomain,
 		CacheDir:          cacheDir,
 		HTTPChallengeAddr: fmt.Sprintf("127.0.0.1:%d", pebbleChallengePort),
-		DirectoryURL:      pebbleDirectoryURL,
-		DirectoryCAPool:   directoryPool,
+		DirectoryURL:      directoryURL,
+		DirectoryCAPool:   proxyPool,
 		AcceptTOS:         true,
 		// A positive timeout means a successful Start already proves that a
 		// full ACME order completed through the framework's own http-01

@@ -167,12 +167,17 @@ combinations), and `TestNATSManager_AutoTLS_ChallengePortConflict` in
 `manager_test.go` (5).
 
 End-to-end issuance is covered by
-`test/integration/nats_autotls_integration_test.go`, which is gated behind
-`MONO_ACME_PEBBLE_TEST`. It cannot pass yet for a reason outside this package:
-`x/crypto/acme` reads an order's URL only from the `Location` header of the
-finalize response, and Pebble omits it. Boulder — what Let's Encrypt actually
-runs — sends it, so the gap appears only against Pebble. The full analysis is on
-`requireDocker` in that file.
+`test/integration/nats_autotls_integration_test.go`, which runs a real ACME
+order against Pebble under `make test-integration`. It skips only when the host
+is not Linux or has no Docker daemon; on CI it runs and must pass.
+
+Pebble is reached through a small TLS reverse proxy owned by the test. Pebble's
+finalize response carries no `Location` header — RFC 8555 does not require one
+there — but `x/crypto/acme` reads an order's URL exclusively from that header,
+so without the proxy `CreateOrderCert` fails with `Post "": unsupported protocol
+scheme ""`. The proxy supplies that one header and nothing else, guarded on it
+being absent so it goes inert if `x/crypto` ever stops depending on it. The full
+rationale is on `startPebbleProxy` in that file.
 
 ## Non-goals
 
