@@ -154,6 +154,56 @@ func WithNATSConfigFile(path string) MonoFrameworkOption {
 	}
 }
 
+// WithNATSAutoTLS enables automatic ACME (Let's Encrypt) TLS certificates for
+// the embedded NATS server's client listener.
+//
+// Scope: client-to-server connections only. Cluster routes, gateways,
+// leafnodes, websocket and MQTT listeners are unaffected and stay plaintext
+// unless configured separately - see types.AutoTLSConfig for why an ACME
+// certificate does not fit the route path.
+//
+// The framework starts an HTTP listener (":80" by default, see
+// AutoTLSConfig.HTTPChallengeAddr) that answers ACME http-01 challenges for the
+// whole lifetime of the application - renewals re-run the challenge - and
+// installs a lazily-populated tls.Config on the NATS client port. Certificates
+// are renewed in the background with no restart or reload.
+//
+// External clients must connect with tls:// using one of the configured domain
+// names, which is what ServerInfo().ClientURL reports. Connecting by IP address
+// fails: the certificate is selected from the TLS SNI extension, which nats.go
+// derives from the URL host.
+//
+// Enabling AutoTLS makes TLS mandatory for external clients - plaintext TCP
+// connections are rejected - so it is a breaking change for an existing
+// deployment with plaintext clients.
+//
+// It also switches the framework's own internal NATS client to an in-process
+// connection: a loopback TCP dial could not satisfy hostname verification
+// against a public-domain certificate. This is transparent to modules.
+//
+// Only the http-01 challenge is supported. See docs/spec/foundation.md.
+//
+// Example:
+//
+//	app, err := mono.NewMonoApplication(
+//	    mono.WithNATSHost("0.0.0.0"),
+//	    mono.WithNATSAutoTLS(types.AutoTLSConfig{
+//	        Domains:   []string{"nats.example.com"},
+//	        Email:     "ops@example.com",
+//	        CacheDir:  "/var/lib/mono/acme",
+//	        AcceptTOS: true,
+//	    }),
+//	)
+func WithNATSAutoTLS(autoTLS types.AutoTLSConfig) MonoFrameworkOption {
+	return func(cfg *types.MonoFrameworkConfig) error {
+		if err := autoTLS.Validate(); err != nil {
+			return errors.WrapInvalidConfiguration(0, "WithNATSAutoTLS", autoTLS.Domains, err.Error())
+		}
+		cfg.NATSOptions.AutoTLS = autoTLS.Clone()
+		return nil
+	}
+}
+
 // WithShutdownTimeout sets the graceful shutdown timeout.
 // The timeout must be at least 1 second to allow proper cleanup.
 //

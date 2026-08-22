@@ -610,3 +610,62 @@ func TestCreateFrameworkAppInstance_Combinations(t *testing.T) {
 		})
 	}
 }
+
+func TestBuildNATSOptions_AutoTLS(t *testing.T) {
+	autoTLS := &types.AutoTLSConfig{
+		Domains:   []string{"nats.example.com"},
+		Email:     "ops@example.com",
+		CacheDir:  "/var/lib/mono/acme",
+		AcceptTOS: true,
+	}
+	cfg := types.NATSOptions{AutoTLS: autoTLS}
+	opts := buildNATSOptions(cfg)
+
+	// AutoTLS contributes two options: the ACME configuration itself, and the
+	// in-process transport it forces on the framework's own client.
+	if len(opts) != 2 {
+		t.Fatalf("Expected 2 options, got %d", len(opts))
+	}
+
+	applied := nats.DefaultNATSConfig()
+	for i, opt := range opts {
+		if err := opt(applied); err != nil {
+			t.Fatalf("option %d failed: %v", i, err)
+		}
+	}
+	if !applied.UseInProcessConn {
+		t.Error("AutoTLS did not force UseInProcessConn")
+	}
+	if applied.AutoTLS == nil {
+		t.Fatal("AutoTLS configuration was not applied")
+	}
+	if applied.AutoTLS.Domains[0] != autoTLS.Domains[0] {
+		t.Errorf("Domains[0] = %q, want %q", applied.AutoTLS.Domains[0], autoTLS.Domains[0])
+	}
+}
+
+func TestBuildNATSOptions_AutoTLSNotDuplicatedWithInProcessConn(t *testing.T) {
+	cfg := types.NATSOptions{
+		UseInProcessConn: true,
+		AutoTLS: &types.AutoTLSConfig{
+			Domains:   []string{"nats.example.com"},
+			CacheDir:  "/var/lib/mono/acme",
+			AcceptTOS: true,
+		},
+	}
+	if opts := buildNATSOptions(cfg); len(opts) != 2 {
+		t.Errorf("Expected 2 options, got %d", len(opts))
+	}
+}
+
+func TestBuildNATSOptions_NoAutoTLSByDefault(t *testing.T) {
+	applied := nats.DefaultNATSConfig()
+	for _, opt := range buildNATSOptions(types.NATSOptions{Host: "127.0.0.1"}) {
+		if err := opt(applied); err != nil {
+			t.Fatalf("option failed: %v", err)
+		}
+	}
+	if applied.AutoTLS != nil {
+		t.Errorf("AutoTLS = %v, want nil when unconfigured", applied.AutoTLS)
+	}
+}

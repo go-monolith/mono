@@ -106,9 +106,19 @@ func buildNATSOptions(cfg types.NATSOptions) []nats.NATSOption {
 		opts = append(opts, nats.WithDontListen())
 	}
 
-	// Add UseInProcessConn if enabled
-	if cfg.UseInProcessConn {
+	// Add UseInProcessConn if enabled.
+	//
+	// AutoTLS forces it on: the framework's own client dials the loopback
+	// address, which cannot satisfy hostname verification against a
+	// public-domain certificate. Doing it here rather than inside the manager
+	// keeps the translated options an honest reflection of behaviour.
+	if cfg.UseInProcessConn || cfg.AutoTLS != nil {
 		opts = append(opts, nats.WithInProcessConn())
+	}
+
+	// Add AutoTLS (ACME) configuration if enabled
+	if cfg.AutoTLS != nil {
+		opts = append(opts, nats.WithAutoTLS(cfg.AutoTLS))
 	}
 
 	// Add JetStream configuration if enabled

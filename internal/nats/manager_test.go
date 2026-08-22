@@ -2,14 +2,23 @@ package nats
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/pem"
 	"fmt"
+	"math/big"
 	"net"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/go-monolith/mono/pkg/types"
 	"github.com/nats-io/nats.go"
 )
 
@@ -1738,4 +1747,309 @@ invalid_key: {
 // writeTestFile is a helper to write test config files.
 func writeTestFile(path, content string) error {
 	return os.WriteFile(path, []byte(content), 0644)
+}
+
+// autoTLSTestConfig returns an AutoTLS configuration that never touches the
+// network: the startup certificate fetch is disabled and the challenge server
+// binds an ephemeral loopback port.
+func autoTLSTestConfig(t *testing.T) *types.AutoTLSConfig {
+	t.Helper()
+	return &types.AutoTLSConfig{
+		Domains:             []string{"nats.test.invalid"},
+		Email:               "ops@test.invalid",
+		CacheDir:            filepath.Join(t.TempDir(), "acme"),
+		HTTPChallengeAddr:   "127.0.0.1:0",
+		AcceptTOS:           true,
+		StartupIssueTimeout: -1,
+	}
+}
+
+// TestNATSManager_AutoTLS_StartStop verifies a full manager lifecycle with
+// AutoTLS enabled. It generates no ACME traffic: nats-server sniffs in-process
+// connections even when TLSConfig is set, so the framework's own client
+// connects in plaintext over the pipe while the TCP listener stays TLS-only.
+func TestNATSManager_AutoTLS_StartStop(t *testing.T) {
+	port, err := findAvailablePort()
+	if err != nil {
+		t.Fatalf("failed to find available port: %v", err)
+	}
+	autoTLS := autoTLSTestConfig(t)
+	logger := newMockLogger()
+
+	manager, err := NewNATSManager(logger,
+		WithPort(port),
+		WithInProcessConn(),
+		WithAutoTLS(autoTLS),
+	)
+	if err != nil {
+		t.Fatalf("NewNATSManager() error = %v", err)
+	}
+
+	ctx := context.Background()
+	if err := manager.Start(ctx); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	defer func() {
+		if err := manager.Stop(ctx); err != nil {
+			t.Errorf("Stop() error = %v", err)
+		}
+	}()
+
+	if !logger.hasMessage("INFO", "ACME http-01 challenge server started") {
+		t.Error("expected an INFO log announcing the challenge server")
+	}
+	if !logger.hasMessage("INFO", "AutoTLS enabled") {
+		t.Error("expected an INFO log explaining the forced in-process transport")
+	}
+	if !logger.hasMessage("INFO", "startup certificate fetch disabled") {
+		t.Error("expected an INFO log for the disabled startup fetch")
+	}
+
+	// The client URL must advertise the certificate's domain, not the bind
+	// address: a client dialling the bind IP would fail hostname verification.
+	info := manager.ServerInfo()
+	wantURL := fmt.Sprintf("tls://%s:%d", autoTLS.Domains[0], port)
+	if info.ClientURL != wantURL {
+		t.Errorf("ClientURL = %q, want %q", info.ClientURL, wantURL)
+	}
+	if info.Host != "127.0.0.1" {
+		t.Errorf("Host = %q, want the bind address to be unchanged", info.Host)
+	}
+
+	// The framework's own connection still works end to end.
+	conn, err := manager.Connection()
+	if err != nil {
+		t.Fatalf("Connection() error = %v", err)
+	}
+	sub, err := conn.SubscribeSync("autotls.test")
+	if err != nil {
+		t.Fatalf("SubscribeSync() error = %v", err)
+	}
+	if err := conn.Publish("autotls.test", []byte("hello")); err != nil {
+		t.Fatalf("Publish() error = %v", err)
+	}
+	msg, err := sub.NextMsg(2 * time.Second)
+	if err != nil {
+		t.Fatalf("NextMsg() error = %v", err)
+	}
+	if string(msg.Data) != "hello" {
+		t.Errorf("message = %q, want %q", msg.Data, "hello")
+	}
+}
+
+// TestNATSManager_AutoTLS_ChallengePortConflict verifies that a failure to bind
+// the challenge port aborts startup without leaving a NATS server running.
+func TestNATSManager_AutoTLS_ChallengePortConflict(t *testing.T) {
+	busy, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("failed to occupy a port: %v", err)
+	}
+	defer func() { _ = busy.Close() }()
+
+	natsPort, err := findAvailablePort()
+	if err != nil {
+		t.Fatalf("failed to find available port: %v", err)
+	}
+	autoTLS := autoTLSTestConfig(t)
+	autoTLS.HTTPChallengeAddr = busy.Addr().String()
+
+	manager, err := NewNATSManager(newMockLogger(),
+		WithPort(natsPort),
+		WithInProcessConn(),
+		WithAutoTLS(autoTLS),
+	)
+	if err != nil {
+		t.Fatalf("NewNATSManager() error = %v", err)
+	}
+
+	if err := manager.Start(context.Background()); err == nil {
+		_ = manager.Stop(context.Background())
+		t.Fatal("Start() error = nil, want a challenge port bind failure")
+	}
+
+	// The NATS port must be free: a half-started server would make the next
+	// Start fail for an unrelated reason.
+	ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", natsPort))
+	if err != nil {
+		t.Fatalf("NATS port %d is still in use after a failed Start: %v", natsPort, err)
+	}
+	_ = ln.Close()
+}
+
+// TestNATSManager_AutoTLS_PrewarmFailureIsFatal verifies the fail-fast contract:
+// when the startup certificate fetch cannot complete, Start returns an error and
+// leaves nothing running.
+func TestNATSManager_AutoTLS_PrewarmFailureIsFatal(t *testing.T) {
+	// A closed local port as the ACME directory guarantees failure without
+	// reaching the internet.
+	closed, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("failed to reserve a port: %v", err)
+	}
+	deadAddr := closed.Addr().String()
+	_ = closed.Close()
+
+	natsPort, err := findAvailablePort()
+	if err != nil {
+		t.Fatalf("failed to find available port: %v", err)
+	}
+	autoTLS := autoTLSTestConfig(t)
+	autoTLS.DirectoryURL = "https://" + deadAddr + "/dir"
+	autoTLS.StartupIssueTimeout = 15 * time.Second
+
+	manager, err := NewNATSManager(newMockLogger(),
+		WithPort(natsPort),
+		WithInProcessConn(),
+		WithAutoTLS(autoTLS),
+	)
+	if err != nil {
+		t.Fatalf("NewNATSManager() error = %v", err)
+	}
+
+	err = manager.Start(context.Background())
+	if err == nil {
+		_ = manager.Stop(context.Background())
+		t.Fatal("Start() error = nil, want a certificate issuance failure")
+	}
+	if !strings.Contains(err.Error(), autoTLS.Domains[0]) {
+		t.Errorf("error %q does not name the domain %q", err, autoTLS.Domains[0])
+	}
+
+	// Both ports must be released.
+	ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", natsPort))
+	if err != nil {
+		t.Fatalf("NATS port %d is still in use after a failed Start: %v", natsPort, err)
+	}
+	_ = ln.Close()
+	if err := manager.Stop(context.Background()); err == nil {
+		t.Error("Stop() after a failed Start error = nil, want 'not started'")
+	}
+}
+
+// TestNATSManager_AutoTLS_RejectsDontListen verifies the cross-field validation:
+// AutoTLS is meaningless without a TCP listener to protect.
+func TestNATSManager_AutoTLS_RejectsDontListen(t *testing.T) {
+	_, err := NewNATSManager(newMockLogger(),
+		WithDontListen(),
+		WithInProcessConn(),
+		WithAutoTLS(autoTLSTestConfig(t)),
+	)
+	if err == nil {
+		t.Fatal("NewNATSManager() error = nil, want a DontListen conflict")
+	}
+	if !strings.Contains(err.Error(), "DontListen") {
+		t.Errorf("error = %q, want it to mention DontListen", err)
+	}
+}
+
+// TestNATSManager_AutoTLS_ConfigFileConflict verifies that a tls{} block in a
+// NATS config file and AutoTLS are rejected as a pair, since both would own
+// server.Options.TLSConfig.
+func TestNATSManager_AutoTLS_ConfigFileConflict(t *testing.T) {
+	dir := t.TempDir()
+	certPath := filepath.Join(dir, "cert.pem")
+	keyPath := filepath.Join(dir, "key.pem")
+	writeSelfSignedPair(t, certPath, keyPath)
+
+	port, err := findAvailablePort()
+	if err != nil {
+		t.Fatalf("failed to find available port: %v", err)
+	}
+	configPath := filepath.Join(dir, "server.conf")
+	configContent := fmt.Sprintf("port: %d\ntls {\n  cert_file: %q\n  key_file: %q\n}\n", port, certPath, keyPath)
+	if err := writeTestFile(configPath, configContent); err != nil {
+		t.Fatalf("failed to write config file: %v", err)
+	}
+
+	manager, err := NewNATSManager(newMockLogger(),
+		WithConfigFile(configPath),
+		WithInProcessConn(),
+		WithAutoTLS(autoTLSTestConfig(t)),
+	)
+	if err != nil {
+		t.Fatalf("NewNATSManager() error = %v", err)
+	}
+
+	err = manager.Start(context.Background())
+	if err == nil {
+		_ = manager.Stop(context.Background())
+		t.Fatal("Start() error = nil, want a config file TLS conflict")
+	}
+	if !strings.Contains(err.Error(), "tls{}") {
+		t.Errorf("error = %q, want it to name the conflicting tls{} block", err)
+	}
+}
+
+// writeSelfSignedPair generates a throwaway certificate and key so that a NATS
+// config file can carry a syntactically valid tls{} block. Generating it in
+// the test avoids committing key material to the repository.
+func writeSelfSignedPair(t *testing.T, certPath, keyPath string) {
+	t.Helper()
+
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("failed to generate key: %v", err)
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		Subject:      pkix.Name{CommonName: "nats.test.invalid"},
+		DNSNames:     []string{"nats.test.invalid"},
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(24 * time.Hour),
+		KeyUsage:     x509.KeyUsageDigitalSignature | x509.KeyUsageCertSign,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	if err != nil {
+		t.Fatalf("failed to create certificate: %v", err)
+	}
+	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
+
+	keyDER, err := x509.MarshalECPrivateKey(key)
+	if err != nil {
+		t.Fatalf("failed to marshal key: %v", err)
+	}
+	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})
+
+	if err := os.WriteFile(certPath, certPEM, 0o600); err != nil {
+		t.Fatalf("failed to write certificate: %v", err)
+	}
+	if err := os.WriteFile(keyPath, keyPEM, 0o600); err != nil {
+		t.Fatalf("failed to write key: %v", err)
+	}
+}
+
+// TestNATSManager_AutoTLS_RequiresInProcessConn verifies the fail-fast guard for
+// a direct user of this package.
+//
+// buildNATSOptions turns UseInProcessConn on whenever AutoTLS is set, so the
+// public API cannot reach this. Without the guard, a caller composing
+// WithAutoTLS without WithInProcessConn would get the TCP branch of Start
+// dialling plaintext nats:// against a TLS-only listener, and the only symptom
+// would be an opaque connection failure.
+func TestNATSManager_AutoTLS_RequiresInProcessConn(t *testing.T) {
+	port, err := findAvailablePort()
+	if err != nil {
+		t.Fatalf("failed to find available port: %v", err)
+	}
+
+	_, err = NewNATSManager(newMockLogger(),
+		WithPort(port),
+		WithAutoTLS(autoTLSTestConfig(t)),
+	)
+	if err == nil {
+		t.Fatal("NewNATSManager() error = nil, want AutoTLS to require UseInProcessConn")
+	}
+	if !strings.Contains(err.Error(), "UseInProcessConn") {
+		t.Errorf("error = %q, want it to name UseInProcessConn", err)
+	}
+
+	// The same configuration with the in-process transport is accepted.
+	if _, err := NewNATSManager(newMockLogger(),
+		WithPort(port),
+		WithInProcessConn(),
+		WithAutoTLS(autoTLSTestConfig(t)),
+	); err != nil {
+		t.Errorf("NewNATSManager() with UseInProcessConn error = %v, want nil", err)
+	}
 }

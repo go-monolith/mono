@@ -52,6 +52,10 @@ type natsManager struct {
 	js     jetstream.JetStream
 	mu     sync.RWMutex
 	logger types.Logger
+
+	// autoTLS is non-nil only while the server is running with AutoTLS
+	// enabled; it owns the ACME challenge listener.
+	autoTLS *autoTLS
 }
 
 // NewNATSManager creates a new NATS manager with the given options.
@@ -66,6 +70,18 @@ func NewNATSManager(logger types.Logger, opts ...NATSOption) (NATSManager, error
 	// Validate configuration constraints
 	if config.DontListen && !config.UseInProcessConn {
 		return nil, fmt.Errorf("invalid configuration: when DontListen is enabled, UseInProcessConn must also be enabled")
+	}
+	if config.AutoTLS != nil && config.DontListen {
+		return nil, fmt.Errorf("invalid configuration: AutoTLS cannot be combined with DontListen: there is no TCP listener for the certificate to protect")
+	}
+	// buildNATSOptions turns UseInProcessConn on whenever AutoTLS is set, so
+	// the public API cannot reach this. It guards a direct caller of this
+	// package: without it, the TCP branch of Start would dial plaintext
+	// nats:// against a listener that now requires TLS, and the only symptom
+	// would be an opaque connection failure.
+	if config.AutoTLS != nil && !config.UseInProcessConn {
+		return nil, fmt.Errorf("invalid configuration: AutoTLS requires UseInProcessConn: " +
+			"the framework's own client cannot satisfy hostname verification over a loopback TCP dial")
 	}
 
 	return &natsManager{
@@ -83,6 +99,11 @@ func (m *natsManager) Start(ctx context.Context) error {
 		return fmt.Errorf("NATS server already started")
 	}
 
+	// Set to true only on the successful path at the end of Start. The
+	// AutoTLS cleanup below keys off it so that no future early return can
+	// forget to release the challenge listener.
+	startupOK := false
+
 	// Create NATS server options - either from config file or defaults
 	var opts *server.Options
 	if m.config.ConfigFile != "" {
@@ -92,6 +113,14 @@ func (m *natsManager) Start(ctx context.Context) error {
 			return fmt.Errorf("failed to process NATS config file %q: %w", m.config.ConfigFile, err)
 		}
 		m.logger.Info("NATS config file loaded", "path", m.config.ConfigFile)
+
+		// A tls{} block in the config file and AutoTLS both want to own
+		// opts.TLSConfig. Checking the parsed result rather than rejecting
+		// every config file keeps unrelated settings (max_payload, limits)
+		// compatible with AutoTLS.
+		if m.config.AutoTLS != nil && opts.TLSConfig != nil {
+			return fmt.Errorf("NATS config file %q defines a tls{} block, which conflicts with AutoTLS; remove one of the two", m.config.ConfigFile)
+		}
 
 		// Sync framework config from the config file values (for fields not programmatically set)
 		// This ensures client connection uses correct host/port from config file
@@ -146,6 +175,20 @@ func (m *natsManager) Start(ctx context.Context) error {
 	// Always set NoSigs for embedded server to prevent signal handling conflicts
 	opts.NoSigs = true
 
+	// Configure AutoTLS (ACME) if enabled. The challenge listener is started
+	// below, before the NATS server is created, because calling
+	// autocert.Manager.HTTPHandler is what enables the http-01 challenge type
+	// in the first place.
+	if m.config.AutoTLS != nil {
+		at, err := newAutoTLS(m.config.AutoTLS, m.logger)
+		if err != nil {
+			return err
+		}
+		m.autoTLS = at
+		opts.TLSConfig = at.tlsConfig()
+		opts.TLSTimeout = autoTLSHandshakeTimeout
+	}
+
 	// Configure JetStream if enabled
 	if m.config.JetStreamEnabled {
 		opts.JetStream = true
@@ -170,6 +213,22 @@ func (m *natsManager) Start(ctx context.Context) error {
 			}
 			opts.Routes = append(opts.Routes, u)
 		}
+	}
+
+	// Bring the ACME challenge listener up before anything can trigger
+	// issuance, and make sure it is released again on every failure path
+	// below - otherwise a failed start would leak the challenge port.
+	if m.autoTLS != nil {
+		if err := m.autoTLS.start(); err != nil {
+			m.autoTLS = nil
+			return err
+		}
+		defer func() {
+			if !startupOK {
+				m.autoTLS.stop(context.Background())
+				m.autoTLS = nil
+			}
+		}()
 	}
 
 	// Create and start the server
@@ -216,6 +275,19 @@ func (m *natsManager) Start(ctx context.Context) error {
 	}
 	m.logger.Info("NATS server started", logAttrs...)
 
+	// Obtain certificates before reporting readiness so that a misconfigured
+	// domain or an unreachable challenge port fails startup instead of
+	// surfacing as a handshake error on the first real client connection.
+	// The server is already listening at this point, so a certificate
+	// obtained here is immediately usable.
+	if m.autoTLS != nil {
+		if err := m.autoTLS.prewarm(ctx); err != nil {
+			ns.Shutdown()
+			m.server = nil
+			return err
+		}
+	}
+
 	// Create client connection
 	var conn *nats.Conn
 	if m.config.UseInProcessConn {
@@ -225,6 +297,10 @@ func (m *natsManager) Start(ctx context.Context) error {
 			ns.Shutdown()
 			m.server = nil
 			return fmt.Errorf("failed to create in-process connection to NATS server: %w", err)
+		}
+		if m.config.AutoTLS != nil {
+			m.logger.Info("AutoTLS enabled: framework NATS client uses the in-process connection " +
+				"(a loopback TCP dial could not satisfy hostname verification against the certificate)")
 		}
 		m.logger.Info("NATS client connected via in-process connection")
 	} else {
@@ -255,6 +331,7 @@ func (m *natsManager) Start(ctx context.Context) error {
 		m.logger.Info("JetStream enabled", "storage_dir", m.config.StorageDir)
 	}
 
+	startupOK = true
 	return nil
 }
 
@@ -277,6 +354,13 @@ func (m *natsManager) Stop(ctx context.Context) error {
 
 	// Clear JetStream client
 	m.js = nil
+
+	// Stop the ACME challenge listener before the NATS server so a renewal in
+	// flight cannot race a half-shut-down server.
+	if m.autoTLS != nil {
+		m.autoTLS.stop(ctx)
+		m.autoTLS = nil
+	}
 
 	// Shutdown the server with panic recovery
 	// The embedded NATS server may panic during shutdown if certain subsystems
@@ -349,10 +433,18 @@ func (m *natsManager) ServerInfo() ServerInfo {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
+	// With AutoTLS the certificate is valid for a domain name, not for the
+	// bind address, so an external client dialling the bind IP would fail
+	// hostname verification. Report the name clients should actually use.
+	scheme, clientHost := "nats", m.config.Host
+	if m.config.AutoTLS != nil && len(m.config.AutoTLS.Domains) > 0 {
+		scheme, clientHost = "tls", m.config.AutoTLS.Domains[0]
+	}
+
 	info := ServerInfo{
 		Host:             m.config.Host,
 		Port:             m.config.Port,
-		ClientURL:        fmt.Sprintf("nats://%s:%d", m.config.Host, m.config.Port),
+		ClientURL:        fmt.Sprintf("%s://%s:%d", scheme, clientHost, m.config.Port),
 		JetStreamEnabled: m.config.JetStreamEnabled,
 	}
 
