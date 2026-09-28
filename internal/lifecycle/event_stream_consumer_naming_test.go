@@ -572,6 +572,24 @@ func TestSetupEventStreamConsumerLegacyMigration(t *testing.T) {
 		}
 	})
 
+	t.Run("deliver-new consumer reports a backlog the legacy durable never acknowledged", func(t *testing.T) {
+		store := newFakeConsumerStore()
+		store.cached = &jetstream.ConsumerInfo{Name: stable, Delivered: jetstream.SequenceInfo{Stream: 18}}
+		legacy := legacyInfo("billing-PaymentProcessed-v1-7", 3, 0, 15) // delivered 3, acknowledged none
+		legacy.NumAckPending = 3
+		durable := eventStreamDurable{name: stable, sharedLegacy: 1, legacy: []*jetstream.ConsumerInfo{legacy}}
+		logger, err := setup(t, store, interestEntry(types.DeliverNewPolicy), durable)
+		if err != nil {
+			t.Fatalf("setup: %v", err)
+		}
+		if got := store.recorded(); !slices.Equal(got, []string{"create:payments/" + stable}) {
+			t.Errorf("ops = %v, want only create", got)
+		}
+		if !logger.hasWarnContaining("does not allow repositioning") {
+			t.Error("expected a warning that the unacknowledged backlog was not carried over")
+		}
+	})
+
 	t.Run("caught-up deliver-new consumer needs no warning", func(t *testing.T) {
 		store := newFakeConsumerStore()
 		store.cached = &jetstream.ConsumerInfo{Name: stable, Delivered: jetstream.SequenceInfo{Stream: 15}}
@@ -704,8 +722,20 @@ func TestSetupEventStreamConsumerLegacyMigration(t *testing.T) {
 		durable := eventStreamDurable{name: "orders-billing-PaymentProcessed-v1", legacy: []*jetstream.ConsumerInfo{
 			legacyInfo("billing-PaymentProcessed-v1-2", 10, 10, 3),
 		}}
-		if _, err := setup(t, store, entry, durable); err != nil {
+		logger, err := setup(t, store, entry, durable)
+		if err != nil {
 			t.Fatalf("setup: %v", err)
+		}
+		want := []string{"delete:orders/billing-PaymentProcessed-v1-2", "create:orders/orders-billing-PaymentProcessed-v1"}
+		if got := store.recorded(); !slices.Equal(got, want) {
+			t.Errorf("ops = %v, want %v", got, want)
+		}
+		logger.mu.Lock()
+		defer logger.mu.Unlock()
+		for _, e := range logger.entries {
+			if strings.Contains(e, "Removed legacy event stream consumer durable") {
+				t.Errorf("a durable that was already gone must not be reported as removed: %s", e)
+			}
 		}
 	})
 

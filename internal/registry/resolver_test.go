@@ -788,3 +788,15 @@ func TestResolveDependenciesDeterministicOrder(t *testing.T) {
 		}
 	})
 }
+
+// TestResolveDependenciesDuplicateDependency tests that a dependency listed
+// more than once is resolved rather than reported as a circular dependency.
+func TestResolveDependenciesDuplicateDependency(t *testing.T) {
+	registry := NewModuleRegistry(&mockLogger{})
+	_ = registry.Register(&mockDependentModule{mockModule: mockModule{name: "api"}, deps: []string{"db", "db"}})
+	_ = registry.Register(&mockModule{name: "db"})
+
+	if got := strings.Join(resolvedNames(t, registry), ","); got != "db,api" {
+		t.Errorf("order = %s, want db,api", got)
+	}
+}

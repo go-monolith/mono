@@ -224,7 +224,14 @@ func (lm *lifecycleManager) startModule(ctx context.Context, module types.Module
 	// Step 1: Set dependency service containers
 	if depMod, ok := module.(types.DependentModule); ok {
 		lm.mu.RLock()
+		// A dependency listed twice is resolved once (see registry.ResolveDependencies),
+		// so its container is also provided only once.
+		provided := make(map[string]struct{})
 		for _, depName := range depMod.Dependencies() {
+			if _, dup := provided[depName]; dup {
+				continue
+			}
+			provided[depName] = struct{}{}
 			depContainer, exists := lm.containers[depName]
 			if !exists {
 				lm.mu.RUnlock()
@@ -1266,11 +1273,9 @@ func (lm *lifecycleManager) setupEventStreamConsumer(ctx context.Context, entry 
 		consumerCfg.AckPolicy = types.AckExplicitPolicy
 	}
 
-	var store eventConsumerStore
-	if s, ok := es.(eventConsumerStore); ok {
-		store = s
-	}
-	if store != nil && streamCfg.Retention == types.WorkQueuePolicy && len(durable.legacy) > 0 {
+	// An EventStream without consumer management skips the migration.
+	store, migrate := es.(eventConsumerStore)
+	if migrate && streamCfg.Retention == types.WorkQueuePolicy && len(durable.legacy) > 0 {
 		if err := lm.removeWorkQueueLegacyDurables(ctx, store, cfg.Stream.Name, consumerCfg, durable); err != nil {
 			return err
 		}
@@ -1282,7 +1287,7 @@ func (lm *lifecycleManager) setupEventStreamConsumer(ctx context.Context, entry 
 		return fmt.Errorf("failed to create consumer %s: %w", consumerName, err)
 	}
 
-	if store != nil && len(durable.legacy) > 0 {
+	if migrate && len(durable.legacy) > 0 {
 		if err := lm.carryOverLegacyPosition(ctx, store, cfg.Stream.Name, consumer, consumerCfg, streamCfg.Retention, durable); err != nil {
 			return err
 		}

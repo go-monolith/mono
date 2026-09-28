@@ -85,7 +85,10 @@ func buildDependencyGraph(registry ModuleRegistry) *dependencyGraph {
 		module := modules[name]
 		// Check if module implements DependentModule interface
 		if depMod, ok := module.(types.DependentModule); ok {
-			deps := depMod.Dependencies()
+			// Deduplicate so a dependency listed twice counts once: topologicalSort
+			// decrements the in-degree once per resolved dependency, so a duplicate
+			// would otherwise never reach zero and be reported as a cycle.
+			deps := uniqueDependencies(depMod.Dependencies())
 			graph.adjacencyList[name] = deps
 
 			// Each dependency increases the in-degree of the dependent module
@@ -94,6 +97,21 @@ func buildDependencyGraph(registry ModuleRegistry) *dependencyGraph {
 	}
 
 	return graph
+}
+
+// uniqueDependencies returns deps without repeated names, keeping the first
+// occurrence of each so the declared order is preserved.
+func uniqueDependencies(deps []string) []string {
+	seen := make(map[string]struct{}, len(deps))
+	unique := make([]string, 0, len(deps))
+	for _, dep := range deps {
+		if _, dup := seen[dep]; dup {
+			continue
+		}
+		seen[dep] = struct{}{}
+		unique = append(unique, dep)
+	}
+	return unique
 }
 
 // detectMissingDependencies checks if all dependencies exist in the registry.

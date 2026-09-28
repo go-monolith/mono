@@ -195,16 +195,16 @@ func (lm *lifecycleManager) planEventStreamDurables(ctx context.Context, entries
 			continue
 		}
 		stream := entry.Config.Stream.Name
-		names, listed := consumerNames[stream]
+		existing, listed := consumerNames[stream]
 		if !listed {
 			var err error
-			names, err = store.ConsumerNames(ctx, stream)
+			existing, err = store.ConsumerNames(ctx, stream)
 			if err != nil {
 				return nil, fmt.Errorf("failed to look up legacy durables on stream %s: %w", stream, err)
 			}
-			consumerNames[stream] = names
+			consumerNames[stream] = existing
 		}
-		for _, name := range names {
+		for _, name := range existing {
 			if !isLegacyConsumerName(name, prefix, stable[stream]) {
 				continue
 			}
@@ -249,7 +249,13 @@ func (lm *lifecycleManager) removeWorkQueueLegacyDurables(ctx context.Context, s
 		return fmt.Errorf("consumer %s on work-queue stream %s must use the all deliver policy and explicit acknowledgement; legacy durables left in place", durable.name, stream)
 	}
 	for _, legacy := range durable.legacy {
-		if err := store.DeleteConsumer(ctx, stream, legacy.Name); err != nil && !errors.Is(err, jetstream.ErrConsumerNotFound) {
+		err := store.DeleteConsumer(ctx, stream, legacy.Name)
+		if errors.Is(err, jetstream.ErrConsumerNotFound) {
+			// Already removed since the listing (by another instance or an
+			// operator); there is nothing to report.
+			continue
+		}
+		if err != nil {
 			return fmt.Errorf("failed to remove legacy durable %s from work-queue stream %s: %w", legacy.Name, stream, err)
 		}
 		unacknowledged := legacy.NumPending + uint64(max(legacy.NumAckPending, 0))
@@ -315,9 +321,6 @@ func (lm *lifecycleManager) carryOverLegacyPosition(ctx context.Context, store e
 	for _, legacy := range informative {
 		legacyFloors = append(legacyFloors, fmt.Sprintf("%s@%d", legacy.Name, legacy.AckFloor.Stream))
 	}
-	if floor == 0 {
-		return nil
-	}
 
 	switch cfg.DeliverPolicy {
 	case types.DeliverAllPolicy, types.DeliverByStartSequencePolicy, types.DeliverByStartTimePolicy:
@@ -336,6 +339,13 @@ func (lm *lifecycleManager) carryOverLegacyPosition(ctx context.Context, store e
 				"legacy_ack_floors", legacyFloors,
 				"not_carried_over", notCarried)
 		}
+		return nil
+	}
+
+	if floor == 0 {
+		// Nothing was acknowledged, so there is no position to carry over. This
+		// is checked after the deliver-policy warning above, which still has to
+		// report a backlog the legacy durable delivered but never acknowledged.
 		return nil
 	}
 
