@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
-	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -225,7 +224,14 @@ func (lm *lifecycleManager) startModule(ctx context.Context, module types.Module
 	// Step 1: Set dependency service containers
 	if depMod, ok := module.(types.DependentModule); ok {
 		lm.mu.RLock()
+		// A dependency listed twice is resolved once (see registry.ResolveDependencies),
+		// so its container is also provided only once.
+		provided := make(map[string]struct{})
 		for _, depName := range depMod.Dependencies() {
+			if _, dup := provided[depName]; dup {
+				continue
+			}
+			provided[depName] = struct{}{}
 			depContainer, exists := lm.containers[depName]
 			if !exists {
 				lm.mu.RUnlock()
@@ -457,12 +463,23 @@ func (lm *lifecycleManager) setupNATSSubscriptions(ctx context.Context) error {
 
 		// Setup event stream consumers from EventRegistry.
 		// These use JetStream durable pull consumers for at-least-once delivery.
+		// Durable names are planned for all registrations at once so that legacy
+		// durables shared between registrations can be recognized.
 		streamConsumers := lm.eventRegistry.StreamConsumerEntries()
-		for _, entry := range streamConsumers {
-			if err := lm.setupEventStreamConsumer(ctx, entry); err != nil {
-				return fmt.Errorf("failed to setup event stream consumer for %s.%s: %w",
-					entry.EventDef.ModuleName, entry.EventDef.Name, err)
+		if len(streamConsumers) > 0 {
+			durables, err := lm.planEventStreamDurables(ctx, streamConsumers)
+			if err != nil {
+				return fmt.Errorf("failed to plan event stream consumers: %w", err)
 			}
+			for i, entry := range streamConsumers {
+				if err := lm.setupEventStreamConsumer(ctx, entry, durables[i]); err != nil {
+					return fmt.Errorf("failed to setup event stream consumer for %s.%s: %w",
+						entry.EventDef.ModuleName, entry.EventDef.Name, err)
+				}
+			}
+			// Every consumer is set up, so the legacy migration is finished on
+			// each of these streams; later boots only report leftovers.
+			lm.markLegacyMigrationDone(ctx, streamConsumers, durables)
 		}
 	}
 
@@ -907,10 +924,16 @@ func (lm *lifecycleManager) setupStreamConsumer(ctx context.Context, entry *type
 	}
 
 	// Create/Update Consumer (idempotent)
-	consumerName := sanitizeConsumerName(entry.ModuleName + "-" + entry.Name)
+	consumerName := types.SanitizeConsumerName(entry.ModuleName + "-" + entry.Name)
 	consumerCfg := cfg.Consumer
 	// Set required fields that must be managed by the framework
 	consumerCfg.Name = consumerName
+	// Durable was never sent to the server for stream consumer services, so
+	// their consumers exist server-side as named, non-durable consumers. Keep it
+	// that way: switching an existing consumer to durable, or passing a caller's
+	// Durable that differs from Name, is a server-side change that needs its
+	// own migration.
+	consumerCfg.Durable = ""
 	if consumerCfg.AckPolicy == 0 {
 		consumerCfg.AckPolicy = types.AckExplicitPolicy
 	}
@@ -1019,7 +1042,7 @@ func (lm *lifecycleManager) setupCronService(ctx context.Context, entry *types.S
 
 	// Durable pull consumer filtered on the concrete target subject so it never
 	// receives the internal schedule/control messages.
-	consumerName := sanitizeConsumerName(module + "-" + entry.Name + "-cron")
+	consumerName := types.SanitizeConsumerName(module + "-" + entry.Name + "-cron")
 	consumerCfg := types.ConsumerConfig{
 		Name:          consumerName,
 		FilterSubject: targetSubject,
@@ -1210,7 +1233,13 @@ func (lm *lifecycleManager) warnOrphanedCronStreams(ctx context.Context, registe
 
 // setupEventStreamConsumer sets up a JetStream stream consumer for an event
 // and starts the fetch loop goroutine.
-func (lm *lifecycleManager) setupEventStreamConsumer(ctx context.Context, entry types.EventStreamConsumerEntry) error {
+//
+// durable carries the stable durable name and the legacy durables it replaces
+// (see planEventStreamDurables). Before the fetch loop starts, legacy durables
+// are removed from work-queue streams and, on other streams, their position is
+// carried over to the stable durable. On a stream already marked as migrated,
+// the marker is kept and leftover legacy consumers are only reported.
+func (lm *lifecycleManager) setupEventStreamConsumer(ctx context.Context, entry types.EventStreamConsumerEntry, durable eventStreamDurable) error {
 	cfg := entry.Config
 
 	// Get JetStream from EventBus
@@ -1220,35 +1249,49 @@ func (lm *lifecycleManager) setupEventStreamConsumer(ctx context.Context, entry 
 	}
 
 	// Create/Update Stream (idempotent)
-	// Stream.Subjects is already set to eventDef.Subject during registration
-	streamCfg := cfg.Stream
-	// Apply defaults for zero values if user didn't specify
-	if streamCfg.Retention == 0 {
-		streamCfg.Retention = types.LimitsPolicy
-	}
-	if streamCfg.Storage == 0 {
-		streamCfg.Storage = types.FileStorage
-	}
+	// Stream.Subjects is already set to eventDef.Subject during registration.
+	// Writing the configuration replaces the stream's metadata, so a migrated
+	// stream gets its migration marker re-applied.
+	streamCfg := eventStreamConfig(cfg.Stream, durable.migrated)
 	_, err = es.CreateOrUpdateStream(ctx, streamCfg)
 	if err != nil {
 		return fmt.Errorf("failed to create stream %s: %w", cfg.Stream.Name, err)
 	}
 
 	// Create/Update Consumer (idempotent)
-	// Use event name, version, and sequence ID for unique consumer naming
-	// The sequence ID ensures uniqueness when multiple consumers subscribe to the same event
-	consumerName := sanitizeConsumerName(fmt.Sprintf("%s-%s-%s-%d",
-		entry.EventDef.ModuleName, entry.EventDef.Name, entry.EventDef.Version, entry.SequenceID))
+	// The durable name depends only on the consuming module and the event (see
+	// types.EventStreamConsumerName), so it is the same on every boot.
+	consumerName := durable.name
 	consumerCfg := cfg.Consumer
-	// Set required fields that must be managed by the framework
+	// Set required fields that must be managed by the framework. Durable makes
+	// the server keep the consumer regardless of inactivity; a consumer with a
+	// Name only is non-durable and is deleted after 5s without pull requests.
 	consumerCfg.Name = consumerName
+	consumerCfg.Durable = consumerName
 	if consumerCfg.AckPolicy == 0 {
 		consumerCfg.AckPolicy = types.AckExplicitPolicy
 	}
+
+	// An EventStream without consumer management skips the migration.
+	store, migrate := es.(eventConsumerStore)
+	if migrate && streamCfg.Retention == types.WorkQueuePolicy && len(durable.legacy) > 0 {
+		if err := lm.removeWorkQueueLegacyDurables(ctx, store, cfg.Stream.Name, consumerCfg, durable); err != nil {
+			return err
+		}
+		durable.legacy = nil
+	}
+
 	consumer, err := es.CreateOrUpdateConsumer(ctx, cfg.Stream.Name, consumerCfg)
 	if err != nil {
 		return fmt.Errorf("failed to create consumer %s: %w", consumerName, err)
 	}
+
+	if migrate && len(durable.legacy) > 0 {
+		if err := lm.carryOverLegacyPosition(ctx, store, cfg.Stream.Name, consumer, consumerCfg, streamCfg.Retention, durable); err != nil {
+			return err
+		}
+	}
+	lm.warnLeftoverLegacyNames(cfg.Stream.Name, streamCfg.Retention, durable)
 
 	// Start fetch loop goroutine
 	loopCtx, cancel := context.WithCancel(lm.runtimeCtx) //nolint:gosec // G118: cancel is stored in lm.streamConsumers and called in shutdown
@@ -1428,22 +1471,6 @@ func (lm *lifecycleManager) GetMiddlewareHook() func(ctx context.Context, event 
 			chain.RunModuleLifecycle(ctx, event)
 		}
 	}
-}
-
-// sanitizeConsumerName converts a string to a valid JetStream consumer name.
-// Consumer names must be alphanumeric with allowed separators: - _ .
-var nonAlphanumericRegex = regexp.MustCompile(`[^a-zA-Z0-9\-_.]`)
-
-func sanitizeConsumerName(name string) string {
-	// Replace spaces and common separators with hyphens
-	name = strings.ReplaceAll(name, " ", "-")
-	// Remove any remaining invalid characters
-	name = nonAlphanumericRegex.ReplaceAllString(name, "")
-	// Ensure not empty
-	if name == "" {
-		name = "consumer"
-	}
-	return name
 }
 
 // getErrorTypeName extracts a clean error type name using reflection.

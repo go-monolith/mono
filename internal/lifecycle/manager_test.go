@@ -1201,60 +1201,6 @@ func TestGetMiddlewareHook(t *testing.T) {
 	})
 }
 
-// TestSanitizeConsumerName tests consumer name sanitization
-func TestSanitizeConsumerName(t *testing.T) {
-	tests := []struct {
-		name     string
-		input    string
-		expected string
-	}{
-		{
-			name:     "alphanumeric only",
-			input:    "test123",
-			expected: "test123",
-		},
-		{
-			name:     "with spaces",
-			input:    "test consumer name",
-			expected: "test-consumer-name",
-		},
-		{
-			name:     "with special characters",
-			input:    "test@consumer#name",
-			expected: "testconsumername",
-		},
-		{
-			name:     "with allowed separators",
-			input:    "test-consumer_name.v1",
-			expected: "test-consumer_name.v1",
-		},
-		{
-			name:     "empty string",
-			input:    "",
-			expected: "consumer",
-		},
-		{
-			name:     "only invalid characters",
-			input:    "@#$%",
-			expected: "consumer",
-		},
-		{
-			name:     "mixed valid and invalid",
-			input:    "test!@#$%consumer&*()name",
-			expected: "testconsumername",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			result := sanitizeConsumerName(tt.input)
-			if result != tt.expected {
-				t.Errorf("sanitizeConsumerName(%q) = %q, want %q", tt.input, result, tt.expected)
-			}
-		})
-	}
-}
-
 // TestQueueGroupServiceSetup tests queue group service NATS subscription setup
 func TestQueueGroupServiceSetup(t *testing.T) {
 	t.Run("queue group service subscriptions are created", func(t *testing.T) {
@@ -1721,7 +1667,7 @@ func TestSetupEventStreamConsumer(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
 
-		err := lm.setupEventStreamConsumer(ctx, entry)
+		err := lm.setupEventStreamConsumer(ctx, entry, eventStreamDurable{name: eventStreamConsumerBaseName(entry)})
 		if err != nil {
 			t.Fatalf("setupEventStreamConsumer failed: %v", err)
 		}
@@ -1768,7 +1714,7 @@ func TestSetupEventStreamConsumer(t *testing.T) {
 			SequenceID: 1,
 		}
 
-		err := lm.setupEventStreamConsumer(context.Background(), entry)
+		err := lm.setupEventStreamConsumer(context.Background(), entry, eventStreamDurable{name: eventStreamConsumerBaseName(entry)})
 		if err == nil {
 			t.Error("setupEventStreamConsumer should fail when EventStream() fails")
 		}
@@ -1805,7 +1751,7 @@ func TestSetupEventStreamConsumer(t *testing.T) {
 			SequenceID: 1,
 		}
 
-		err := lm.setupEventStreamConsumer(context.Background(), entry)
+		err := lm.setupEventStreamConsumer(context.Background(), entry, eventStreamDurable{name: eventStreamConsumerBaseName(entry)})
 		if err == nil {
 			t.Error("setupEventStreamConsumer should fail when CreateOrUpdateStream fails")
 		}

@@ -222,6 +222,14 @@ return registry.RegisterEventConsumer(
 
 Durable event consumption via JetStream pull consumers with explicit acknowledgment.
 
+Each registration gets a durable consumer named
+`<consumer-module>-<event-module>-<event>-<version>`, for example
+`analytics-billing-PaymentProcessed-v1`. The name does not change across restarts or when
+other modules are added or removed, so the consumer resumes where it left off. If you are
+upgrading from v0.0.11 or earlier, see
+[RegisterEventStreamConsumer](../api/eventregistry.md#registereventstreamconsumer) for how
+existing durables are carried over.
+
 #### When to Use
 
 - Event-Driven Architecture (EDA) patterns
