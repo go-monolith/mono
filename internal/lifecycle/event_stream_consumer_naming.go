@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"regexp"
 	"strings"
 	"time"
@@ -20,7 +21,10 @@ import (
 // came from a process-global counter that followed module start order. That
 // order was not deterministic, so the durable name could change between
 // restarts. The code in this file derives the stable names and carries the
-// delivery position of those legacy durables over to the stable ones.
+// delivery position of those legacy durables over to the stable ones, once per
+// stream: when every consumer on a stream is set up, the stream is marked (see
+// legacyMigrationMarkerKey) and later boots only report leftover legacy
+// consumers.
 
 // eventConsumerStore is the consumer-management surface used to carry legacy
 // durables over to their stable names. The framework's JetStream wrapper
@@ -28,6 +32,7 @@ import (
 // through an optional interface assertion, so an EventStream without it (such
 // as a test double) skips the migration and only gets the stable names.
 type eventConsumerStore interface {
+	StreamMetadata(ctx context.Context, stream string) (map[string]string, error)
 	ConsumerNames(ctx context.Context, stream string) ([]string, error)
 	ConsumerInfo(ctx context.Context, stream, consumer string) (*jetstream.ConsumerInfo, error)
 	DeleteConsumer(ctx context.Context, stream, consumer string) error
@@ -53,7 +58,27 @@ type eventStreamDurable struct {
 	// stream. Legacy names do not identify the consuming module, so when it is
 	// above one the legacy durables cannot be attributed to a registration.
 	sharedLegacy int
+
+	// migrated reports that the stream already carries the migration marker.
+	// Nothing is carried over or deleted, and the marker is kept on the stream.
+	migrated bool
+
+	// leftover lists the names of legacy consumers still present on a migrated
+	// stream. They are only reported; their info is not fetched.
+	leftover []string
 }
+
+// legacyMigrationMarkerKey and legacyMigrationMarkerValue form the stream
+// metadata entry that records that the legacy durable migration has finished
+// on a stream. Without it the migration would run on every boot, because
+// legacy durables are never deleted: a consumer added later for the same event
+// would be fast-forwarded to the legacy position, and every boot would depend
+// on inspecting leftover legacy consumers. The framework writes the stream
+// configuration on every boot, so the entry is re-applied each time.
+const (
+	legacyMigrationMarkerKey   = "mono.legacy-consumer-migration"
+	legacyMigrationMarkerValue = "done"
+)
 
 // legacyResetAttempts and legacyResetBackoff bound the retries of a consumer
 // reset. A consumer on a replicated stream may not have a leader yet right
@@ -157,11 +182,12 @@ func (lm *lifecycleManager) eventConsumerStore() eventConsumerStore {
 
 // planEventStreamDurables derives the stable durable name of every event
 // stream consumer registration and finds the legacy durables each one
-// replaces. It lists the consumer names of each stream once and fetches the
-// info of every name that matches a legacy pattern; only pull consumers count,
-// since earlier versions created nothing else. Errors are returned rather than
-// ignored, because creating the stable durable without its legacy position
-// would replay the stream.
+// replaces. It reads the metadata and lists the consumer names of each stream
+// once. On a stream that carries the migration marker, matching names are only
+// recorded as leftovers. Otherwise it fetches the info of every matching name;
+// only pull consumers count, since earlier versions created nothing else.
+// Errors are returned rather than ignored, because creating the stable durable
+// without its legacy position would replay the stream.
 func (lm *lifecycleManager) planEventStreamDurables(ctx context.Context, entries []types.EventStreamConsumerEntry) ([]eventStreamDurable, error) {
 	names := eventStreamConsumerNames(entries)
 	durables := make([]eventStreamDurable, len(entries))
@@ -188,24 +214,34 @@ func (lm *lifecycleManager) planEventStreamDurables(ctx context.Context, entries
 	}
 
 	consumerNames := make(map[string][]string)
+	marked := make(map[string]bool)
 	infos := make(map[string]*jetstream.ConsumerInfo)
 	for i, entry := range entries {
-		prefix, ok := legacyConsumerPrefix(entry.EventDef)
-		if !ok {
-			continue
-		}
 		stream := entry.Config.Stream.Name
 		existing, listed := consumerNames[stream]
 		if !listed {
-			var err error
+			metadata, err := store.StreamMetadata(ctx, stream)
+			if err != nil {
+				return nil, fmt.Errorf("failed to read metadata of stream %s: %w", stream, err)
+			}
+			marked[stream] = metadata[legacyMigrationMarkerKey] == legacyMigrationMarkerValue
 			existing, err = store.ConsumerNames(ctx, stream)
 			if err != nil {
 				return nil, fmt.Errorf("failed to look up legacy durables on stream %s: %w", stream, err)
 			}
 			consumerNames[stream] = existing
 		}
+		durables[i].migrated = marked[stream]
+		prefix, ok := legacyConsumerPrefix(entry.EventDef)
+		if !ok {
+			continue
+		}
 		for _, name := range existing {
 			if !isLegacyConsumerName(name, prefix, stable[stream]) {
+				continue
+			}
+			if marked[stream] {
+				durables[i].leftover = append(durables[i].leftover, name)
 				continue
 			}
 			info, fetched := infos[stream+"\x00"+name]
@@ -269,17 +305,23 @@ func (lm *lifecycleManager) removeWorkQueueLegacyDurables(ctx context.Context, s
 }
 
 // carryOverLegacyPosition positions a newly created stable durable where its
-// legacy durables left off, so upgrading does not replay the stream. It never
+// legacy durable left off, so upgrading does not replay the stream. It never
 // deletes legacy durables; it logs a warning for each one instead.
+//
+// Legacy names do not record which module a durable belonged to, so the
+// position is carried over only when it is unambiguous: a single registration
+// in the application uses the legacy name prefix on this stream, and every
+// legacy durable that delivered anything stopped at the same ack floor.
+// Otherwise one of them may belong to another module, or to a module removed
+// in the same deploy, and resetting to it could skip messages this consumer
+// never processed. In that case the stable durable keeps the start its
+// configuration gives it: replay is preferred over loss. Legacy durables that
+// never delivered carry no position.
 //
 // The position is only applied while the stable durable has not delivered
 // anything and is still before the legacy floor, which makes the step
 // idempotent across restarts and keeps a durable already in use, or already
-// positioned by another instance, from being rewound. The resume point is the legacy
-// ack floor plus one: the highest floor when a single registration owns the
-// legacy durables (each of them acknowledged a contiguous prefix of the
-// stream), the lowest when several registrations share them (the choice that
-// loses nothing). Legacy durables that never delivered carry no position.
+// positioned by another instance, from being rewound.
 func (lm *lifecycleManager) carryOverLegacyPosition(ctx context.Context, store eventConsumerStore, stream string, consumer jetstream.Consumer, cfg types.ConsumerConfig, retention types.RetentionPolicy, durable eventStreamDurable) error {
 	defer lm.warnLegacyDurables(stream, retention, durable)
 
@@ -309,17 +351,11 @@ func (lm *lifecycleManager) carryOverLegacyPosition(ctx context.Context, store e
 		return nil
 	}
 
-	floor := informative[0].AckFloor.Stream
-	for _, legacy := range informative[1:] {
-		if durable.sharedLegacy > 1 {
-			floor = min(floor, legacy.AckFloor.Stream)
-		} else {
-			floor = max(floor, legacy.AckFloor.Stream)
-		}
-	}
 	legacyFloors := make([]string, 0, len(informative))
+	distinctFloors := make(map[uint64]struct{}, len(informative))
 	for _, legacy := range informative {
 		legacyFloors = append(legacyFloors, fmt.Sprintf("%s@%d", legacy.Name, legacy.AckFloor.Stream))
+		distinctFloors[legacy.AckFloor.Stream] = struct{}{}
 	}
 
 	switch cfg.DeliverPolicy {
@@ -342,6 +378,23 @@ func (lm *lifecycleManager) carryOverLegacyPosition(ctx context.Context, store e
 		return nil
 	}
 
+	if durable.sharedLegacy > 1 {
+		lm.logger.Warn("Legacy durable position not carried over: several consumers of this event share the legacy durables on this stream and legacy names do not identify their owner; the consumer starts from its configured deliver policy, so messages may be delivered again",
+			"stream", stream,
+			"consumer", durable.name,
+			"shared_by", durable.sharedLegacy,
+			"legacy_ack_floors", legacyFloors)
+		return nil
+	}
+	if len(distinctFloors) > 1 {
+		lm.logger.Warn("Legacy durable position not carried over: legacy durables for this event stopped at different positions and legacy names do not say which one this consumer used last (one may have belonged to a module that is no longer registered); the consumer starts from its configured deliver policy, so messages may be delivered again. To resume exactly, remove the stale legacy durables before upgrading",
+			"stream", stream,
+			"consumer", durable.name,
+			"legacy_ack_floors", legacyFloors)
+		return nil
+	}
+
+	floor := informative[0].AckFloor.Stream
 	if floor == 0 {
 		// Nothing was acknowledged, so there is no position to carry over. This
 		// is checked after the deliver-policy warning above, which still has to
@@ -370,12 +423,6 @@ func (lm *lifecycleManager) carryOverLegacyPosition(ctx context.Context, store e
 		return fmt.Errorf("failed to carry over the legacy durable position to consumer %s on stream %s: %w", durable.name, stream, err)
 	}
 
-	if durable.sharedLegacy > 1 {
-		lm.logger.Warn("Legacy durables are shared by several consumers of the same event and cannot be attributed; resuming from the lowest ack floor, so some messages may be delivered again",
-			"stream", stream,
-			"consumer", durable.name,
-			"shared_by", durable.sharedLegacy)
-	}
 	lm.logger.Info("Carried over legacy durable position to the stable consumer name",
 		"stream", stream,
 		"consumer", durable.name,
@@ -384,12 +431,15 @@ func (lm *lifecycleManager) carryOverLegacyPosition(ctx context.Context, store e
 	return nil
 }
 
+// legacyLeftoverWarning is logged for every legacy durable left in place.
+const legacyLeftoverWarning = "Legacy event stream consumer durable is no longer used and was left in place; remove it once the new consumer is confirmed to be working (on an interest-retention stream it keeps retaining messages until removed)"
+
 // warnLegacyDurables logs a warning for every legacy durable that is left in
 // place. The framework does not delete them; an operator removes them once the
 // stable durable is confirmed to be working.
 func (lm *lifecycleManager) warnLegacyDurables(stream string, retention types.RetentionPolicy, durable eventStreamDurable) {
 	for _, legacy := range durable.legacy {
-		lm.logger.Warn("Legacy event stream consumer durable is no longer used and was left in place; remove it once the new consumer is confirmed to be working (on an interest-retention stream it keeps retaining messages until removed)",
+		lm.logger.Warn(legacyLeftoverWarning,
 			"stream", stream,
 			"legacy_consumer", legacy.Name,
 			"consumer", durable.name,
@@ -397,6 +447,78 @@ func (lm *lifecycleManager) warnLegacyDurables(stream string, retention types.Re
 			"legacy_num_pending", legacy.NumPending,
 			"retains_messages", retention == types.InterestPolicy,
 			"remove_with", fmt.Sprintf("nats consumer rm %s %s", stream, legacy.Name))
+	}
+}
+
+// warnLeftoverLegacyNames is the migrated-stream counterpart of
+// warnLegacyDurables. It reports leftover legacy consumers from their names
+// alone, so a boot after the migration never depends on inspecting them.
+func (lm *lifecycleManager) warnLeftoverLegacyNames(stream string, retention types.RetentionPolicy, durable eventStreamDurable) {
+	for _, name := range durable.leftover {
+		lm.logger.Warn(legacyLeftoverWarning,
+			"stream", stream,
+			"legacy_consumer", name,
+			"consumer", durable.name,
+			"retains_messages", retention == types.InterestPolicy,
+			"remove_with", fmt.Sprintf("nats consumer rm %s %s", stream, name))
+	}
+}
+
+// eventStreamConfig returns the stream configuration applied for an event
+// stream consumer: cfg with the framework defaults and, when marked, the
+// migration marker added to a copy of its metadata.
+func eventStreamConfig(cfg types.StreamConfig, marked bool) types.StreamConfig {
+	// Apply defaults for zero values if user didn't specify
+	if cfg.Retention == 0 {
+		cfg.Retention = types.LimitsPolicy
+	}
+	if cfg.Storage == 0 {
+		cfg.Storage = types.FileStorage
+	}
+	if marked {
+		metadata := make(map[string]string, len(cfg.Metadata)+1)
+		maps.Copy(metadata, cfg.Metadata)
+		metadata[legacyMigrationMarkerKey] = legacyMigrationMarkerValue
+		cfg.Metadata = metadata
+	}
+	return cfg
+}
+
+// markLegacyMigrationDone writes the migration marker on every stream that did
+// not carry it yet, once all event stream consumers are set up. A failure is
+// only logged: the consumers are running, and the next boot repeats the
+// migration, which is idempotent.
+func (lm *lifecycleManager) markLegacyMigrationDone(ctx context.Context, entries []types.EventStreamConsumerEntry, durables []eventStreamDurable) {
+	es, err := lm.eventBus.EventStream()
+	if err != nil {
+		return
+	}
+	if _, ok := es.(eventConsumerStore); !ok {
+		return
+	}
+	// The last registration on a stream is the configuration the stream was
+	// last written with, so re-apply exactly that one with the marker added.
+	last := make(map[string]int)
+	var order []string
+	for i, entry := range entries {
+		if durables[i].migrated {
+			continue
+		}
+		stream := entry.Config.Stream.Name
+		if _, seen := last[stream]; !seen {
+			order = append(order, stream)
+		}
+		last[stream] = i
+	}
+	for _, stream := range order {
+		cfg := eventStreamConfig(entries[last[stream]].Config.Stream, true)
+		if _, err := es.CreateOrUpdateStream(ctx, cfg); err != nil {
+			lm.logger.Warn("Could not mark stream as migrated; the legacy durable migration runs again on the next boot",
+				"stream", stream,
+				"error", err)
+			continue
+		}
+		lm.logger.Debug("Marked stream as migrated", "stream", stream)
 	}
 }
 

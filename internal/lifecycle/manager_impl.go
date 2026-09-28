@@ -477,6 +477,9 @@ func (lm *lifecycleManager) setupNATSSubscriptions(ctx context.Context) error {
 						entry.EventDef.ModuleName, entry.EventDef.Name, err)
 				}
 			}
+			// Every consumer is set up, so the legacy migration is finished on
+			// each of these streams; later boots only report leftovers.
+			lm.markLegacyMigrationDone(ctx, streamConsumers, durables)
 		}
 	}
 
@@ -1234,7 +1237,8 @@ func (lm *lifecycleManager) warnOrphanedCronStreams(ctx context.Context, registe
 // durable carries the stable durable name and the legacy durables it replaces
 // (see planEventStreamDurables). Before the fetch loop starts, legacy durables
 // are removed from work-queue streams and, on other streams, their position is
-// carried over to the stable durable.
+// carried over to the stable durable. On a stream already marked as migrated,
+// the marker is kept and leftover legacy consumers are only reported.
 func (lm *lifecycleManager) setupEventStreamConsumer(ctx context.Context, entry types.EventStreamConsumerEntry, durable eventStreamDurable) error {
 	cfg := entry.Config
 
@@ -1245,15 +1249,10 @@ func (lm *lifecycleManager) setupEventStreamConsumer(ctx context.Context, entry 
 	}
 
 	// Create/Update Stream (idempotent)
-	// Stream.Subjects is already set to eventDef.Subject during registration
-	streamCfg := cfg.Stream
-	// Apply defaults for zero values if user didn't specify
-	if streamCfg.Retention == 0 {
-		streamCfg.Retention = types.LimitsPolicy
-	}
-	if streamCfg.Storage == 0 {
-		streamCfg.Storage = types.FileStorage
-	}
+	// Stream.Subjects is already set to eventDef.Subject during registration.
+	// Writing the configuration replaces the stream's metadata, so a migrated
+	// stream gets its migration marker re-applied.
+	streamCfg := eventStreamConfig(cfg.Stream, durable.migrated)
 	_, err = es.CreateOrUpdateStream(ctx, streamCfg)
 	if err != nil {
 		return fmt.Errorf("failed to create stream %s: %w", cfg.Stream.Name, err)
@@ -1292,6 +1291,7 @@ func (lm *lifecycleManager) setupEventStreamConsumer(ctx context.Context, entry 
 			return err
 		}
 	}
+	lm.warnLeftoverLegacyNames(cfg.Stream.Name, streamCfg.Retention, durable)
 
 	// Start fetch loop goroutine
 	loopCtx, cancel := context.WithCancel(lm.runtimeCtx) //nolint:gosec // G118: cancel is stored in lm.streamConsumers and called in shutdown

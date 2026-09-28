@@ -209,6 +209,21 @@ func (j *NatsJetStream) StreamNames(ctx context.Context) ([]string, error) {
 	return names, nil
 }
 
+// StreamMetadata returns the metadata of the named stream, or nil when the
+// stream does not exist yet. Like ConsumerNames, it is a concrete method used
+// by the lifecycle manager's legacy durable migration.
+func (j *NatsJetStream) StreamMetadata(ctx context.Context, streamName string) (map[string]string, error) {
+	stream, err := j.js.Stream(ctx, streamName)
+	if err != nil {
+		if errors.Is(err, jetstream.ErrStreamNotFound) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("failed to get stream %s: %w", streamName, err)
+	}
+	// The lookup has just fetched the stream info; no second round trip is needed.
+	return stream.CachedInfo().Config.Metadata, nil
+}
+
 // ConsumerNames returns the names of every consumer on the named stream, or an
 // empty slice when the stream does not exist yet. In a cluster the names come
 // from the meta layer, so the list is complete even when a consumer's peers

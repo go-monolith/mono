@@ -29,6 +29,11 @@ type fakeConsumerStore struct {
 	deleteErr error
 	resetErrs []error // one per ResetConsumerToSequence call, nil once exhausted
 	ops       []string
+
+	metadata       map[string]map[string]string // stream -> metadata
+	metadataErr    error
+	streamWrites   []types.StreamConfig // every CreateOrUpdateStream, in order
+	streamWriteErr error
 }
 
 func newFakeConsumerStore() *fakeConsumerStore {
@@ -48,6 +53,30 @@ func (f *fakeConsumerStore) recorded() []string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return slices.Clone(f.ops)
+}
+
+func (f *fakeConsumerStore) CreateOrUpdateStream(_ context.Context, cfg types.StreamConfig) (jetstream.Stream, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.streamWriteErr != nil {
+		return nil, f.streamWriteErr
+	}
+	f.streamWrites = append(f.streamWrites, cfg)
+	return nil, nil
+}
+
+func (f *fakeConsumerStore) writtenStreams() []types.StreamConfig {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return slices.Clone(f.streamWrites)
+}
+
+func (f *fakeConsumerStore) StreamMetadata(_ context.Context, stream string) (map[string]string, error) {
+	f.record("metadata:" + stream)
+	if f.metadataErr != nil {
+		return nil, f.metadataErr
+	}
+	return f.metadata[stream], nil
 }
 
 func (f *fakeConsumerStore) CreateOrUpdateConsumer(_ context.Context, stream string, cfg types.ConsumerConfig) (jetstream.Consumer, error) {
@@ -340,7 +369,7 @@ func TestPlanEventStreamDurables(t *testing.T) {
 		if len(durables[0].legacy) != 1 || len(durables[1].legacy) != 1 {
 			t.Fatalf("legacy = %v, %v; want the shared durable for both", durables[0].legacy, durables[1].legacy)
 		}
-		want := []string{"list:payments", "info:payments/billing-PaymentProcessed-v1-1"}
+		want := []string{"metadata:payments", "list:payments", "info:payments/billing-PaymentProcessed-v1-1"}
 		if got := store.recorded(); !slices.Equal(got, want) {
 			t.Errorf("ops = %v, want %v", got, want)
 		}
@@ -359,6 +388,50 @@ func TestPlanEventStreamDurables(t *testing.T) {
 		}
 		if len(durables[0].legacy) != 0 {
 			t.Errorf("legacy = %v, want none", durables[0].legacy)
+		}
+	})
+
+	// Findings 3 and 4: once a stream carries the migration marker, legacy
+	// consumers are only reported by name. Nothing is inspected, so a leftover
+	// legacy consumer that cannot be inspected no longer blocks startup, and a
+	// consumer added later for the same event gets no legacy position.
+	t.Run("migrated stream only reports leftover names", func(t *testing.T) {
+		store := newFakeConsumerStore()
+		store.consumers["payments"] = []*jetstream.ConsumerInfo{
+			legacyInfo("billing-PaymentProcessed-v1-1", 10, 10, 0),
+			legacyInfo("analytics-billing-PaymentProcessed-v1", 20, 20, 0),
+		}
+		store.metadata = map[string]map[string]string{"payments": {legacyMigrationMarkerKey: legacyMigrationMarkerValue}}
+		store.infoErr = errors.New("consumer offline") // must not be reached
+		lm, _ := newMigrationTestManager(store)
+		durables, err := lm.planEventStreamDurables(context.Background(), []types.EventStreamConsumerEntry{
+			streamEntry("analytics", "payments", paymentProcessedV1),
+			streamEntry("ledger", "payments", paymentProcessedV1), // added after the migration
+		})
+		if err != nil {
+			t.Fatalf("planEventStreamDurables: %v", err)
+		}
+		for i, d := range durables {
+			if !d.migrated || d.legacy != nil || !slices.Equal(d.leftover, []string{"billing-PaymentProcessed-v1-1"}) {
+				t.Errorf("durable %d = %+v, want migrated with only the leftover name", i, d)
+			}
+		}
+		for _, op := range store.recorded() {
+			if strings.HasPrefix(op, "info:") {
+				t.Errorf("inspected a consumer on a migrated stream: %s", op)
+			}
+		}
+	})
+
+	t.Run("metadata error fails", func(t *testing.T) {
+		store := newFakeConsumerStore()
+		store.metadataErr = errors.New("jetstream unavailable")
+		lm, _ := newMigrationTestManager(store)
+		_, err := lm.planEventStreamDurables(context.Background(), []types.EventStreamConsumerEntry{
+			streamEntry("analytics", "payments", paymentProcessedV1),
+		})
+		if err == nil || !strings.Contains(err.Error(), "jetstream unavailable") {
+			t.Errorf("err = %v, want metadata error", err)
 		}
 	})
 
@@ -440,12 +513,11 @@ func TestSetupEventStreamConsumerLegacyMigration(t *testing.T) {
 	}
 	const stable = "analytics-billing-PaymentProcessed-v1"
 
-	t.Run("single owner resumes after the highest legacy ack floor and keeps legacy durables", func(t *testing.T) {
+	t.Run("single legacy position is carried over and the legacy durable kept", func(t *testing.T) {
 		store := newFakeConsumerStore()
 		store.cached = &jetstream.ConsumerInfo{Name: stable}
 		durable := eventStreamDurable{name: stable, sharedLegacy: 1, legacy: []*jetstream.ConsumerInfo{
 			legacyInfo("billing-PaymentProcessed-v1-1", 10, 10, 5),
-			legacyInfo("billing-PaymentProcessed-v1-2", 5, 5, 10),
 		}}
 		logger, err := setup(t, store, interestEntry(types.DeliverAllPolicy), durable)
 		if err != nil {
@@ -455,6 +527,47 @@ func TestSetupEventStreamConsumerLegacyMigration(t *testing.T) {
 		if got := store.recorded(); !slices.Equal(got, want) {
 			t.Errorf("ops = %v, want %v", got, want)
 		}
+		if !logger.hasWarnContaining("nats consumer rm payments billing-PaymentProcessed-v1-1") {
+			t.Error("missing warning for the kept legacy durable")
+		}
+	})
+
+	t.Run("legacy durables stopped at the same floor are carried over", func(t *testing.T) {
+		store := newFakeConsumerStore()
+		store.cached = &jetstream.ConsumerInfo{Name: stable}
+		durable := eventStreamDurable{name: stable, sharedLegacy: 1, legacy: []*jetstream.ConsumerInfo{
+			legacyInfo("billing-PaymentProcessed-v1-1", 10, 10, 5),
+			legacyInfo("billing-PaymentProcessed-v1-2", 12, 10, 5),
+		}}
+		if _, err := setup(t, store, interestEntry(types.DeliverAllPolicy), durable); err != nil {
+			t.Fatalf("setup: %v", err)
+		}
+		if got := store.recorded(); !slices.Contains(got, "reset:payments/"+stable+"@11") {
+			t.Errorf("ops = %v, want reset to 11", got)
+		}
+	})
+
+	// Finding 1: a single registration now, but the legacy durables stopped at
+	// different positions. One may have belonged to a module removed in the
+	// same deploy, so resetting to the highest floor could skip messages this
+	// consumer never processed. The configured start is kept (replay over loss).
+	t.Run("legacy durables at different positions are not carried over", func(t *testing.T) {
+		store := newFakeConsumerStore()
+		store.cached = &jetstream.ConsumerInfo{Name: stable}
+		durable := eventStreamDurable{name: stable, sharedLegacy: 1, legacy: []*jetstream.ConsumerInfo{
+			legacyInfo("billing-PaymentProcessed-v1-1", 300, 300, 0), // this module
+			legacyInfo("billing-PaymentProcessed-v1-2", 500, 500, 0), // a removed module, further ahead
+		}}
+		logger, err := setup(t, store, interestEntry(types.DeliverAllPolicy), durable)
+		if err != nil {
+			t.Fatalf("setup: %v", err)
+		}
+		if got := store.recorded(); !slices.Equal(got, []string{"create:payments/" + stable}) {
+			t.Errorf("ops = %v, want only create (no reset)", got)
+		}
+		if !logger.hasWarnContaining("stopped at different positions") {
+			t.Error("expected a warning that the position was not carried over")
+		}
 		for _, legacy := range []string{"billing-PaymentProcessed-v1-1", "billing-PaymentProcessed-v1-2"} {
 			if !logger.hasWarnContaining("nats consumer rm payments " + legacy) {
 				t.Errorf("missing warning for kept legacy durable %s", legacy)
@@ -462,29 +575,73 @@ func TestSetupEventStreamConsumerLegacyMigration(t *testing.T) {
 		}
 	})
 
-	t.Run("shared legacy durables resume after the lowest ack floor", func(t *testing.T) {
+	// Finding 2: several registrations share the legacy durables. Legacy names
+	// do not say which one each module used, and a module may have none of its
+	// own (never delivered, or added in this deploy), so no registration is
+	// reset to another one's position.
+	t.Run("shared legacy durables are not carried over", func(t *testing.T) {
+		for name, legacy := range map[string][]*jetstream.ConsumerInfo{
+			"one position for two modules": {
+				legacyInfo("billing-PaymentProcessed-v1-1", 100, 100, 0),
+				legacyInfo("billing-PaymentProcessed-v1-2", 0, 0, 100), // the other module's never delivered
+			},
+			"a position each": {
+				legacyInfo("billing-PaymentProcessed-v1-1", 10, 10, 5),
+				legacyInfo("billing-PaymentProcessed-v1-2", 5, 5, 10),
+			},
+		} {
+			t.Run(name, func(t *testing.T) {
+				store := newFakeConsumerStore()
+				store.cached = &jetstream.ConsumerInfo{Name: stable}
+				durable := eventStreamDurable{name: stable, sharedLegacy: 2, legacy: legacy}
+				logger, err := setup(t, store, interestEntry(types.DeliverAllPolicy), durable)
+				if err != nil {
+					t.Fatalf("setup: %v", err)
+				}
+				if got := store.recorded(); !slices.Equal(got, []string{"create:payments/" + stable}) {
+					t.Errorf("ops = %v, want only create (no reset)", got)
+				}
+				if !logger.hasWarnContaining("do not identify their owner") {
+					t.Error("expected a warning about shared legacy durables")
+				}
+			})
+		}
+	})
+
+	// Finding 3: a consumer added after the migration starts from its
+	// configured deliver policy instead of being fast-forwarded to the legacy
+	// position, and the stream keeps its marker.
+	t.Run("migrated stream keeps its marker and carries nothing over", func(t *testing.T) {
 		store := newFakeConsumerStore()
-		store.cached = &jetstream.ConsumerInfo{Name: stable}
-		durable := eventStreamDurable{name: stable, sharedLegacy: 2, legacy: []*jetstream.ConsumerInfo{
-			legacyInfo("billing-PaymentProcessed-v1-1", 10, 10, 5),
-			legacyInfo("billing-PaymentProcessed-v1-2", 5, 5, 10),
-		}}
-		logger, err := setup(t, store, interestEntry(types.DeliverAllPolicy), durable)
+		store.cached = &jetstream.ConsumerInfo{Name: "ledger-billing-PaymentProcessed-v1"}
+		entry := streamEntry("ledger", "payments", paymentProcessedV1)
+		entry.Config.Stream.Retention = types.InterestPolicy
+		entry.Config.Stream.Metadata = map[string]string{"owner": "billing"}
+		durable := eventStreamDurable{
+			name:     "ledger-billing-PaymentProcessed-v1",
+			migrated: true,
+			leftover: []string{"billing-PaymentProcessed-v1-1"},
+		}
+		logger, err := setup(t, store, entry, durable)
 		if err != nil {
 			t.Fatalf("setup: %v", err)
 		}
-		if got := store.recorded(); !slices.Contains(got, "reset:payments/"+stable+"@6") {
-			t.Errorf("ops = %v, want reset to 6", got)
+		if got := store.recorded(); !slices.Equal(got, []string{"create:payments/ledger-billing-PaymentProcessed-v1"}) {
+			t.Errorf("ops = %v, want only create", got)
 		}
-		if !logger.hasWarnContaining("cannot be attributed") {
-			t.Error("expected a warning about shared legacy durables")
+		writes := store.writtenStreams()
+		if len(writes) != 1 || writes[0].Metadata[legacyMigrationMarkerKey] != legacyMigrationMarkerValue || writes[0].Metadata["owner"] != "billing" {
+			t.Errorf("stream writes = %+v, want the user's metadata plus the marker", writes)
+		}
+		if !logger.hasWarnContaining("nats consumer rm payments billing-PaymentProcessed-v1-1") {
+			t.Error("expected a warning for the leftover legacy consumer")
 		}
 	})
 
 	t.Run("legacy durables that never delivered carry no position", func(t *testing.T) {
 		store := newFakeConsumerStore()
 		store.cached = &jetstream.ConsumerInfo{Name: stable}
-		durable := eventStreamDurable{name: stable, sharedLegacy: 2, legacy: []*jetstream.ConsumerInfo{
+		durable := eventStreamDurable{name: stable, sharedLegacy: 1, legacy: []*jetstream.ConsumerInfo{
 			legacyInfo("billing-PaymentProcessed-v1-1", 10, 10, 5),
 			legacyInfo("billing-PaymentProcessed-v1-2", 0, 199, 10), // fresh: floor is FirstSeq-1
 		}}
@@ -777,6 +934,74 @@ func TestSetupEventStreamConsumerLegacyMigration(t *testing.T) {
 			})
 		}
 	})
+}
+
+func TestMarkLegacyMigrationDone(t *testing.T) {
+	t.Run("marks every unmarked stream with its last applied configuration", func(t *testing.T) {
+		store := newFakeConsumerStore()
+		lm, _ := newMigrationTestManager(store)
+		first := streamEntry("analytics", "payments", paymentProcessedV1)
+		second := streamEntry("notification", "payments", paymentNotificationV1)
+		second.Config.Stream.Retention = types.InterestPolicy
+		marked := streamEntry("usage", "quota", subscriptionChangedV1)
+		entries := []types.EventStreamConsumerEntry{first, second, marked}
+		durables := []eventStreamDurable{{}, {}, {migrated: true}}
+
+		lm.markLegacyMigrationDone(context.Background(), entries, durables)
+
+		writes := store.writtenStreams()
+		if len(writes) != 1 {
+			t.Fatalf("stream writes = %+v, want one for the unmarked stream", writes)
+		}
+		got := writes[0]
+		if got.Name != "payments" || got.Retention != types.InterestPolicy || got.Storage != types.FileStorage ||
+			got.Metadata[legacyMigrationMarkerKey] != legacyMigrationMarkerValue {
+			t.Errorf("stream write = %+v, want the last configuration with defaults and the marker", got)
+		}
+	})
+
+	t.Run("failure is only logged", func(t *testing.T) {
+		store := newFakeConsumerStore()
+		store.streamWriteErr = errors.New("jetstream unavailable")
+		lm, logger := newMigrationTestManager(store)
+		lm.markLegacyMigrationDone(context.Background(),
+			[]types.EventStreamConsumerEntry{streamEntry("analytics", "payments", paymentProcessedV1)},
+			[]eventStreamDurable{{}})
+		if !logger.hasWarnContaining("Could not mark stream as migrated") {
+			t.Error("expected a warning")
+		}
+	})
+
+	t.Run("event stream without consumer management is left alone", func(t *testing.T) {
+		es := &mockEventStream{}
+		lm, _ := newMigrationTestManager(es)
+		lm.markLegacyMigrationDone(context.Background(),
+			[]types.EventStreamConsumerEntry{streamEntry("analytics", "payments", paymentProcessedV1)},
+			[]eventStreamDurable{{}})
+		if len(es.createdStreams) != 0 {
+			t.Errorf("created streams = %v, want none", es.createdStreams)
+		}
+	})
+}
+
+func TestEventStreamConfig(t *testing.T) {
+	user := types.StreamConfig{Name: "payments", Metadata: map[string]string{"owner": "billing"}}
+
+	plain := eventStreamConfig(user, false)
+	if plain.Retention != types.LimitsPolicy || plain.Storage != types.FileStorage {
+		t.Errorf("defaults not applied: %+v", plain)
+	}
+	if _, ok := plain.Metadata[legacyMigrationMarkerKey]; ok {
+		t.Error("unmarked configuration must not carry the marker")
+	}
+
+	marked := eventStreamConfig(user, true)
+	if marked.Metadata[legacyMigrationMarkerKey] != legacyMigrationMarkerValue || marked.Metadata["owner"] != "billing" {
+		t.Errorf("marked metadata = %v", marked.Metadata)
+	}
+	if _, ok := user.Metadata[legacyMigrationMarkerKey]; ok {
+		t.Error("the caller's metadata map must not be modified")
+	}
 }
 
 func TestResetConsumerWithRetryHonoursContext(t *testing.T) {

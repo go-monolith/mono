@@ -299,12 +299,13 @@ func seq(from, to int) []int {
 	return s
 }
 
-// TestEventStreamConsumerNaming_MigratesLegacyDurables reproduces
-// myspecs/myspec-monorepo#1616: analytics' durable flip-flopped between "-1"
-// and "-2" across restarts on an interest-retention stream that a DeliverNew
-// notification consumer shares. After upgrading, each consumer gets a stable
-// durable that resumes where its legacy durables left off, and restarts
-// neither rename nor replay.
+// TestEventStreamConsumerNaming_MigratesLegacyDurables covers the stream from
+// myspecs/myspec-monorepo#1616: analytics and a DeliverNew notification
+// consumer share an interest-retention stream. After upgrading, analytics gets
+// a stable durable that resumes where its legacy durable left off, the stream
+// is marked as migrated, and restarts neither rename nor replay. The
+// notification consumer's unprocessed backlog keeps messages 6-10 in the
+// stream, so a replay from the start would show.
 func TestEventStreamConsumerNaming_MigratesLegacyDurables(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
@@ -312,8 +313,8 @@ func TestEventStreamConsumerNaming_MigratesLegacyDurables(t *testing.T) {
 	const stream = "analytics-payment-processed"
 	subject := namingPaymentProcessedV1.Subject
 
-	// v0.0.11 state: two flip-flopped analytics durables and a caught-up
-	// DeliverNew notification durable.
+	// v0.0.11 state: one analytics durable and a DeliverNew notification
+	// durable that has processed only 1-5.
 	emitter := &namingEmitterModule{}
 	stop := runNamingApp(t, storeDir, nil, emitter)
 	js := emitter.jetStream(t)
@@ -324,17 +325,14 @@ func TestEventStreamConsumerNaming_MigratesLegacyDurables(t *testing.T) {
 		t.Fatalf("create stream: %v", err)
 	}
 	createLegacyDurable(ctx, t, js, stream, "billing-PaymentProcessed-v1-1", jetstream.DeliverAllPolicy)
-	createLegacyDurable(ctx, t, js, stream, "billing-PaymentProcessed-v1-2", jetstream.DeliverAllPolicy)
 	createLegacyDurable(ctx, t, js, stream, "billing-PaymentProcessedNotification-v1-7", jetstream.DeliverNewPolicy)
 	publishSequence(ctx, t, js, subject, 1, 15)
 	consumeAndAck(ctx, t, js, stream, "billing-PaymentProcessed-v1-1", 10)
-	consumeAndAck(ctx, t, js, stream, "billing-PaymentProcessed-v1-2", 5)
-	consumeAndAck(ctx, t, js, stream, "billing-PaymentProcessedNotification-v1-7", 15)
+	consumeAndAck(ctx, t, js, stream, "billing-PaymentProcessedNotification-v1-7", 5)
 	stop()
 
 	legacy := []string{
 		"billing-PaymentProcessed-v1-1",
-		"billing-PaymentProcessed-v1-2",
 		"billing-PaymentProcessedNotification-v1-7",
 	}
 	wantConsumers := slices.Sorted(slices.Values(append(slices.Clone(legacy),
@@ -364,12 +362,16 @@ func TestEventStreamConsumerNaming_MigratesLegacyDurables(t *testing.T) {
 		assertDurable(ctx, t, js, stream, "notification-billing-PaymentProcessedNotification-v1")
 
 		if boot == 1 {
-			// Resumes after the highest legacy ack floor (10), not from 1.
+			// Resumes after the legacy ack floor (10), not from 6.
 			waitReceived(t, analytics, seq(11, 15))
+			if !bytes.Contains([]byte(logs.String()), []byte("does not allow repositioning")) {
+				t.Error("boot 1: expected a warning that the notification backlog was not carried over")
+			}
 		} else {
 			waitReceived(t, analytics, nil)
 		}
 		waitReceived(t, notification, nil)
+		assertMigrationMarker(ctx, t, js, stream)
 
 		next := 15 + boot
 		publishSequence(ctx, t, js, subject, next, next)
@@ -432,10 +434,52 @@ func TestEventStreamConsumerNaming_WorkQueueLegacyDurable(t *testing.T) {
 	}
 }
 
+// TestEventStreamConsumerNaming_AmbiguousLegacyPositions covers a consumer
+// whose legacy durables stopped at different positions, as with analytics'
+// "-1"/"-2" flip-flop in the report. Legacy names cannot say which one it used
+// last, or whether one belonged to a module removed in the same deploy, so
+// the stable durable keeps its configured start: messages the stream still
+// holds are delivered again, and none is lost.
+func TestEventStreamConsumerNaming_AmbiguousLegacyPositions(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	storeDir := t.TempDir()
+	const stream = "analytics-flip-flop"
+	subject := namingPaymentProcessedV1.Subject
+
+	emitter := &namingEmitterModule{}
+	stop := runNamingApp(t, storeDir, nil, emitter)
+	js := emitter.jetStream(t)
+	if _, err := js.CreateStream(ctx, jetstream.StreamConfig{
+		Name: stream, Subjects: []string{subject},
+		Retention: jetstream.InterestPolicy, Storage: jetstream.FileStorage,
+	}); err != nil {
+		t.Fatalf("create stream: %v", err)
+	}
+	createLegacyDurable(ctx, t, js, stream, "billing-PaymentProcessed-v1-1", jetstream.DeliverAllPolicy)
+	createLegacyDurable(ctx, t, js, stream, "billing-PaymentProcessed-v1-2", jetstream.DeliverAllPolicy)
+	publishSequence(ctx, t, js, subject, 1, 15)
+	consumeAndAck(ctx, t, js, stream, "billing-PaymentProcessed-v1-1", 10)
+	consumeAndAck(ctx, t, js, stream, "billing-PaymentProcessed-v1-2", 5)
+	stop()
+
+	logs := &syncBuffer{}
+	emitter = &namingEmitterModule{}
+	analytics := &namingConsumerModule{name: "analytics", event: namingPaymentProcessedV1, stream: stream, retention: mono.InterestPolicy}
+	runNamingApp(t, storeDir, logs, emitter, analytics)
+	// 1-5 were acknowledged by both legacy durables and are gone; 6-10 are
+	// delivered again.
+	waitReceived(t, analytics, seq(6, 15))
+	if !bytes.Contains([]byte(logs.String()), []byte("stopped at different positions")) {
+		t.Error("expected a warning that the position was not carried over")
+	}
+}
+
 // TestEventStreamConsumerNaming_SharedLegacyDurables covers two modules
 // consuming the same event on one stream. Their legacy durables cannot be
-// told apart, so both resume after the lowest ack floor and lose nothing. The
-// stream uses limits retention so that a replay from the start would show.
+// attributed, so neither is reset to the other's position: both keep their
+// configured start and nothing is lost. The stream uses limits retention, so
+// the replay covers everything it holds.
 func TestEventStreamConsumerNaming_SharedLegacyDurables(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
@@ -463,8 +507,81 @@ func TestEventStreamConsumerNaming_SharedLegacyDurables(t *testing.T) {
 	analytics := &namingConsumerModule{name: "analytics", event: namingPaymentProcessedV1, stream: stream, retention: mono.LimitsPolicy}
 	ledger := &namingConsumerModule{name: "ledger", event: namingPaymentProcessedV1, stream: stream, retention: mono.LimitsPolicy}
 	runNamingApp(t, storeDir, nil, emitter, analytics, ledger)
-	waitReceived(t, analytics, seq(5, 12))
-	waitReceived(t, ledger, seq(5, 12))
+	waitReceived(t, analytics, seq(1, 12))
+	waitReceived(t, ledger, seq(1, 12))
+}
+
+// TestEventStreamConsumerNaming_MarkerStopsLaterCarryOver covers a stable
+// durable created again after the migration while a leftover legacy durable
+// is still on the stream: here an operator deletes it to force a replay. The
+// migration marker keeps the new durable from being fast-forwarded to the
+// legacy position, so it starts from its configured deliver policy.
+func TestEventStreamConsumerNaming_MarkerStopsLaterCarryOver(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	storeDir := t.TempDir()
+	const stream = "payments-marker"
+	const stable = "analytics-billing-PaymentProcessed-v1"
+	subject := namingPaymentProcessedV1.Subject
+
+	emitter := &namingEmitterModule{}
+	stop := runNamingApp(t, storeDir, nil, emitter)
+	js := emitter.jetStream(t)
+	if _, err := js.CreateStream(ctx, jetstream.StreamConfig{
+		Name: stream, Subjects: []string{subject}, Storage: jetstream.FileStorage,
+	}); err != nil {
+		t.Fatalf("create stream: %v", err)
+	}
+	createLegacyDurable(ctx, t, js, stream, "billing-PaymentProcessed-v1-1", jetstream.DeliverAllPolicy)
+	publishSequence(ctx, t, js, subject, 1, 12)
+	consumeAndAck(ctx, t, js, stream, "billing-PaymentProcessed-v1-1", 10)
+	stop()
+
+	// Upgrade: analytics resumes after the legacy floor and the stream is marked.
+	emitter = &namingEmitterModule{}
+	analytics := &namingConsumerModule{name: "analytics", event: namingPaymentProcessedV1, stream: stream}
+	stop = runNamingApp(t, storeDir, nil, emitter, analytics)
+	waitReceived(t, analytics, seq(11, 12))
+	assertMigrationMarker(ctx, t, emitter.jetStream(t), stream)
+	stop()
+
+	// Later: an operator deletes the stable durable to replay the stream.
+	emitter = &namingEmitterModule{}
+	stop = runNamingApp(t, storeDir, nil, emitter)
+	if err := emitter.jetStream(t).DeleteConsumer(ctx, stream, stable); err != nil {
+		t.Fatalf("delete %s: %v", stable, err)
+	}
+	stop()
+
+	for boot := 1; boot <= 2; boot++ {
+		logs := &syncBuffer{}
+		emitter = &namingEmitterModule{}
+		analytics = &namingConsumerModule{name: "analytics", event: namingPaymentProcessedV1, stream: stream}
+		stop = runNamingApp(t, storeDir, logs, emitter, analytics)
+		if boot == 1 {
+			// The whole stream, not 11-12 again.
+			waitReceived(t, analytics, seq(1, 12))
+		} else {
+			waitReceived(t, analytics, nil)
+		}
+		if !bytes.Contains([]byte(logs.String()), []byte("nats consumer rm "+stream+" billing-PaymentProcessed-v1-1")) {
+			t.Errorf("boot %d: expected the leftover legacy consumer to be reported", boot)
+		}
+		assertMigrationMarker(ctx, t, emitter.jetStream(t), stream)
+		stop()
+	}
+}
+
+// assertMigrationMarker fails unless the stream carries the migration marker.
+func assertMigrationMarker(ctx context.Context, t *testing.T, js jetstream.JetStream, stream string) {
+	t.Helper()
+	s, err := js.Stream(ctx, stream)
+	if err != nil {
+		t.Fatalf("stream %s: %v", stream, err)
+	}
+	if got := s.CachedInfo().Config.Metadata["mono.legacy-consumer-migration"]; got != "done" {
+		t.Errorf("stream %s: migration marker = %q, want %q", stream, got, "done")
+	}
 }
 
 // TestEventStreamConsumerNaming_StableAcrossRestarts covers the shape of the

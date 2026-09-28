@@ -271,6 +271,138 @@ The framework names the durable JetStream consumer
 Earlier versions named the consumer `<event-module>-<event>-<version>-<N>`. `N` was a counter
 that followed module start order, which was not deterministic, so the name could change
 between restarts. Those consumers were also created without a durable name, so the server
+treated them as non-durable. The first startup on the new version handles any legacy durable
+it finds on the same stream. Once every consumer on a stream is set up, it marks the stream
+as migrated with the metadata entry `mono.legacy-consumer-migration: done`, and later
+startups only report leftovers:
+
+- **Work-queue streams:** the legacy durable is deleted before the new one is created. A
+  work-queue stream accepts only one unfiltered consumer, so this is the only way to start.
+  Messages it had not acknowledged stay in the stream and are delivered to the new durable.
+  If the consumer configuration is one the server rejects on a work-queue stream (a deliver
+  policy other than all, or acknowledgement other than explicit), startup fails before
+  anything is deleted.
+- **Other streams:** when the old position is unambiguous (one legacy durable, or several
+  that stopped at the same point), the new durable is positioned just after it, so the stream
+  is not replayed. This requires a deliver policy of all, by-start-sequence or by-start-time;
+  for other deliver policies a warning reports what was not carried over.
+- **Replay over loss:** legacy names do not record which module owned a durable. In the
+  following cases the new durable keeps its configured start, and a warning is logged:
+  - **Several modules consume the same event on the same stream:** a module may have no old
+    position of its own.
+  - **A module's legacy durables stopped at different positions:** for example, a name that
+    switched between restarts, or one left by a module removed in the same deploy.
+
+  Messages the stream still holds are then delivered again, so a handler that is not
+  idempotent sees duplicates; one that sums payments double-counts them. If you know which
+  legacy durable is stale, remove it before upgrading so the remaining position is carried
+  over exactly.
+- **Legacy durables are not deleted** on non-work-queue streams. A warning on every startup
+  names each one together with a `nats consumer rm <stream> <name>` command. Remove them once
+  the new durable is confirmed to be working: on an interest-retention stream they keep
+  retaining messages until removed.
+- **Consumers created after the migration** start from their configured deliver policy. This
+  covers a new module consuming the same event, or a durable an operator deleted to force a
+  replay. Such a consumer is never moved to a legacy position.
+- **Rolling upgrade with several replicas:**
+  - **Interest and limits streams:** old replicas keep consuming through their legacy durable
+    while new ones use the new durable. This can cause duplicates, never loss.
+  - **Work-queue streams:** the first new replica deletes the legacy durable the old replicas
+    fetch from. Their fetch loops log errors until they are replaced; the unacknowledged
+    messages stay in the stream for the new durable.
+- **Rolling back** to an older version: it picks up the legacy durables again from their old
+  ack floors, which replays everything processed since the upgrade. On a work-queue stream it
+  fails to start until the new durable is deleted.
+
+**Use Cases:**
+- Real-time notifications where occasional loss is acceptable
+- High-throughput event processing
+- Low-latency requirements (~1ms)
+
+**Example:**
+```go
+func (m *NotificationModule) RegisterEventConsumers(registry mono.EventRegistry) error {
+    eventDef, found := registry.GetEventByName("OrderCreated", "v1", "order")
+    if !found {
+        return fmt.Errorf("event not found")
+    }
+
+    return registry.RegisterEventConsumer(eventDef, m.handleOrderCreated, m)
+}
+
+func (m *NotificationModule) handleOrderCreated(ctx context.Context, msg *mono.Msg) error {
+    var event OrderCreatedEvent
+    if err := json.Unmarshal(msg.Data, &event); err != nil {
+        return err
+    }
+
+    // Send notification
+    return m.sendEmail(event.CustomerEmail, "Order confirmed: "+event.OrderID)
+}
+```
+
+**Queue Groups Example:**
+```go
+// Multiple instances with same queue group share the load
+registry.RegisterEventConsumer(eventDef, m.handler, m, "notification-workers")
+```
+
+**Typed Handler (helper):**
+
+For type-safe handlers with automatic unmarshaling, use `TypedEventConsumerHandler`:
+
+```go
+type TypedEventConsumerHandler[T any] func(ctx context.Context, event T, msg *Msg) error
+```
+
+### RegisterEventStreamConsumer
+
+```go
+func (registry EventRegistry) RegisterEventStreamConsumer(
+    eventDef BaseEventDefinition,
+    config StreamConsumerConfig,
+    handler EventStreamConsumerHandler,
+    module Module,
+) error
+```
+
+Registers a JetStream durable consumer for an event with at-least-once delivery guarantees.
+
+**Parameters:**
+- `eventDef` - The event definition to consume
+- `config` - JetStream stream and consumer configuration
+- `handler` - Batch handler function for processing event batches
+- `module` - The consuming module instance
+
+**Handler Signature:**
+```go
+type EventStreamConsumerHandler func(ctx context.Context, msgs []*Msg) error
+```
+
+Messages should be acknowledged individually using `Ack()`, `Nak()`, `NakWithDelay()`, `Term()`, or `InProgress()`.
+
+**Returns:**
+- `error` - Nil on success
+
+**Durable Consumer Name:**
+
+The framework names the durable JetStream consumer
+`<consumer-module>-<event-module>-<event>-<version>`, for example
+`analytics-billing-PaymentProcessed-v1`. `types.EventStreamConsumerName` returns it. Any
+`Consumer.Name` or `Consumer.Durable` you set is overridden.
+
+- The name depends only on which module consumes which event, so it is the same on every
+  restart and does not change when modules are added or removed.
+- The consumer is a true JetStream durable: the server keeps it however long it goes without
+  pull requests, unless you set `Consumer.InactiveThreshold`.
+- If the same module registers the same event on the same stream more than once, the second
+  and later registrations get a `-2`, `-3`, ... suffix, in the order that module registers them.
+
+**Upgrading from v0.0.11 or earlier:**
+
+Earlier versions named the consumer `<event-module>-<event>-<version>-<N>`. `N` was a counter
+that followed module start order, which was not deterministic, so the name could change
+between restarts. Those consumers were also created without a durable name, so the server
 treated them as non-durable. When a legacy durable is found on the same stream, startup handles it once,
 and the step is a no-op after that:
 

@@ -967,6 +967,28 @@ func TestJetStream_ConsumerManagement(t *testing.T) {
 		}
 	}
 
+	t.Run("StreamMetadata reads stream metadata", func(t *testing.T) {
+		if _, err := js.CreateOrUpdateStream(ctx, types.StreamConfig{
+			Name:     "TEST_CONSUMER_MGMT_META",
+			Subjects: []string{"consumermgmtmeta.>"},
+			Storage:  types.MemoryStorage,
+			Metadata: map[string]string{"mono.test": "yes"},
+		}); err != nil {
+			t.Fatalf("Failed to create stream: %v", err)
+		}
+		metadata, err := js.StreamMetadata(ctx, "TEST_CONSUMER_MGMT_META")
+		if err != nil {
+			t.Fatalf("StreamMetadata failed: %v", err)
+		}
+		if metadata["mono.test"] != "yes" {
+			t.Errorf("metadata = %v, want mono.test=yes", metadata)
+		}
+		metadata, err = js.StreamMetadata(ctx, "NO_SUCH_STREAM")
+		if err != nil || metadata != nil {
+			t.Errorf("expected nil metadata and no error for a missing stream, got %v, %v", metadata, err)
+		}
+	})
+
 	t.Run("ConsumerNames lists consumers", func(t *testing.T) {
 		names, err := js.ConsumerNames(ctx, "TEST_CONSUMER_MGMT")
 		if err != nil {
