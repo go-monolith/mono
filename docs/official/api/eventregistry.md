@@ -297,6 +297,10 @@ startups only report leftovers:
   idempotent sees duplicates; one that sums payments double-counts them. If you know which
   legacy durable is stale, remove it before upgrading so the remaining position is carried
   over exactly.
+- **Swapping the consumer of an event in one deploy:** names cannot catch this case. If a
+  single deploy removes the only module consuming an event on a stream and adds a different
+  one, the new module starts at the removed module's position. Split such a swap across two
+  deploys, or remove the legacy durable before upgrading.
 - **Legacy durables are not deleted** on non-work-queue streams. A warning on every startup
   names each one together with a `nats consumer rm <stream> <name>` command. Remove them once
   the new durable is confirmed to be working: on an interest-retention stream they keep
