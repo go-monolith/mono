@@ -489,6 +489,19 @@ func TestToJetStreamConsumerConfig(t *testing.T) {
 		if jsCfg.Name != "consumer" {
 			t.Errorf("expected name 'consumer', got %s", jsCfg.Name)
 		}
+		if jsCfg.Durable != "" {
+			t.Errorf("expected no durable name, got %s", jsCfg.Durable)
+		}
+	})
+
+	t.Run("durable name is passed through", func(t *testing.T) {
+		jsCfg, err := toJetStreamConsumerConfig(types.ConsumerConfig{Name: "consumer", Durable: "consumer"})
+		if err != nil {
+			t.Fatalf("toJetStreamConsumerConfig failed: %v", err)
+		}
+		if jsCfg.Durable != "consumer" {
+			t.Errorf("expected durable 'consumer', got %q", jsCfg.Durable)
+		}
 	})
 
 	t.Run("invalid ack policy", func(t *testing.T) {

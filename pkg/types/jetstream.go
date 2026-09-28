@@ -501,7 +501,8 @@ type StreamConfig struct {
 // This is the framework's internal type that abstracts the underlying JetStream configuration.
 type ConsumerConfig struct {
 	// Name is an optional name for the consumer. If not set, one is
-	// generated automatically. This is the preferred field for naming consumers.
+	// generated automatically. Name alone does not make the consumer durable;
+	// see Durable.
 	//
 	// If both Name and Durable are set, they must be equal.
 	//
@@ -509,12 +510,17 @@ type ConsumerConfig struct {
 	// backwards slash), and non-printable characters.
 	Name string `json:"name,omitempty"`
 
-	// Durable is an optional durable name for the consumer.
+	// Durable is the durable name of the consumer. Setting it is what makes
+	// the consumer durable: the server keeps a durable consumer however long
+	// it goes without pull requests, unless InactiveThreshold is set. A
+	// consumer created with a Name but no Durable is non-durable to the server
+	// and is deleted after InactiveThreshold (5s by default) without pull
+	// requests.
 	//
-	// Deprecated: Use Name instead. Durable is maintained for backward
-	// compatibility. If both Durable and Name are set, they must be equal.
-	// Unless InactiveThreshold is set, a durable consumer will not be
-	// cleaned up automatically.
+	// If both Durable and Name are set, they must be equal. For consumers the
+	// framework creates itself (event stream consumers, stream consumer
+	// services and cron services), the framework decides Name and Durable and
+	// overrides any values set here.
 	//
 	// Durable cannot contain whitespace, ., *, >, path separators (forward or
 	// backwards slash), and non-printable characters.

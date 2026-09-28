@@ -209,6 +209,74 @@ func (j *NatsJetStream) StreamNames(ctx context.Context) ([]string, error) {
 	return names, nil
 }
 
+// ConsumerNames returns the names of every consumer on the named stream, or an
+// empty slice when the stream does not exist yet. In a cluster the names come
+// from the meta layer, so the list is complete even when a consumer's peers
+// are offline.
+//
+// Like StreamNames, this is a concrete method rather than part of the
+// EventStream interface. The lifecycle manager detects it through an optional
+// interface assertion and uses it to find durable consumers left behind by
+// earlier naming schemes.
+func (j *NatsJetStream) ConsumerNames(ctx context.Context, streamName string) ([]string, error) {
+	stream, err := j.js.Stream(ctx, streamName)
+	if err != nil {
+		if errors.Is(err, jetstream.ErrStreamNotFound) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("failed to get stream %s: %w", streamName, err)
+	}
+
+	lister := stream.ConsumerNames(ctx)
+	var names []string
+	for name := range lister.Name() {
+		names = append(names, name)
+	}
+	if err := lister.Err(); err != nil {
+		return nil, fmt.Errorf("failed to list consumers on stream %s: %w", streamName, err)
+	}
+	return names, nil
+}
+
+// ConsumerInfo returns the current info of a pull consumer on a stream. A push
+// consumer yields an error matching jetstream.ErrNotPullConsumer and a missing
+// one an error matching jetstream.ErrConsumerNotFound.
+func (j *NatsJetStream) ConsumerInfo(ctx context.Context, streamName, consumerName string) (*jetstream.ConsumerInfo, error) {
+	consumer, err := j.js.Consumer(ctx, streamName, consumerName)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get consumer %s on stream %s: %w", consumerName, streamName, err)
+	}
+	// The lookup has just fetched the info; no second round trip is needed.
+	return consumer.CachedInfo(), nil
+}
+
+// DeleteConsumer deletes a consumer from a stream.
+func (j *NatsJetStream) DeleteConsumer(ctx context.Context, streamName, consumerName string) error {
+	if err := j.js.DeleteConsumer(ctx, streamName, consumerName); err != nil {
+		return fmt.Errorf("failed to delete consumer %s on stream %s: %w", consumerName, streamName, err)
+	}
+
+	j.logger.Debug("Consumer deleted", "stream", streamName, "consumer", consumerName)
+	return nil
+}
+
+// ResetConsumerToSequence moves a consumer's delivery position so that the next
+// message it delivers is the one at stream sequence seq. Pending and
+// redelivery state is discarded.
+//
+// The server only accepts this for consumers whose DeliverPolicy is all,
+// by-start-sequence or by-start-time, and never below the configured start. A
+// rejected reset returns an error matching jetstream.ErrConsumerInvalidReset
+// via errors.Is.
+func (j *NatsJetStream) ResetConsumerToSequence(ctx context.Context, streamName, consumerName string, seq uint64) error {
+	if _, err := j.js.ResetConsumerToSequence(ctx, streamName, consumerName, seq); err != nil {
+		return fmt.Errorf("failed to reset consumer %s on stream %s to sequence %d: %w", consumerName, streamName, seq, err)
+	}
+
+	j.logger.Debug("Consumer reset", "stream", streamName, "consumer", consumerName, "sequence", seq)
+	return nil
+}
+
 // WrapJetStreamMsg wraps a jetstream.Msg into a types.Msg.
 func WrapJetStreamMsg(msg jetstream.Msg) *types.Msg {
 	return &types.Msg{

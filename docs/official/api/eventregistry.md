@@ -252,6 +252,47 @@ Messages should be acknowledged individually using `Ack()`, `Nak()`, `NakWithDel
 **Returns:**
 - `error` - Nil on success
 
+**Durable Consumer Name:**
+
+The framework names the durable JetStream consumer
+`<consumer-module>-<event-module>-<event>-<version>`, for example
+`analytics-billing-PaymentProcessed-v1`. `types.EventStreamConsumerName` returns it. Any
+`Consumer.Name` or `Consumer.Durable` you set is overridden.
+
+- The name depends only on which module consumes which event, so it is the same on every
+  restart and does not change when modules are added or removed.
+- The consumer is a true JetStream durable: the server keeps it however long it goes without
+  pull requests, unless you set `Consumer.InactiveThreshold`.
+- If the same module registers the same event on the same stream more than once, the second
+  and later registrations get a `-2`, `-3`, ... suffix, in the order that module registers them.
+
+**Upgrading from v0.0.11 or earlier:**
+
+Earlier versions named the consumer `<event-module>-<event>-<version>-<N>`. `N` was a counter
+that followed module start order, which was not deterministic, so the name could change
+between restarts. Those consumers were also created without a durable name, so the server
+treated them as non-durable. When a legacy durable is found on the same stream, startup handles it once,
+and the step is a no-op after that:
+
+- **Work-queue streams:** the legacy durable is deleted before the new one is created. A
+  work-queue stream accepts only one unfiltered consumer, so this is the only way to start.
+  Messages it had not acknowledged stay in the stream and are delivered to the new durable.
+  If the consumer configuration is one the server rejects on a work-queue stream (a deliver
+  policy other than all, or acknowledgement other than explicit), startup fails before
+  anything is deleted.
+- **Other streams:** the new durable is positioned just after the legacy durables' ack floor,
+  so the stream is not replayed. This requires a deliver policy of all, by-start-sequence or
+  by-start-time; for other deliver policies a warning reports what was not carried over. The
+  legacy durables are **not deleted**. A warning on every startup names each one together with
+  a `nats consumer rm <stream> <name>` command. Remove them once the new durable is confirmed
+  to be working: on an interest-retention stream they keep retaining messages until removed.
+- **Several modules consuming the same event on the same stream:** their legacy durables
+  cannot be told apart. Each new durable resumes after the lowest ack floor, which can
+  redeliver some messages but loses none.
+- **Rolling back** to an older version: it picks up the legacy durables again from their old
+  ack floors, which replays everything processed since the upgrade. On a work-queue stream it
+  fails to start until the new durable is deleted.
+
 **Use Cases:**
 - Payment processing
 - Audit logs
@@ -272,7 +313,8 @@ func (m *AuditModule) RegisterEventConsumers(registry mono.EventRegistry) error 
             Retention: mono.WorkQueuePolicy,
         },
         Consumer: mono.ConsumerConfig{
-            Name:          "audit-consumer",
+            // The durable name is set by the framework:
+            // "audit-order-OrderCreated-v1" for the module named "audit".
             MaxAckPending: 1000,
         },
         Fetch: mono.FetchConfig{
@@ -356,7 +398,7 @@ type EventStreamConsumerEntry struct {
     Config     StreamConsumerConfig       // JetStream configuration
     Handler    EventStreamConsumerHandler // The batch handler
     Module     Module                     // The consuming module
-    SequenceID int                        // Unique consumer ID
+    SequenceID int                        // Process-local registration ID (not part of the durable name)
 }
 ```
 

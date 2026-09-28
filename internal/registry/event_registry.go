@@ -22,7 +22,7 @@ type eventRegistry struct {
 	eventMap               map[string]types.BaseEventDefinition // Lookup map: "moduleName:name:version" -> BaseEventDefinition
 	logger                 types.Logger
 	chain                  types.MiddlewareChainRunner // Middleware chain for event consumer registration interception
-	streamConsumerSequence int                         // Sequence counter for unique stream consumer IDs
+	streamConsumerSequence int                         // Process-local counter for stream consumer IDs (never persisted)
 }
 
 // NewEventRegistry creates a new event registry instance with the provided logger.
@@ -323,8 +323,9 @@ func (r *eventRegistry) RegisterEventStreamConsumer(eventDef types.BaseEventDefi
 		config.Fetch.Timeout = 5 * time.Second
 	}
 
-	// Assign unique sequence ID for this consumer
-	// Must be done under lock to ensure unique IDs
+	// Assign a process-local sequence ID for this consumer (must be done under
+	// lock to ensure unique IDs). It depends on registration order, so it must
+	// never feed into anything persisted such as the durable consumer name.
 	r.mu.Lock()
 	r.streamConsumerSequence++
 	sequenceID := r.streamConsumerSequence

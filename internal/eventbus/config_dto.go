@@ -192,6 +192,7 @@ func toJetStreamConsumerConfig(cfg types.ConsumerConfig) (jetstream.ConsumerConf
 	// Convert internal config to JetStream config
 	jsCfg := jetstream.ConsumerConfig{
 		Name:               cfg.Name,
+		Durable:            cfg.Durable,
 		Description:        cfg.Description,
 		OptStartSeq:        cfg.OptStartSeq,
 		OptStartTime:       cfg.OptStartTime,

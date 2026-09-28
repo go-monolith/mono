@@ -2,6 +2,7 @@ package eventbus
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -931,4 +932,112 @@ func TestJetStream_CreateOrUpdateConsumer_JetStreamError(t *testing.T) {
 	if err == nil {
 		t.Error("expected error on closed connection")
 	}
+}
+
+// TestJetStream_ConsumerManagement tests the consumer-management methods used
+// to migrate legacy event stream consumer durables.
+func TestJetStream_ConsumerManagement(t *testing.T) {
+	conn := setupTestNATS(t)
+	defer conn.Close()
+
+	js, err := NewJetStream(conn, logger.NewDefaultLogger())
+	if err != nil {
+		t.Fatalf("Failed to create JetStream: %v", err)
+	}
+	ctx := context.Background()
+
+	if _, err := js.CreateOrUpdateStream(ctx, types.StreamConfig{
+		Name:     "TEST_CONSUMER_MGMT",
+		Subjects: []string{"consumermgmt.>"},
+		Storage:  types.MemoryStorage,
+	}); err != nil {
+		t.Fatalf("Failed to create stream: %v", err)
+	}
+	for _, cfg := range []types.ConsumerConfig{
+		{Name: "all-consumer", Durable: "all-consumer"},
+		{Name: "new-consumer", Durable: "new-consumer", DeliverPolicy: types.DeliverNewPolicy},
+	} {
+		if _, err := js.CreateOrUpdateConsumer(ctx, "TEST_CONSUMER_MGMT", cfg); err != nil {
+			t.Fatalf("Failed to create consumer %s: %v", cfg.Name, err)
+		}
+	}
+	for i := 0; i < 5; i++ {
+		if _, err := js.Publish(ctx, "consumermgmt.event", []byte("x")); err != nil {
+			t.Fatalf("Publish failed: %v", err)
+		}
+	}
+
+	t.Run("ConsumerNames lists consumers", func(t *testing.T) {
+		names, err := js.ConsumerNames(ctx, "TEST_CONSUMER_MGMT")
+		if err != nil {
+			t.Fatalf("ConsumerNames failed: %v", err)
+		}
+		if len(names) != 2 {
+			t.Errorf("expected 2 consumers, got %v", names)
+		}
+	})
+
+	t.Run("ConsumerNames of a missing stream is empty", func(t *testing.T) {
+		names, err := js.ConsumerNames(ctx, "NO_SUCH_STREAM")
+		if err != nil || len(names) != 0 {
+			t.Errorf("expected no names and no error, got %v, %v", names, err)
+		}
+	})
+
+	t.Run("ConsumerInfo reports durability", func(t *testing.T) {
+		info, err := js.ConsumerInfo(ctx, "TEST_CONSUMER_MGMT", "all-consumer")
+		if err != nil {
+			t.Fatalf("ConsumerInfo failed: %v", err)
+		}
+		if info.Config.Durable != "all-consumer" || info.NumPending != 5 {
+			t.Errorf("unexpected info: durable=%q pending=%d", info.Config.Durable, info.NumPending)
+		}
+		if _, err := js.ConsumerInfo(ctx, "TEST_CONSUMER_MGMT", "missing"); !errors.Is(err, jetstream.ErrConsumerNotFound) {
+			t.Errorf("expected ErrConsumerNotFound for missing consumer, got %v", err)
+		}
+	})
+
+	t.Run("ConsumerInfo of a push consumer is detectable", func(t *testing.T) {
+		if _, err := js.js.CreateOrUpdatePushConsumer(ctx, "TEST_CONSUMER_MGMT", jetstream.ConsumerConfig{
+			Name: "push-consumer", DeliverSubject: "deliver.consumermgmt",
+		}); err != nil {
+			t.Fatalf("Failed to create push consumer: %v", err)
+		}
+		if _, err := js.ConsumerInfo(ctx, "TEST_CONSUMER_MGMT", "push-consumer"); !errors.Is(err, jetstream.ErrNotPullConsumer) {
+			t.Errorf("expected ErrNotPullConsumer, got %v", err)
+		}
+		if err := js.DeleteConsumer(ctx, "TEST_CONSUMER_MGMT", "push-consumer"); err != nil {
+			t.Fatalf("DeleteConsumer failed: %v", err)
+		}
+	})
+
+	t.Run("ResetConsumerToSequence moves the position", func(t *testing.T) {
+		if err := js.ResetConsumerToSequence(ctx, "TEST_CONSUMER_MGMT", "all-consumer", 4); err != nil {
+			t.Fatalf("ResetConsumerToSequence failed: %v", err)
+		}
+		info, err := js.ConsumerInfo(ctx, "TEST_CONSUMER_MGMT", "all-consumer")
+		if err != nil {
+			t.Fatalf("ConsumerInfo failed: %v", err)
+		}
+		if info.NumPending != 2 || info.Delivered.Stream != 3 {
+			t.Errorf("after reset to 4: pending=%d delivered=%d, want 2 and 3", info.NumPending, info.Delivered.Stream)
+		}
+	})
+
+	t.Run("ResetConsumerToSequence rejection is detectable", func(t *testing.T) {
+		err := js.ResetConsumerToSequence(ctx, "TEST_CONSUMER_MGMT", "new-consumer", 2)
+		if !errors.Is(err, jetstream.ErrConsumerInvalidReset) {
+			t.Errorf("expected ErrConsumerInvalidReset, got %v", err)
+		}
+	})
+
+	t.Run("DeleteConsumer removes the consumer", func(t *testing.T) {
+		if err := js.DeleteConsumer(ctx, "TEST_CONSUMER_MGMT", "new-consumer"); err != nil {
+			t.Fatalf("DeleteConsumer failed: %v", err)
+		}
+		err := js.DeleteConsumer(ctx, "TEST_CONSUMER_MGMT", "new-consumer")
+		if !errors.Is(err, jetstream.ErrConsumerNotFound) {
+			t.Errorf("expected ErrConsumerNotFound on second delete, got %v", err)
+		}
+	})
 }

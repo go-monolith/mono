@@ -703,3 +703,88 @@ func TestFindCircularDependencyChainLongerCycle(t *testing.T) {
 		t.Errorf("expected cycle to contain at least 2 of A, B, C, D, got: %v", cycle)
 	}
 }
+
+// resolvedNames returns the names of the resolved modules in order.
+func resolvedNames(t *testing.T, registry ModuleRegistry) []string {
+	t.Helper()
+	ordered, err := ResolveDependencies(registry)
+	if err != nil {
+		t.Fatalf("ResolveDependencies failed: %v", err)
+	}
+	names := make([]string, len(ordered))
+	for i, m := range ordered {
+		names[i] = m.Name()
+	}
+	return names
+}
+
+// TestResolveDependenciesDeterministicOrder tests that independent modules keep
+// their registration order on every resolution. Module start order drives the
+// order of event consumer registration, so it must not vary between boots.
+func TestResolveDependenciesDeterministicOrder(t *testing.T) {
+	t.Run("independent modules keep registration order", func(t *testing.T) {
+		registry := NewModuleRegistry(&mockLogger{})
+		want := []string{"user", "chat", "usage", "image", "feature-flags", "analytics", "audit", "search"}
+		for _, name := range want {
+			_ = registry.Register(&mockModule{name: name})
+		}
+
+		for i := 0; i < 100; i++ {
+			if got := resolvedNames(t, registry); strings.Join(got, ",") != strings.Join(want, ",") {
+				t.Fatalf("run %d: order = %v, want %v", i, got, want)
+			}
+		}
+	})
+
+	t.Run("modules with dependencies are ordered deterministically", func(t *testing.T) {
+		registry := NewModuleRegistry(&mockLogger{})
+		_ = registry.Register(&mockDependentModule{mockModule: mockModule{name: "notification"}, deps: []string{"analytics", "usage"}})
+		_ = registry.Register(&mockModule{name: "usage"})
+		_ = registry.Register(&mockDependentModule{mockModule: mockModule{name: "billing"}, deps: []string{"user"}})
+		_ = registry.Register(&mockModule{name: "user"})
+		_ = registry.Register(&mockModule{name: "analytics"})
+
+		// Independent modules first in registration order, then each dependent as
+		// soon as its last dependency has been placed.
+		want := "usage,user,analytics,billing,notification"
+		for i := 0; i < 100; i++ {
+			if got := strings.Join(resolvedNames(t, registry), ","); got != want {
+				t.Fatalf("run %d: order = %s, want %s", i, got, want)
+			}
+		}
+	})
+
+	t.Run("missing dependency error is reproducible", func(t *testing.T) {
+		registry := NewModuleRegistry(&mockLogger{})
+		_ = registry.Register(&mockDependentModule{mockModule: mockModule{name: "A"}, deps: []string{"missing-1"}})
+		_ = registry.Register(&mockDependentModule{mockModule: mockModule{name: "B"}, deps: []string{"missing-2"}})
+
+		_, first := ResolveDependencies(registry)
+		if first == nil {
+			t.Fatal("expected missing dependency error")
+		}
+		for i := 0; i < 50; i++ {
+			if _, err := ResolveDependencies(registry); err == nil || err.Error() != first.Error() {
+				t.Fatalf("run %d: error = %v, want %v", i, err, first)
+			}
+		}
+	})
+
+	t.Run("circular dependency error is reproducible", func(t *testing.T) {
+		registry := NewModuleRegistry(&mockLogger{})
+		_ = registry.Register(&mockDependentModule{mockModule: mockModule{name: "A"}, deps: []string{"B"}})
+		_ = registry.Register(&mockDependentModule{mockModule: mockModule{name: "B"}, deps: []string{"A"}})
+		_ = registry.Register(&mockDependentModule{mockModule: mockModule{name: "C"}, deps: []string{"D"}})
+		_ = registry.Register(&mockDependentModule{mockModule: mockModule{name: "D"}, deps: []string{"C"}})
+
+		_, first := ResolveDependencies(registry)
+		if first == nil {
+			t.Fatal("expected circular dependency error")
+		}
+		for i := 0; i < 50; i++ {
+			if _, err := ResolveDependencies(registry); err == nil || err.Error() != first.Error() {
+				t.Fatalf("run %d: error = %v, want %v", i, err, first)
+			}
+		}
+	})
+}

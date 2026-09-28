@@ -10,6 +10,12 @@ import (
 // The returned slice contains modules ordered such that dependencies appear before
 // modules that depend on them. This ensures modules can be started in the correct order.
 //
+// The order is deterministic: the graph is always traversed in registration order, so
+// the same registrations always yield the same start order, and modules without
+// dependencies start in the order they were registered. Anything derived from start
+// order (for example the order in which modules register event consumers) is
+// therefore reproducible across restarts.
+//
 // Returns an error if:
 // - Any module has a missing dependency
 // - A circular dependency is detected
@@ -49,6 +55,11 @@ type dependencyGraph struct {
 
 	// allModules contains all module names
 	allModules map[string]bool
+
+	// order lists all module names in registration order. Every traversal walks
+	// this slice instead of ranging over the maps above, whose iteration order is
+	// randomized by Go, so results are deterministic.
+	order []string
 }
 
 // buildDependencyGraph constructs the dependency graph from the registry.
@@ -60,16 +71,18 @@ func buildDependencyGraph(registry ModuleRegistry) *dependencyGraph {
 	}
 
 	modules := registry.All()
+	graph.order = registry.List()
 
 	// Initialize all modules in the graph
-	for name := range modules {
+	for _, name := range graph.order {
 		graph.allModules[name] = true
 		graph.inDegree[name] = 0
 		graph.adjacencyList[name] = []string{}
 	}
 
 	// Build adjacency list and calculate in-degrees
-	for name, module := range modules {
+	for _, name := range graph.order {
+		module := modules[name]
 		// Check if module implements DependentModule interface
 		if depMod, ok := module.(types.DependentModule); ok {
 			deps := depMod.Dependencies()
@@ -85,8 +98,8 @@ func buildDependencyGraph(registry ModuleRegistry) *dependencyGraph {
 
 // detectMissingDependencies checks if all dependencies exist in the registry.
 func detectMissingDependencies(graph *dependencyGraph, registry ModuleRegistry) error {
-	for module, deps := range graph.adjacencyList {
-		for _, dep := range deps {
+	for _, module := range graph.order {
+		for _, dep := range graph.adjacencyList[module] {
 			if !graph.allModules[dep] {
 				return monoerrors.WrapMissingDependency(module, dep)
 			}
@@ -96,6 +109,9 @@ func detectMissingDependencies(graph *dependencyGraph, registry ModuleRegistry) 
 }
 
 // topologicalSort performs Kahn's algorithm to compute topological order.
+//
+// The queue is seeded and extended in registration order (graph.order) rather than
+// map iteration order, so the result is the same on every call.
 func topologicalSort(graph *dependencyGraph, registry ModuleRegistry) ([]types.Module, error) {
 	// Create a copy of in-degrees to avoid modifying the original
 	inDegree := make(map[string]int)
@@ -105,7 +121,7 @@ func topologicalSort(graph *dependencyGraph, registry ModuleRegistry) ([]types.M
 
 	// Queue for modules with no dependencies
 	queue := []string{}
-	for name := range graph.allModules {
+	for _, name := range graph.order {
 		if inDegree[name] == 0 {
 			queue = append(queue, name)
 		}
@@ -125,9 +141,9 @@ func topologicalSort(graph *dependencyGraph, registry ModuleRegistry) ([]types.M
 		result = append(result, modules[current])
 
 		// Process all modules that depend on current
-		for module, deps := range graph.adjacencyList {
+		for _, module := range graph.order {
 			// Check if this module depends on current
-			for _, dep := range deps {
+			for _, dep := range graph.adjacencyList[module] {
 				if dep == current {
 					inDegree[module]--
 					if inDegree[module] == 0 {
@@ -153,7 +169,7 @@ func topologicalSort(graph *dependencyGraph, registry ModuleRegistry) ([]types.M
 func findCircularDependencyChain(graph *dependencyGraph, registry ModuleRegistry) []string {
 	// Track visit states: 0=unvisited, 1=visiting, 2=visited
 	state := make(map[string]int)
-	for name := range graph.allModules {
+	for _, name := range graph.order {
 		state[name] = 0 // unvisited
 	}
 
@@ -199,7 +215,7 @@ func findCircularDependencyChain(graph *dependencyGraph, registry ModuleRegistry
 	}
 
 	// Try DFS from each unvisited module
-	for module := range graph.allModules {
+	for _, module := range graph.order {
 		if state[module] == 0 {
 			if dfs(module) {
 				return cycle

@@ -408,9 +408,10 @@ type EventStreamConsumerEntry struct {
 	// This is NOT the module that emits the event - for that, use EventDef.ModuleName.
 	Module Module
 
-	// SequenceID is a unique identifier for this consumer registration.
-	// Used to ensure unique JetStream consumer names when multiple consumers
-	// subscribe to the same event. Set automatically during registration.
+	// SequenceID is a process-local identifier for this consumer registration,
+	// set automatically during registration. It follows registration order and
+	// is only unique within one process run, so it is NOT part of the durable
+	// JetStream consumer name; see EventStreamConsumerName for that.
 	SequenceID int
 }
 
