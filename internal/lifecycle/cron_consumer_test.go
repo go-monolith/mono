@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"slices"
 	"strings"
 	"sync"
@@ -15,22 +16,34 @@ import (
 )
 
 // fakeCronStore is an EventStream that also implements cronConsumerStore. It
-// records every consumer operation in order: updates and creates with the
-// deliver policy sent, resets with the sequence.
+// models the one consumer of a cron stream as the server holds it, and records
+// every consumer operation in order: creates and updates with the deliver
+// policy sent, resets with the sequence.
 type fakeCronStore struct {
 	*mockEventStream
 
-	mu         sync.Mutex
-	info       *jetstream.ConsumerInfo // returned by ConsumerInfo; nil means not found
-	infoErr    error
-	updateErrs []error // one per UpdateConsumer call, nil once exhausted
-	createErr  error
-	created    *jetstream.ConsumerInfo // CachedInfo of the consumer CreateOrUpdateConsumer returns
-	resetErr   error
-	stream     jetstream.Stream // returned by Stream
-	streamErr  error
-	ops        []string
-	configs    []types.ConsumerConfig // config of every update and create, in order
+	mu sync.Mutex
+	// consumer is the consumer as the server holds it; nil means missing.
+	// A create sets it, a reset moves it.
+	consumer *jetstream.ConsumerInfo
+	// infoErrs are returned by successive ConsumerInfo calls; nil entries,
+	// and calls after the list is exhausted, read consumer.
+	infoErrs []error
+	// updateErrs are returned by successive UpdateConsumer calls.
+	updateErrs []error
+	// afterUpdate, when set, runs after each successful update, to model
+	// another instance acting in between.
+	afterUpdate func(f *fakeCronStore)
+	createErr   error
+	// peer, when set, is a consumer another instance created just before
+	// this one's create: a create finds it and fails with ErrConsumerExists
+	// if its metadata differs.
+	peer      *jetstream.ConsumerInfo
+	resetErr  error
+	stream    jetstream.Stream // returned by Stream
+	streamErr error
+	ops       []string
+	configs   []types.ConsumerConfig // config of every create and update, in order
 }
 
 func newFakeCronStore() *fakeCronStore {
@@ -57,13 +70,40 @@ func (f *fakeCronStore) recorded() []string {
 }
 
 func (f *fakeCronStore) ConsumerInfo(_ context.Context, _, consumer string) (*jetstream.ConsumerInfo, error) {
-	if f.infoErr != nil {
-		return nil, f.infoErr
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.infoErrs) > 0 {
+		err := f.infoErrs[0]
+		f.infoErrs = f.infoErrs[1:]
+		if err != nil {
+			return nil, err
+		}
 	}
-	if f.info == nil {
+	if f.consumer == nil {
 		return nil, fmt.Errorf("lookup %s: %w", consumer, jetstream.ErrConsumerNotFound)
 	}
-	return f.info, nil
+	info := *f.consumer
+	return &info, nil
+}
+
+func (f *fakeCronStore) CreateConsumer(_ context.Context, _ string, cfg types.ConsumerConfig) (jetstream.Consumer, error) {
+	f.recordConfig("create", cfg)
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.createErr != nil {
+		return nil, f.createErr
+	}
+	if f.peer != nil {
+		f.consumer = f.peer
+		if !maps.Equal(f.peer.Config.Metadata, cfg.Metadata) {
+			return nil, fmt.Errorf("create: %w", jetstream.ErrConsumerExists)
+		}
+	} else {
+		f.consumer = &jetstream.ConsumerInfo{Config: jetstream.ConsumerConfig{
+			Name: cfg.Name, Durable: cfg.Durable, Metadata: cfg.Metadata,
+		}}
+	}
+	return &mockJetStreamConsumer{}, nil
 }
 
 func (f *fakeCronStore) UpdateConsumer(_ context.Context, _ string, cfg types.ConsumerConfig) (jetstream.Consumer, error) {
@@ -77,20 +117,35 @@ func (f *fakeCronStore) UpdateConsumer(_ context.Context, _ string, cfg types.Co
 			return nil, err
 		}
 	}
+	if f.consumer != nil {
+		updated := *f.consumer
+		updated.Config.Durable = cfg.Durable
+		updated.Config.Metadata = cfg.Metadata
+		f.consumer = &updated
+	}
+	if f.afterUpdate != nil {
+		f.afterUpdate(f)
+	}
 	return &mockJetStreamConsumer{}, nil
 }
 
-func (f *fakeCronStore) CreateOrUpdateConsumer(_ context.Context, _ string, cfg types.ConsumerConfig) (jetstream.Consumer, error) {
-	f.recordConfig("create", cfg)
-	if f.createErr != nil {
-		return nil, f.createErr
-	}
-	return &cachedInfoConsumer{mockJetStreamConsumer: &mockJetStreamConsumer{}, info: f.created}, nil
+func (f *fakeCronStore) CreateOrUpdateConsumer(context.Context, string, types.ConsumerConfig) (jetstream.Consumer, error) {
+	return nil, errors.New("cron consumers must not be created with CreateOrUpdateConsumer")
 }
 
 func (f *fakeCronStore) ResetConsumerToSequence(_ context.Context, _, consumer string, seq uint64) error {
 	f.record(fmt.Sprintf("reset:%s:%d", consumer, seq))
-	return f.resetErr
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.resetErr != nil {
+		return f.resetErr
+	}
+	if f.consumer != nil {
+		reset := *f.consumer
+		reset.Delivered.Stream = seq - 1
+		f.consumer = &reset
+	}
+	return nil
 }
 
 func (f *fakeCronStore) Stream(_ context.Context, _ string) (jetstream.Stream, error) {
@@ -171,6 +226,7 @@ func TestEnsureCronConsumer(t *testing.T) {
 	update := func(policy types.DeliverPolicy) string {
 		return fmt.Sprintf("update:%s:%d", cronTestConsumer, policy)
 	}
+	updateAll := update(types.DeliverAllPolicy)
 	create := fmt.Sprintf("create:%s:%d", cronTestConsumer, types.DeliverAllPolicy)
 	reset := func(seq uint64) string {
 		return fmt.Sprintf("reset:%s:%d", cronTestConsumer, seq)
@@ -178,11 +234,20 @@ func TestEnsureCronConsumer(t *testing.T) {
 	ensure := func(lm *lifecycleManager, es types.EventStream) (jetstream.Consumer, error) {
 		return lm.ensureCronConsumer(ctx, es, cronTestStream, cronTestConsumerConfig(), cronTestEntry())
 	}
+	logs := func(lm *lifecycleManager, substr string) []string {
+		return loggedContaining(lm.logger.(*mockLogger), substr)
+	}
+	positioned := func(start uint64, delivered uint64) *jetstream.ConsumerInfo {
+		return &jetstream.ConsumerInfo{
+			Config:    jetstream.ConsumerConfig{Durable: cronTestConsumer, Metadata: cronStartMetadata(start)},
+			Delivered: jetstream.SequenceInfo{Stream: delivered},
+		}
+	}
 
 	t.Run("existing durable is updated once with its own deliver policy", func(t *testing.T) {
 		lm := newCronTestManager()
 		store := newFakeCronStore()
-		store.info = &jetstream.ConsumerInfo{Config: jetstream.ConsumerConfig{
+		store.consumer = &jetstream.ConsumerInfo{Config: jetstream.ConsumerConfig{
 			Durable: cronTestConsumer, DeliverPolicy: jetstream.DeliverNewPolicy,
 		}}
 
@@ -196,7 +261,7 @@ func TestEnsureCronConsumer(t *testing.T) {
 		if store.configs[0].Metadata != nil {
 			t.Errorf("metadata = %v, want none", store.configs[0].Metadata)
 		}
-		if got := loggedContaining(lm.logger.(*mockLogger), "Cron consumer"); len(got) != 0 {
+		if got := logs(lm, "Cron consumer"); len(got) != 0 {
 			t.Errorf("expected no cron consumer log, got %v", got)
 		}
 	})
@@ -205,7 +270,7 @@ func TestEnsureCronConsumer(t *testing.T) {
 		lm := newCronTestManager()
 		store := newFakeCronStore()
 		start := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
-		store.info = &jetstream.ConsumerInfo{Config: jetstream.ConsumerConfig{
+		store.consumer = &jetstream.ConsumerInfo{Config: jetstream.ConsumerConfig{
 			Name:              cronTestConsumer,
 			DeliverPolicy:     jetstream.DeliverByStartTimePolicy,
 			OptStartTime:      &start,
@@ -224,7 +289,7 @@ func TestEnsureCronConsumer(t *testing.T) {
 				t.Errorf("update config = %+v, want durable, no threshold, start time kept", cfg)
 			}
 		}
-		if got := loggedContaining(lm.logger.(*mockLogger), "Cron consumer converted to durable"); len(got) != 1 {
+		if got := logs(lm, "Cron consumer converted to durable"); len(got) != 1 {
 			t.Errorf("expected one conversion log line, got %v", lm.logger.(*mockLogger).logged())
 		}
 	})
@@ -232,7 +297,7 @@ func TestEnsureCronConsumer(t *testing.T) {
 	t.Run("start sequence is kept", func(t *testing.T) {
 		lm := newCronTestManager()
 		store := newFakeCronStore()
-		store.info = &jetstream.ConsumerInfo{Config: jetstream.ConsumerConfig{
+		store.consumer = &jetstream.ConsumerInfo{Config: jetstream.ConsumerConfig{
 			Durable: cronTestConsumer, DeliverPolicy: jetstream.DeliverByStartSequencePolicy, OptStartSeq: 42,
 		}}
 
@@ -252,7 +317,7 @@ func TestEnsureCronConsumer(t *testing.T) {
 		if _, err := ensure(lm, store); err != nil {
 			t.Fatalf("ensureCronConsumer: %v", err)
 		}
-		if got, want := store.recorded(), []string{create, reset(301), update(types.DeliverAllPolicy)}; !slices.Equal(got, want) {
+		if got, want := store.recorded(), []string{create, reset(301), updateAll}; !slices.Equal(got, want) {
 			t.Errorf("ops = %v, want %v", got, want)
 		}
 		if cfg := store.configs[0]; cfg.Durable != cronTestConsumer || cfg.Metadata[cronStartSequenceKey] != "301" {
@@ -261,7 +326,7 @@ func TestEnsureCronConsumer(t *testing.T) {
 		if cfg := store.configs[1]; cfg.Durable != cronTestConsumer || cfg.Metadata != nil {
 			t.Errorf("update after the reset = %+v, want durable with the start sequence removed", cfg)
 		}
-		warnings := loggedContaining(lm.logger.(*mockLogger), "skipped occurrences stored before it")
+		warnings := logs(lm, "skipped occurrences stored before it")
 		if len(warnings) != 1 || !strings.Contains(warnings[0], "skipped 256") {
 			t.Errorf("expected one warning with the skipped count, got %v", lm.logger.(*mockLogger).logged())
 		}
@@ -281,10 +346,10 @@ func TestEnsureCronConsumer(t *testing.T) {
 		if got := store.configs[0].Metadata; got != nil {
 			t.Errorf("metadata = %v, want none", got)
 		}
-		if got := loggedContaining(lm.logger.(*mockLogger), "WARN"); len(got) != 0 {
+		if got := logs(lm, "WARN"); len(got) != 0 {
 			t.Errorf("expected no warning, got %v", got)
 		}
-		if got := loggedContaining(lm.logger.(*mockLogger), "Cron consumer created"); len(got) != 1 {
+		if got := logs(lm, "Cron consumer created"); len(got) != 1 {
 			t.Errorf("expected one creation log line, got %v", lm.logger.(*mockLogger).logged())
 		}
 	})
@@ -299,49 +364,109 @@ func TestEnsureCronConsumer(t *testing.T) {
 		if _, err := ensure(lm, store); err != nil {
 			t.Fatalf("ensureCronConsumer: %v", err)
 		}
-		if got, want := store.recorded(), []string{create, reset(6), update(types.DeliverAllPolicy)}; !slices.Equal(got, want) {
+		if got, want := store.recorded(), []string{create, reset(6), updateAll}; !slices.Equal(got, want) {
 			t.Errorf("ops = %v, want %v", got, want)
 		}
-		if got := loggedContaining(lm.logger.(*mockLogger), "WARN"); len(got) != 0 {
+		if got := logs(lm, "WARN"); len(got) != 0 {
 			t.Errorf("expected no warning, got %v", got)
 		}
-		if got := loggedContaining(lm.logger.(*mockLogger), "Cron consumer created"); len(got) != 1 {
+		if got := logs(lm, "Cron consumer created"); len(got) != 1 {
 			t.Errorf("expected one creation log line, got %v", lm.logger.(*mockLogger).logged())
 		}
 	})
 
-	t.Run("consumer another instance already moved forward is left where it is", func(t *testing.T) {
+	// Two instances start at once and both find the consumer missing.
+	t.Run("another instance created it with the same start and positioned it", func(t *testing.T) {
 		lm := newCronTestManager()
 		store := newFakeCronStore()
 		store.stream = &cronPositionStream{subject: cronTestSubject, count: 4, lastSeq: 300}
-		store.created = &jetstream.ConsumerInfo{Delivered: jetstream.SequenceInfo{Stream: 302}}
+		store.peer = positioned(301, 305)
 
 		if _, err := ensure(lm, store); err != nil {
 			t.Fatalf("ensureCronConsumer: %v", err)
 		}
-		if got, want := store.recorded(), []string{create}; !slices.Equal(got, want) {
+		// Not reset again; the start sequence the other instance has not
+		// removed yet is removed.
+		if got, want := store.recorded(), []string{create, updateAll}; !slices.Equal(got, want) {
 			t.Errorf("ops = %v, want %v", got, want)
 		}
-		if got := loggedContaining(lm.logger.(*mockLogger), "WARN"); len(got) != 0 {
+		if got := store.consumer.Config.Metadata; got != nil {
+			t.Errorf("metadata = %v, want none", got)
+		}
+		if got := logs(lm, "WARN"); len(got) != 0 {
 			t.Errorf("expected no warning, got %v", got)
+		}
+	})
+
+	t.Run("another instance created it with a different start, not yet positioned", func(t *testing.T) {
+		lm := newCronTestManager()
+		store := newFakeCronStore()
+		store.stream = &cronPositionStream{subject: cronTestSubject, count: 4, lastSeq: 301}
+		store.peer = positioned(301, 0)
+
+		if _, err := ensure(lm, store); err != nil {
+			t.Fatalf("ensureCronConsumer: %v", err)
+		}
+		// The create fails, and the peer's consumer is updated and moved to
+		// the peer's start, never replaced.
+		if got, want := store.recorded(), []string{create, updateAll, reset(301), updateAll}; !slices.Equal(got, want) {
+			t.Errorf("ops = %v, want %v", got, want)
+		}
+		if got := store.configs[1].Metadata[cronStartSequenceKey]; got != "301" {
+			t.Errorf("update kept start sequence %q, want the peer's 301", got)
+		}
+	})
+
+	t.Run("another instance created it with a different start and positioned it", func(t *testing.T) {
+		lm := newCronTestManager()
+		store := newFakeCronStore()
+		store.stream = &cronPositionStream{subject: cronTestSubject, count: 4, lastSeq: 301}
+		store.peer = positioned(301, 300)
+
+		if _, err := ensure(lm, store); err != nil {
+			t.Fatalf("ensureCronConsumer: %v", err)
+		}
+		if got, want := store.recorded(), []string{create, updateAll}; !slices.Equal(got, want) {
+			t.Errorf("ops = %v, want %v", got, want)
+		}
+	})
+
+	// The other instance positions the consumer and removes the start
+	// sequence between this instance's lookup and its update, which writes
+	// the start sequence back.
+	t.Run("start sequence written back after another instance positioned the consumer is removed", func(t *testing.T) {
+		lm := newCronTestManager()
+		store := newFakeCronStore()
+		store.consumer = positioned(301, 0)
+		store.afterUpdate = func(f *fakeCronStore) {
+			f.consumer.Delivered.Stream = 300
+			f.afterUpdate = nil
+		}
+
+		if _, err := ensure(lm, store); err != nil {
+			t.Fatalf("ensureCronConsumer: %v", err)
+		}
+		if got, want := store.recorded(), []string{updateAll, updateAll}; !slices.Equal(got, want) {
+			t.Errorf("ops = %v, want %v", got, want)
+		}
+		if got := store.consumer.Config.Metadata; got != nil {
+			t.Errorf("metadata = %v, want none", got)
+		}
+		if got := logs(lm, "interrupted creation"); len(got) != 0 {
+			t.Errorf("expected no positioning log line, got %v", got)
 		}
 	})
 
 	t.Run("interrupted creation is positioned on the next start", func(t *testing.T) {
 		lm := newCronTestManager()
 		store := newFakeCronStore()
-		store.info = &jetstream.ConsumerInfo{
-			Config: jetstream.ConsumerConfig{
-				Durable:  cronTestConsumer,
-				Metadata: map[string]string{cronStartSequenceKey: "301", "_nats.level": "1"},
-			},
-		}
+		store.consumer = positioned(301, 0)
+		store.consumer.Config.Metadata["_nats.level"] = "1"
 
 		if _, err := ensure(lm, store); err != nil {
 			t.Fatalf("ensureCronConsumer: %v", err)
 		}
-		want := []string{update(types.DeliverAllPolicy), reset(301), update(types.DeliverAllPolicy)}
-		if got := store.recorded(); !slices.Equal(got, want) {
+		if got, want := store.recorded(), []string{updateAll, reset(301), updateAll}; !slices.Equal(got, want) {
 			t.Errorf("ops = %v, want %v", got, want)
 		}
 		// The start sequence is kept until the reset is done, without the
@@ -352,7 +477,7 @@ func TestEnsureCronConsumer(t *testing.T) {
 		if got := store.configs[1].Metadata; got != nil {
 			t.Errorf("update metadata after the reset = %v, want none", got)
 		}
-		if got := loggedContaining(lm.logger.(*mockLogger), "interrupted creation"); len(got) != 1 {
+		if got := logs(lm, "interrupted creation"); len(got) != 1 {
 			t.Errorf("expected one log line, got %v", lm.logger.(*mockLogger).logged())
 		}
 	})
@@ -363,14 +488,12 @@ func TestEnsureCronConsumer(t *testing.T) {
 		for _, delivered := range []uint64{300, 450} {
 			lm := newCronTestManager()
 			store := newFakeCronStore()
-			store.info = &jetstream.ConsumerInfo{
-				Config:    jetstream.ConsumerConfig{Durable: cronTestConsumer, Metadata: map[string]string{cronStartSequenceKey: "301"}},
-				Delivered: jetstream.SequenceInfo{Stream: delivered},
-			}
+			store.consumer = positioned(301, delivered)
+
 			if _, err := ensure(lm, store); err != nil {
 				t.Fatalf("ensureCronConsumer: %v", err)
 			}
-			if got, want := store.recorded(), []string{update(types.DeliverAllPolicy)}; !slices.Equal(got, want) {
+			if got, want := store.recorded(), []string{updateAll}; !slices.Equal(got, want) {
 				t.Errorf("delivered %d: ops = %v, want %v", delivered, got, want)
 			}
 			if got := store.configs[0].Metadata; got != nil {
@@ -383,13 +506,13 @@ func TestEnsureCronConsumer(t *testing.T) {
 		for _, value := range []string{"", "0", "-1", "abc"} {
 			lm := newCronTestManager()
 			store := newFakeCronStore()
-			store.info = &jetstream.ConsumerInfo{Config: jetstream.ConsumerConfig{
+			store.consumer = &jetstream.ConsumerInfo{Config: jetstream.ConsumerConfig{
 				Durable: cronTestConsumer, Metadata: map[string]string{cronStartSequenceKey: value},
 			}}
 			if _, err := ensure(lm, store); err != nil {
 				t.Fatalf("ensureCronConsumer: %v", err)
 			}
-			if got, want := store.recorded(), []string{update(types.DeliverAllPolicy)}; !slices.Equal(got, want) {
+			if got, want := store.recorded(), []string{updateAll}; !slices.Equal(got, want) {
 				t.Errorf("%q: ops = %v, want %v", value, got, want)
 			}
 			if store.configs[0].Metadata != nil {
@@ -414,7 +537,7 @@ func TestEnsureCronConsumer(t *testing.T) {
 			t.Run(name, func(t *testing.T) {
 				lm := newCronTestManager()
 				store := newFakeCronStore()
-				store.info = &jetstream.ConsumerInfo{Config: jetstream.ConsumerConfig{
+				store.consumer = &jetstream.ConsumerInfo{Config: jetstream.ConsumerConfig{
 					Name: cronTestConsumer, DeliverPolicy: jetstream.DeliverAllPolicy,
 				}}
 				for _, err := range tt.updateErrs {
@@ -424,15 +547,16 @@ func TestEnsureCronConsumer(t *testing.T) {
 					store.updateErrs = append(store.updateErrs, err)
 				}
 				store.stream = &cronPositionStream{subject: cronTestSubject, count: 3, lastSeq: 7}
+				deleted := &fakeDeletingStore{fakeCronStore: store}
 
-				if _, err := ensure(lm, store); err != nil {
+				if _, err := ensure(lm, deleted); err != nil {
 					t.Fatalf("ensureCronConsumer: %v", err)
 				}
 				var want []string
 				for range tt.updates {
-					want = append(want, update(types.DeliverAllPolicy))
+					want = append(want, updateAll)
 				}
-				want = append(want, create, reset(8), update(types.DeliverAllPolicy))
+				want = append(want, create, reset(8), updateAll)
 				if got := store.recorded(); !slices.Equal(got, want) {
 					t.Errorf("ops = %v, want %v", got, want)
 				}
@@ -450,42 +574,33 @@ func TestEnsureCronConsumer(t *testing.T) {
 			ops   []string
 		}{
 			"lookup fails": {
-				setup: func(f *fakeCronStore) { f.infoErr = boom },
+				setup: func(f *fakeCronStore) { f.infoErrs = []error{boom} },
 			},
 			"unknown deliver policy": {
 				setup: func(f *fakeCronStore) {
-					f.info = &jetstream.ConsumerInfo{Config: jetstream.ConsumerConfig{DeliverPolicy: jetstream.DeliverPolicy(99)}}
+					f.consumer = &jetstream.ConsumerInfo{Config: jetstream.ConsumerConfig{DeliverPolicy: jetstream.DeliverPolicy(99)}}
 				},
 			},
 			"update fails": {
 				setup: func(f *fakeCronStore) {
-					f.info = &jetstream.ConsumerInfo{Config: jetstream.ConsumerConfig{Durable: cronTestConsumer}}
+					f.consumer = &jetstream.ConsumerInfo{Config: jetstream.ConsumerConfig{Durable: cronTestConsumer}}
 					f.updateErrs = []error{boom}
 				},
-				ops: []string{update(types.DeliverAllPolicy)},
+				ops: []string{updateAll},
 			},
 			"second conversion update fails": {
 				setup: func(f *fakeCronStore) {
-					f.info = &jetstream.ConsumerInfo{Config: jetstream.ConsumerConfig{Name: cronTestConsumer}}
+					f.consumer = &jetstream.ConsumerInfo{Config: jetstream.ConsumerConfig{Name: cronTestConsumer}}
 					f.updateErrs = []error{nil, boom}
 				},
-				ops: []string{update(types.DeliverAllPolicy), update(types.DeliverAllPolicy)},
+				ops: []string{updateAll, updateAll},
 			},
 			"reset of an interrupted creation fails": {
 				setup: func(f *fakeCronStore) {
-					f.info = &jetstream.ConsumerInfo{Config: jetstream.ConsumerConfig{
-						Durable: cronTestConsumer, Metadata: map[string]string{cronStartSequenceKey: "5"},
-					}}
+					f.consumer = positioned(5, 0)
 					f.resetErr = boom
 				},
-				ops: []string{update(types.DeliverAllPolicy), reset(5)},
-			},
-			"removing the start sequence fails": {
-				setup: func(f *fakeCronStore) {
-					position(f)
-					f.updateErrs = []error{boom}
-				},
-				ops: []string{create, reset(10), update(types.DeliverAllPolicy)},
+				ops: []string{updateAll, reset(5)},
 			},
 			"stream lookup fails": {
 				setup: func(f *fakeCronStore) { f.streamErr = boom },
@@ -503,12 +618,34 @@ func TestEnsureCronConsumer(t *testing.T) {
 				},
 				ops: []string{create},
 			},
+			"lookup before the reset fails": {
+				setup: func(f *fakeCronStore) {
+					position(f)
+					f.infoErrs = []error{nil, boom}
+				},
+				ops: []string{create},
+			},
 			"reset after create fails": {
 				setup: func(f *fakeCronStore) {
 					position(f)
 					f.resetErr = boom
 				},
 				ops: []string{create, reset(10)},
+			},
+			"removing the start sequence fails": {
+				setup: func(f *fakeCronStore) {
+					position(f)
+					f.updateErrs = []error{boom}
+				},
+				ops: []string{create, reset(10), updateAll},
+			},
+			"lookup of the consumer another instance created fails": {
+				setup: func(f *fakeCronStore) {
+					position(f)
+					f.peer = positioned(5, 0)
+					f.infoErrs = []error{nil, boom}
+				},
+				ops: []string{create},
 			},
 		}
 		for name, tt := range tests {
@@ -539,6 +676,22 @@ func TestEnsureCronConsumer(t *testing.T) {
 			t.Errorf("created config = %+v, want durable with deliver new", cfg)
 		}
 	})
+}
+
+// fakeDeletingStore deletes the consumer when an update reports it missing,
+// as the server does for a non-durable consumer that timed out.
+type fakeDeletingStore struct {
+	*fakeCronStore
+}
+
+func (f *fakeDeletingStore) UpdateConsumer(ctx context.Context, stream string, cfg types.ConsumerConfig) (jetstream.Consumer, error) {
+	consumer, err := f.fakeCronStore.UpdateConsumer(ctx, stream, cfg)
+	if isCronConsumerMissing(err) {
+		f.mu.Lock()
+		f.consumer = nil
+		f.mu.Unlock()
+	}
+	return consumer, err
 }
 
 func TestCronStartSequence(t *testing.T) {

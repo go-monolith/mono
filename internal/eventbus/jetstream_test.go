@@ -1074,6 +1074,34 @@ func TestJetStream_ConsumerManagement(t *testing.T) {
 		}
 	})
 
+	t.Run("CreateConsumer creates and never changes an existing consumer", func(t *testing.T) {
+		cfg := types.ConsumerConfig{Name: "create-only", Durable: "create-only", Metadata: map[string]string{"k": "1"}}
+		if _, err := js.CreateConsumer(ctx, "TEST_CONSUMER_MGMT", cfg); err != nil {
+			t.Fatalf("CreateConsumer failed: %v", err)
+		}
+		// The same configuration again returns the existing consumer.
+		if _, err := js.CreateConsumer(ctx, "TEST_CONSUMER_MGMT", cfg); err != nil {
+			t.Errorf("CreateConsumer with the same config failed: %v", err)
+		}
+		cfg.Metadata = map[string]string{"k": "2"}
+		if _, err := js.CreateConsumer(ctx, "TEST_CONSUMER_MGMT", cfg); !errors.Is(err, jetstream.ErrConsumerExists) {
+			t.Errorf("expected ErrConsumerExists for a different config, got %v", err)
+		}
+		info, err := js.ConsumerInfo(ctx, "TEST_CONSUMER_MGMT", "create-only")
+		if err != nil {
+			t.Fatalf("ConsumerInfo failed: %v", err)
+		}
+		if got := info.Config.Metadata["k"]; got != "1" {
+			t.Errorf("metadata k = %q, want the original 1", got)
+		}
+		if _, err := js.CreateConsumer(ctx, "TEST_CONSUMER_MGMT", types.ConsumerConfig{Name: "bad", AckPolicy: types.AckPolicy(99)}); err == nil {
+			t.Error("expected an error for an invalid config")
+		}
+		if err := js.DeleteConsumer(ctx, "TEST_CONSUMER_MGMT", "create-only"); err != nil {
+			t.Fatalf("DeleteConsumer failed: %v", err)
+		}
+	})
+
 	t.Run("UpdateConsumer updates and never creates", func(t *testing.T) {
 		consumer, err := js.UpdateConsumer(ctx, "TEST_CONSUMER_MGMT", types.ConsumerConfig{
 			Name: "all-consumer", Durable: "all-consumer", MaxDeliver: 7,
