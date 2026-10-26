@@ -265,6 +265,33 @@ func (j *NatsJetStream) ConsumerInfo(ctx context.Context, streamName, consumerNa
 	return consumer.CachedInfo(), nil
 }
 
+// CreateConsumer creates a consumer on a stream. Unlike CreateOrUpdateConsumer
+// it never changes an existing one: if a consumer with the same name but a
+// different configuration exists, the error matches jetstream.ErrConsumerExists
+// via errors.Is. An existing consumer with the same configuration is returned
+// as is. Callers use it to learn whether another process created the consumer
+// first.
+//
+// Like ConsumerInfo, it is a concrete method rather than part of the
+// EventStream interface.
+func (j *NatsJetStream) CreateConsumer(ctx context.Context, streamName string, cfg types.ConsumerConfig) (jetstream.Consumer, error) {
+	jsCfg, err := toJetStreamConsumerConfig(cfg)
+	if err != nil {
+		return nil, fmt.Errorf("failed to convert consumer config %s on stream %s: %w", cfg.Name, streamName, err)
+	}
+	consumer, err := j.js.CreateConsumer(ctx, streamName, jsCfg)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create consumer %s on stream %s: %w", cfg.Name, streamName, err)
+	}
+
+	j.logger.Debug("Consumer created",
+		"stream", streamName,
+		"consumer", cfg.Name,
+		"filter_subject", cfg.FilterSubject)
+
+	return consumer, nil
+}
+
 // UpdateConsumer updates the configuration of an existing consumer on a
 // stream. Unlike CreateOrUpdateConsumer it never creates one: a missing
 // consumer yields an error matching jetstream.ErrConsumerDoesNotExist (or
