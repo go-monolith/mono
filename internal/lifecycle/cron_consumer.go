@@ -44,6 +44,7 @@ const cronStartSequenceKey = "mono.cron-start-sequence"
 // occurrences.
 type cronConsumerStore interface {
 	ConsumerInfo(ctx context.Context, stream, consumer string) (*jetstream.ConsumerInfo, error)
+	CreateConsumer(ctx context.Context, stream string, cfg types.ConsumerConfig) (jetstream.Consumer, error)
 	UpdateConsumer(ctx context.Context, stream string, cfg types.ConsumerConfig) (jetstream.Consumer, error)
 	ResetConsumerToSequence(ctx context.Context, stream, consumer string, seq uint64) error
 }
@@ -68,9 +69,10 @@ var _ cronConsumerStore = (*eventbus.NatsJetStream)(nil)
 // consumer, and delivering them would run the job once per stored occurrence,
 // up to defaultCronMaxMsgsPerSubj times. They are skipped instead, including
 // one that was stored while no consumer existed, and their number is logged
-// once.
-// The consumer keeps deliver policy all, the policy earlier framework versions
-// send, so rolling back to one of them still starts.
+// once. The consumer keeps deliver policy all, the policy earlier framework
+// versions send, so rolling back to one of them still starts. When several
+// instances start at once, only one creates the consumer; the others update
+// it.
 func (lm *lifecycleManager) ensureCronConsumer(ctx context.Context, es types.EventStream, stream string, cfg types.ConsumerConfig, entry *types.ServiceEntry) (jetstream.Consumer, error) {
 	store, ok := es.(cronConsumerStore)
 	if !ok {
@@ -92,7 +94,18 @@ func (lm *lifecycleManager) ensureCronConsumer(ctx context.Context, es types.Eve
 		return nil, fmt.Errorf("failed to look up cron consumer %q: %w", cfg.Name, err)
 	}
 
-	return lm.createCronConsumer(ctx, es, store, stream, cfg, entry)
+	consumer, err := lm.createCronConsumer(ctx, es, store, stream, cfg, entry)
+	if !errors.Is(err, jetstream.ErrConsumerExists) {
+		return consumer, err
+	}
+
+	// Another instance created the consumer after the lookup, with its own
+	// start. Update that one instead of replacing it.
+	info, err = store.ConsumerInfo(ctx, stream, cfg.Name)
+	if err != nil {
+		return nil, fmt.Errorf("failed to look up cron consumer %q created by another instance: %w", cfg.Name, err)
+	}
+	return lm.updateCronConsumer(ctx, store, stream, cfg, info, entry)
 }
 
 // updateCronConsumer updates an existing cron consumer in place. It never
@@ -137,14 +150,17 @@ func (lm *lifecycleManager) updateCronConsumer(ctx context.Context, store cronCo
 	}
 
 	if interrupted {
-		if err := positionCronConsumer(ctx, store, stream, cfg, start); err != nil {
+		positioned, err := positionCronConsumer(ctx, store, stream, cfg, start)
+		if err != nil {
 			return nil, err
 		}
-		lm.logger.Info("Cron consumer positioned after an interrupted creation",
-			"service", entry.Name,
-			"stream", stream,
-			"consumer", cfg.Name,
-			"start_sequence", start)
+		if positioned {
+			lm.logger.Info("Cron consumer positioned after an interrupted creation",
+				"service", entry.Name,
+				"stream", stream,
+				"consumer", cfg.Name,
+				"start_sequence", start)
+		}
 	}
 	return consumer, nil
 }
@@ -164,19 +180,19 @@ func (lm *lifecycleManager) createCronConsumer(ctx context.Context, es types.Eve
 	if start > 1 {
 		cfg.Metadata = cronStartMetadata(start)
 	}
-	consumer, err := es.CreateOrUpdateConsumer(ctx, stream, cfg)
+	// Create-only: if another instance created the consumer with a different
+	// start in the meantime, this fails with ErrConsumerExists instead of
+	// overwriting it.
+	consumer, err := store.CreateConsumer(ctx, stream, cfg)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create cron consumer %q: %w", cfg.Name, err)
 	}
 
-	// Another instance may have created the consumer at the same time and
-	// already moved it forward; it is then left where it is.
 	positioned := false
-	if start > 1 && cronConsumerBefore(consumer, start) {
-		if err := positionCronConsumer(ctx, store, stream, cfg, start); err != nil {
+	if start > 1 {
+		if positioned, err = positionCronConsumer(ctx, store, stream, cfg, start); err != nil {
 			return nil, err
 		}
-		positioned = true
 	}
 
 	if positioned && stored > 0 {
@@ -196,23 +212,26 @@ func (lm *lifecycleManager) createCronConsumer(ctx context.Context, es types.Eve
 
 // positionCronConsumer resets a cron consumer to start and then removes the
 // start sequence recorded in its metadata. cfg is the configuration the
-// consumer was created or updated with.
-func positionCronConsumer(ctx context.Context, store cronConsumerStore, stream string, cfg types.ConsumerConfig, start uint64) error {
+// consumer was created or updated with. It re-reads the consumer first and
+// leaves one that has already reached start, for example because another
+// instance created it with the same start and positioned it, where it is; it
+// then reports false.
+func positionCronConsumer(ctx context.Context, store cronConsumerStore, stream string, cfg types.ConsumerConfig, start uint64) (bool, error) {
+	info, err := store.ConsumerInfo(ctx, stream, cfg.Name)
+	if err != nil {
+		return false, fmt.Errorf("failed to look up cron consumer %q before positioning it: %w", cfg.Name, err)
+	}
+	if info.Delivered.Stream+1 >= start {
+		return false, nil
+	}
 	if err := resetConsumerWithRetry(ctx, store, stream, cfg.Name, start); err != nil {
-		return fmt.Errorf("failed to position cron consumer %q at stream sequence %d: %w", cfg.Name, start, err)
+		return false, fmt.Errorf("failed to position cron consumer %q at stream sequence %d: %w", cfg.Name, start, err)
 	}
 	cfg.Metadata = nil
 	if _, err := store.UpdateConsumer(ctx, stream, cfg); err != nil {
-		return fmt.Errorf("failed to remove the start sequence of cron consumer %q: %w", cfg.Name, err)
+		return false, fmt.Errorf("failed to remove the start sequence of cron consumer %q: %w", cfg.Name, err)
 	}
-	return nil
-}
-
-// cronConsumerBefore reports whether a consumer has not yet reached start. A
-// consumer without cached info is treated as new.
-func cronConsumerBefore(consumer jetstream.Consumer, start uint64) bool {
-	info := consumer.CachedInfo()
-	return info == nil || info.Delivered.Stream+1 < start
+	return true, nil
 }
 
 // cronStreamPosition returns, from one snapshot of the cron stream, the number
