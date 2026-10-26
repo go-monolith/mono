@@ -215,23 +215,33 @@ func (lm *lifecycleManager) createCronConsumer(ctx context.Context, es types.Eve
 // consumer was created or updated with. It re-reads the consumer first and
 // leaves one that has already reached start, for example because another
 // instance created it with the same start and positioned it, where it is; it
-// then reports false.
+// then reports false, and still removes a start sequence the consumer carries,
+// which this instance may have written back after the other one removed it.
 func positionCronConsumer(ctx context.Context, store cronConsumerStore, stream string, cfg types.ConsumerConfig, start uint64) (bool, error) {
 	info, err := store.ConsumerInfo(ctx, stream, cfg.Name)
 	if err != nil {
 		return false, fmt.Errorf("failed to look up cron consumer %q before positioning it: %w", cfg.Name, err)
 	}
 	if info.Delivered.Stream+1 >= start {
+		if _, recorded := info.Config.Metadata[cronStartSequenceKey]; recorded {
+			return false, removeCronStartSequence(ctx, store, stream, cfg)
+		}
 		return false, nil
 	}
 	if err := resetConsumerWithRetry(ctx, store, stream, cfg.Name, start); err != nil {
 		return false, fmt.Errorf("failed to position cron consumer %q at stream sequence %d: %w", cfg.Name, start, err)
 	}
+	return true, removeCronStartSequence(ctx, store, stream, cfg)
+}
+
+// removeCronStartSequence updates a cron consumer with cfg minus its metadata,
+// which removes the recorded start sequence.
+func removeCronStartSequence(ctx context.Context, store cronConsumerStore, stream string, cfg types.ConsumerConfig) error {
 	cfg.Metadata = nil
 	if _, err := store.UpdateConsumer(ctx, stream, cfg); err != nil {
-		return false, fmt.Errorf("failed to remove the start sequence of cron consumer %q: %w", cfg.Name, err)
+		return fmt.Errorf("failed to remove the start sequence of cron consumer %q: %w", cfg.Name, err)
 	}
-	return true, nil
+	return nil
 }
 
 // cronStreamPosition returns, from one snapshot of the cron stream, the number

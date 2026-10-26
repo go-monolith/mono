@@ -31,7 +31,10 @@ type fakeCronStore struct {
 	infoErrs []error
 	// updateErrs are returned by successive UpdateConsumer calls.
 	updateErrs []error
-	createErr  error
+	// afterUpdate, when set, runs after each successful update, to model
+	// another instance acting in between.
+	afterUpdate func(f *fakeCronStore)
+	createErr   error
 	// peer, when set, is a consumer another instance created just before
 	// this one's create: a create finds it and fails with ErrConsumerExists
 	// if its metadata differs.
@@ -119,6 +122,9 @@ func (f *fakeCronStore) UpdateConsumer(_ context.Context, _ string, cfg types.Co
 		updated.Config.Durable = cfg.Durable
 		updated.Config.Metadata = cfg.Metadata
 		f.consumer = &updated
+	}
+	if f.afterUpdate != nil {
+		f.afterUpdate(f)
 	}
 	return &mockJetStreamConsumer{}, nil
 }
@@ -379,8 +385,13 @@ func TestEnsureCronConsumer(t *testing.T) {
 		if _, err := ensure(lm, store); err != nil {
 			t.Fatalf("ensureCronConsumer: %v", err)
 		}
-		if got, want := store.recorded(), []string{create}; !slices.Equal(got, want) {
+		// Not reset again; the start sequence the other instance has not
+		// removed yet is removed.
+		if got, want := store.recorded(), []string{create, updateAll}; !slices.Equal(got, want) {
 			t.Errorf("ops = %v, want %v", got, want)
+		}
+		if got := store.consumer.Config.Metadata; got != nil {
+			t.Errorf("metadata = %v, want none", got)
 		}
 		if got := logs(lm, "WARN"); len(got) != 0 {
 			t.Errorf("expected no warning, got %v", got)
@@ -417,6 +428,32 @@ func TestEnsureCronConsumer(t *testing.T) {
 		}
 		if got, want := store.recorded(), []string{create, updateAll}; !slices.Equal(got, want) {
 			t.Errorf("ops = %v, want %v", got, want)
+		}
+	})
+
+	// The other instance positions the consumer and removes the start
+	// sequence between this instance's lookup and its update, which writes
+	// the start sequence back.
+	t.Run("start sequence written back after another instance positioned the consumer is removed", func(t *testing.T) {
+		lm := newCronTestManager()
+		store := newFakeCronStore()
+		store.consumer = positioned(301, 0)
+		store.afterUpdate = func(f *fakeCronStore) {
+			f.consumer.Delivered.Stream = 300
+			f.afterUpdate = nil
+		}
+
+		if _, err := ensure(lm, store); err != nil {
+			t.Fatalf("ensureCronConsumer: %v", err)
+		}
+		if got, want := store.recorded(), []string{updateAll, updateAll}; !slices.Equal(got, want) {
+			t.Errorf("ops = %v, want %v", got, want)
+		}
+		if got := store.consumer.Config.Metadata; got != nil {
+			t.Errorf("metadata = %v, want none", got)
+		}
+		if got := logs(lm, "interrupted creation"); len(got) != 0 {
+			t.Errorf("expected no positioning log line, got %v", got)
 		}
 	})
 
