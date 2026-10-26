@@ -1033,26 +1033,31 @@ func (lm *lifecycleManager) setupCronService(ctx context.Context, entry *types.S
 		return nil
 	}
 
-	// Publish the schedule message. Rollup-by-subject makes re-publishing on
-	// every boot idempotent: a changed Schedule/Payload/TimeZone/TTL overwrites
-	// the prior schedule in place.
-	if err := lm.publishCronSchedule(ctx, es, entry); err != nil {
-		return fmt.Errorf("failed to publish cron schedule %q: %w", entry.Name, err)
-	}
-
 	// Durable pull consumer filtered on the concrete target subject so it never
-	// receives the internal schedule/control messages.
+	// receives the internal schedule/control messages. Durable makes the server
+	// keep it, and its position, regardless of inactivity; ensureCronConsumer
+	// decides the deliver policy and start position. It is provisioned before
+	// the schedule is published, so on a first deployment no occurrence can
+	// fire before the consumer's start position is taken.
 	consumerName := types.SanitizeConsumerName(module + "-" + entry.Name + "-cron")
 	consumerCfg := types.ConsumerConfig{
 		Name:          consumerName,
+		Durable:       consumerName,
 		FilterSubject: targetSubject,
 		AckPolicy:     types.AckExplicitPolicy,
 		AckWait:       defaultCronAckWait,
 		MaxDeliver:    defaultCronMaxDeliver,
 	}
-	consumer, err := es.CreateOrUpdateConsumer(ctx, streamName, consumerCfg)
+	consumer, err := lm.ensureCronConsumer(ctx, es, streamName, consumerCfg, entry)
 	if err != nil {
-		return fmt.Errorf("failed to create cron consumer %q: %w", consumerName, err)
+		return fmt.Errorf("failed to provision cron consumer %q: %w", consumerName, err)
+	}
+
+	// Publish the schedule message. Rollup-by-subject makes re-publishing on
+	// every boot idempotent: a changed Schedule/Payload/TimeZone/TTL overwrites
+	// the prior schedule in place.
+	if err := lm.publishCronSchedule(ctx, es, entry); err != nil {
+		return fmt.Errorf("failed to publish cron schedule %q: %w", entry.Name, err)
 	}
 
 	// Key the cancel func by a module-qualified, type-prefixed key so a cron

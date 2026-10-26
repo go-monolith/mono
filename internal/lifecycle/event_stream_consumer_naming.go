@@ -522,11 +522,17 @@ func (lm *lifecycleManager) markLegacyMigrationDone(ctx context.Context, entries
 	}
 }
 
+// consumerResetter moves a consumer's delivery position. eventConsumerStore
+// and cronConsumerStore both include it.
+type consumerResetter interface {
+	ResetConsumerToSequence(ctx context.Context, stream, consumer string, seq uint64) error
+}
+
 // resetConsumerWithRetry resets a consumer to seq, retrying transient failures
 // (see isTransientResetError) with a linear backoff. Any other error, including
 // a rejected reset (jetstream.ErrConsumerInvalidReset), is returned
 // immediately.
-func resetConsumerWithRetry(ctx context.Context, store eventConsumerStore, stream, consumer string, seq uint64) error {
+func resetConsumerWithRetry(ctx context.Context, store consumerResetter, stream, consumer string, seq uint64) error {
 	var err error
 	for attempt := 1; attempt <= legacyResetAttempts; attempt++ {
 		err = store.ResetConsumerToSequence(ctx, stream, consumer, seq)

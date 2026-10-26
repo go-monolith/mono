@@ -265,6 +265,34 @@ func (j *NatsJetStream) ConsumerInfo(ctx context.Context, streamName, consumerNa
 	return consumer.CachedInfo(), nil
 }
 
+// UpdateConsumer updates the configuration of an existing consumer on a
+// stream. Unlike CreateOrUpdateConsumer it never creates one: a missing
+// consumer yields an error matching jetstream.ErrConsumerDoesNotExist (or
+// jetstream.ErrConsumerNotFound) via errors.Is. Callers use it when creating
+// the consumer with the same configuration would be wrong, for example
+// because its deliver policy was copied from a consumer that may have just
+// been deleted.
+//
+// Like ConsumerInfo, it is a concrete method rather than part of the
+// EventStream interface.
+func (j *NatsJetStream) UpdateConsumer(ctx context.Context, streamName string, cfg types.ConsumerConfig) (jetstream.Consumer, error) {
+	jsCfg, err := toJetStreamConsumerConfig(cfg)
+	if err != nil {
+		return nil, fmt.Errorf("failed to convert consumer config %s on stream %s: %w", cfg.Name, streamName, err)
+	}
+	consumer, err := j.js.UpdateConsumer(ctx, streamName, jsCfg)
+	if err != nil {
+		return nil, fmt.Errorf("failed to update consumer %s on stream %s: %w", cfg.Name, streamName, err)
+	}
+
+	j.logger.Debug("Consumer updated",
+		"stream", streamName,
+		"consumer", cfg.Name,
+		"filter_subject", cfg.FilterSubject)
+
+	return consumer, nil
+}
+
 // DeleteConsumer deletes a consumer from a stream.
 func (j *NatsJetStream) DeleteConsumer(ctx context.Context, streamName, consumerName string) error {
 	if err := j.js.DeleteConsumer(ctx, streamName, consumerName); err != nil {

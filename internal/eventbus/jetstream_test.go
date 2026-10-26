@@ -1046,10 +1046,56 @@ func TestJetStream_ConsumerManagement(t *testing.T) {
 		}
 	})
 
+	t.Run("ResetConsumerToSequence past the last message delivers only new ones", func(t *testing.T) {
+		if _, err := js.CreateOrUpdateConsumer(ctx, "TEST_CONSUMER_MGMT", types.ConsumerConfig{
+			Name: "end-consumer", Durable: "end-consumer",
+		}); err != nil {
+			t.Fatalf("Failed to create consumer: %v", err)
+		}
+		if err := js.ResetConsumerToSequence(ctx, "TEST_CONSUMER_MGMT", "end-consumer", 6); err != nil {
+			t.Fatalf("ResetConsumerToSequence failed: %v", err)
+		}
+		info, err := js.ConsumerInfo(ctx, "TEST_CONSUMER_MGMT", "end-consumer")
+		if err != nil {
+			t.Fatalf("ConsumerInfo failed: %v", err)
+		}
+		if info.NumPending != 0 || info.Delivered.Stream != 5 {
+			t.Errorf("after reset to 6: pending=%d delivered=%d, want 0 and 5", info.NumPending, info.Delivered.Stream)
+		}
+		if err := js.DeleteConsumer(ctx, "TEST_CONSUMER_MGMT", "end-consumer"); err != nil {
+			t.Fatalf("DeleteConsumer failed: %v", err)
+		}
+	})
+
 	t.Run("ResetConsumerToSequence rejection is detectable", func(t *testing.T) {
 		err := js.ResetConsumerToSequence(ctx, "TEST_CONSUMER_MGMT", "new-consumer", 2)
 		if !errors.Is(err, jetstream.ErrConsumerInvalidReset) {
 			t.Errorf("expected ErrConsumerInvalidReset, got %v", err)
+		}
+	})
+
+	t.Run("UpdateConsumer updates and never creates", func(t *testing.T) {
+		consumer, err := js.UpdateConsumer(ctx, "TEST_CONSUMER_MGMT", types.ConsumerConfig{
+			Name: "all-consumer", Durable: "all-consumer", MaxDeliver: 7,
+		})
+		if err != nil {
+			t.Fatalf("UpdateConsumer failed: %v", err)
+		}
+		if got := consumer.CachedInfo().Config.MaxDeliver; got != 7 {
+			t.Errorf("MaxDeliver = %d, want 7", got)
+		}
+
+		_, err = js.UpdateConsumer(ctx, "TEST_CONSUMER_MGMT", types.ConsumerConfig{Name: "missing", Durable: "missing"})
+		if !errors.Is(err, jetstream.ErrConsumerDoesNotExist) && !errors.Is(err, jetstream.ErrConsumerNotFound) {
+			t.Errorf("expected a consumer-does-not-exist error, got %v", err)
+		}
+		if _, err := js.ConsumerInfo(ctx, "TEST_CONSUMER_MGMT", "missing"); !errors.Is(err, jetstream.ErrConsumerNotFound) {
+			t.Errorf("UpdateConsumer must not create the consumer, lookup got %v", err)
+		}
+
+		_, err = js.UpdateConsumer(ctx, "TEST_CONSUMER_MGMT", types.ConsumerConfig{Name: "all-consumer", AckPolicy: types.AckPolicy(99)})
+		if err == nil {
+			t.Error("expected an error for an invalid config")
 		}
 	})
 
