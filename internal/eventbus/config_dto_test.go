@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/go-monolith/mono/pkg/types"
+	"github.com/nats-io/nats.go/jetstream"
 )
 
 // TestToJetStreamStreamConfig tests stream config conversion
@@ -657,4 +658,33 @@ func TestToJetStreamConsumerConfig(t *testing.T) {
 			t.Errorf("expected 2 filter subjects, got %d", len(jsCfg.FilterSubjects))
 		}
 	})
+}
+
+func TestDeliverPolicyFromJetStream(t *testing.T) {
+	policies := []types.DeliverPolicy{
+		types.DeliverAllPolicy,
+		types.DeliverLastPolicy,
+		types.DeliverNewPolicy,
+		types.DeliverByStartSequencePolicy,
+		types.DeliverByStartTimePolicy,
+		types.DeliverLastPerSubjectPolicy,
+	}
+	for _, want := range policies {
+		// Round trip through the forward conversion.
+		jsCfg, err := toJetStreamConsumerConfig(types.ConsumerConfig{Name: "consumer", DeliverPolicy: want})
+		if err != nil {
+			t.Fatalf("toJetStreamConsumerConfig(%d): %v", want, err)
+		}
+		got, err := DeliverPolicyFromJetStream(jsCfg.DeliverPolicy)
+		if err != nil {
+			t.Fatalf("DeliverPolicyFromJetStream(%v): %v", jsCfg.DeliverPolicy, err)
+		}
+		if got != want {
+			t.Errorf("DeliverPolicyFromJetStream(%v) = %d, want %d", jsCfg.DeliverPolicy, got, want)
+		}
+	}
+
+	if _, err := DeliverPolicyFromJetStream(jetstream.DeliverPolicy(99)); err == nil {
+		t.Error("expected an error for an unknown deliver policy")
+	}
 }

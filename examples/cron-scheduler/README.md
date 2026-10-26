@@ -31,6 +31,9 @@ func (m *HeartbeatModule) RegisterServices(c mono.ServiceContainer) error {
   (not `@every`).
 - **Acknowledgement is framework-owned**: return `nil` to Ack the occurrence, or a non-nil error to
   Nak it (redelivered up to the consumer's `MaxDeliver`). Do **not** call `msg.Ack()` yourself.
+- **Restart-safe**: the consumer is durable, so a restart delivers only occurrences not yet
+  acknowledged. A consumer missing at startup is recreated after the occurrences already stored,
+  so it delivers only new ones, and the number it skipped is logged.
 - **Idempotent**: the schedule is (re)published on every startup, so changing the `Schedule`,
   `Payload`, `TimeZone`, or `TTL` and redeploying overwrites the live schedule in place.
 - **Retiring a cron service**: set `Deprecated: true` and deploy to purge the schedule (keeping the

@@ -313,6 +313,8 @@ func (container ServiceContainer) RegisterCronService(
 
 Registers a cron-scheduled service backed by the embedded NATS JetStream message scheduler (nats-server v2.14+). The schedule is registered **server-side**, so in a multi-node cluster exactly one message fires per occurrence (no client-side ticker, no leader election). Each occurrence is delivered through a durable pull consumer with explicit acknowledgement.
 
+The consumer keeps its position across restarts: an occurrence that fired while the application was down is delivered, and occurrences already handled are not delivered again (delivery is at-least-once, so an occurrence whose acknowledgement was lost at shutdown is). If the consumer is missing at startup (for example, deleted by an operator), it is recreated after the occurrences already stored, so it delivers only new ones; the number it skipped is logged as a warning.
+
 Requires JetStream (`WithJetStreamStorageDir(...)`); registering a cron service without JetStream fails fast at startup. Cron services are server-driven and have **no** consumer-side client (there is no `GetCronService`).
 
 **Parameters:**

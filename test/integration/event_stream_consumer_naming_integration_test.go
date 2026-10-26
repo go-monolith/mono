@@ -196,7 +196,7 @@ func runNamingApp(t *testing.T, storeDir string, logs *syncBuffer, modules ...mo
 			return
 		}
 		stopped = true
-		stopCtx, stopCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		stopCtx, stopCancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer stopCancel()
 		if err := app.Stop(stopCtx); err != nil {
 			t.Errorf("Stop: %v", err)

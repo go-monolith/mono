@@ -257,3 +257,28 @@ func toJetStreamConsumerConfig(cfg types.ConsumerConfig) (jetstream.ConsumerConf
 
 	return jsCfg, nil
 }
+
+// DeliverPolicyFromJetStream converts a JetStream deliver policy, as reported
+// in the info of an existing consumer, to the framework's DeliverPolicy. It is
+// the inverse of the deliver policy conversion in toJetStreamConsumerConfig.
+// Deliver policy cannot be changed on an existing consumer, so code that
+// updates a consumer it did not create in this run uses this to send the
+// policy the consumer already has. An unknown policy returns an error.
+func DeliverPolicyFromJetStream(policy jetstream.DeliverPolicy) (types.DeliverPolicy, error) {
+	switch policy {
+	case jetstream.DeliverAllPolicy:
+		return types.DeliverAllPolicy, nil
+	case jetstream.DeliverLastPolicy:
+		return types.DeliverLastPolicy, nil
+	case jetstream.DeliverNewPolicy:
+		return types.DeliverNewPolicy, nil
+	case jetstream.DeliverByStartSequencePolicy:
+		return types.DeliverByStartSequencePolicy, nil
+	case jetstream.DeliverByStartTimePolicy:
+		return types.DeliverByStartTimePolicy, nil
+	case jetstream.DeliverLastPerSubjectPolicy:
+		return types.DeliverLastPerSubjectPolicy, nil
+	default:
+		return 0, fmt.Errorf("unknown JetStream deliver policy %d", policy)
+	}
+}

@@ -6,6 +6,7 @@ package integration_test
 import (
 	"context"
 	"fmt"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -13,6 +14,10 @@ import (
 
 	"github.com/go-monolith/mono"
 )
+
+// cronScheduleNextHeader is the header the NATS scheduler sets on every
+// occurrence it fires.
+const cronScheduleNextHeader = "Nats-Schedule-Next"
 
 // cronTestModule registers a single cron service and records every delivered
 // occurrence. It can optionally fail the very first delivery (to exercise the
@@ -24,9 +29,10 @@ type cronTestModule struct {
 	eventBus  mono.EventBus
 	failFirst bool
 
-	mu       sync.Mutex
-	received [][]byte
-	subjects []string
+	mu          sync.Mutex
+	received    [][]byte
+	subjects    []string
+	occurrences []string // see handledOccurrences
 
 	invocations int64
 	acks        int64
@@ -67,6 +73,11 @@ func (m *cronTestModule) handle(_ context.Context, msg *mono.Msg) error {
 	m.mu.Lock()
 	m.received = append(m.received, msg.Data)
 	m.subjects = append(m.subjects, msg.Subject)
+	occurrence := string(msg.Data)
+	if next := msg.Header[cronScheduleNextHeader]; len(next) > 0 {
+		occurrence = next[0]
+	}
+	m.occurrences = append(m.occurrences, occurrence)
 	m.mu.Unlock()
 
 	if atomic.AddInt64(&m.acks, 1) >= m.threshold {
@@ -86,6 +97,16 @@ func (m *cronTestModule) waitForTicks(timeout time.Duration) bool {
 	case <-time.After(timeout):
 		return false
 	}
+}
+
+// handledOccurrences identifies every occurrence the handler completed, in
+// delivery order. A scheduled occurrence is identified by its
+// Nats-Schedule-Next header, which the server sets to the time of the next
+// one; a message a test published itself, by its payload.
+func (m *cronTestModule) handledOccurrences() []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return slices.Clone(m.occurrences)
 }
 
 func (m *cronTestModule) firstReceived() ([]byte, string, bool) {
