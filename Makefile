@@ -10,8 +10,10 @@ GOLANGCI_LINT := golangci-lint
 # Must also be built with a Go release at least as new as the toolchain CI
 # uses: golangci-lint parses the standard library from source, so an older
 # binary panics with "file requires newer Go version" the moment `stable`
-# advances. v2.13.1 is the first release built with go1.27.
-GOLANGCI_LINT_VERSION := v2.13.1
+# advances. v2.13.1 was the first release built with go1.27, but it cannot read
+# the export data of go1.27.3 ("export data version 5 is greater than maximum
+# supported version 4"); v2.15.0 can.
+GOLANGCI_LINT_VERSION := v2.15.0
 # Pinned golang.org/x/tools version for goimports, so formatting tooling
 # upgrades are deliberate rather than silently picked up via @latest.
 GOIMPORTS_VERSION := v0.48.0
