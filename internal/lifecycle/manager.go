@@ -70,6 +70,10 @@ type LifecycleManager interface {
 
 	// SubscriptionStats returns a snapshot of every pooled subscription.
 	SubscriptionStats() []types.SubscriptionStats
+
+	// SetServiceDiscovery enables the NATS services protocol responders for
+	// request-reply services; nil disables them. Must be called before Start.
+	SetServiceDiscovery(cfg *types.ServiceDiscoveryConfig)
 }
 
 // LifecycleEvent represents a module lifecycle event.

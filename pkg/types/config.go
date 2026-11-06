@@ -44,6 +44,11 @@ type MonoFrameworkConfig struct {
 	// are considered to disagree (clock skew) when they differ by more than it.
 	// Zero selects DefaultDeadlineSkewAllowance.
 	DeadlineSkewAllowance time.Duration
+	// ServiceDiscovery enables the NATS services protocol responders
+	// ($SRV.PING/INFO/STATS) for request-reply services; nil means disabled.
+	// See WithServiceDiscovery.
+	ServiceDiscovery *ServiceDiscoveryConfig
+
 	// SubscriptionStatsLogInterval is how often the framework logs, at Debug
 	// level, the SubscriptionStats of every pooled subscription while the
 	// application runs. Zero (the default) disables the log.
@@ -69,6 +74,30 @@ const DefaultShutdownDrainTimeout = 30 * time.Second
 
 // DefaultDeadlineSkewAllowance is the default DeadlineSkewAllowance: 250ms.
 const DefaultDeadlineSkewAllowance = 250 * time.Millisecond
+
+// DefaultServiceDiscoveryVersion is the version reported through the NATS
+// services protocol when ServiceDiscoveryConfig.Version is empty. The
+// protocol requires semantic versioning.
+const DefaultServiceDiscoveryVersion = "0.0.0"
+
+// ServiceDiscoveryConfig configures the NATS services protocol (the protocol
+// behind nats.go/micro and the `nats micro ls / info / stats` CLI) for the
+// application's request-reply services. One protocol service is exposed per
+// module that owns request-reply services, named after the module, with one
+// endpoint per request-reply service (subject services.<module>.<service>).
+// Per-endpoint stats carry the standard fields (requests, errors, last error,
+// processing time) plus mono-specific data (queue wait time, expired and
+// rejected requests, pending messages, pool state). Enabling it adds nine
+// subscriptions per module on the framework connection.
+type ServiceDiscoveryConfig struct {
+	// Version is the semantic version reported for every service; empty means
+	// DefaultServiceDiscoveryVersion. The protocol rejects non-semver values.
+	Version string
+	// Description is reported in INFO responses.
+	Description string
+	// Metadata is reported with the service identity.
+	Metadata map[string]string
+}
 
 // NATSOptions holds NATS server configuration.
 type NATSOptions struct {

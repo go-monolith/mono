@@ -63,6 +63,27 @@ func TestWithShutdownDrainTimeout(t *testing.T) {
 	})
 }
 
+func TestWithServiceDiscovery(t *testing.T) {
+	if mono.DefaultConfig().ServiceDiscovery != nil {
+		t.Fatal("service discovery should be off by default")
+	}
+	cfg := mono.DefaultConfig()
+	if err := mono.WithServiceDiscovery()(cfg); err != nil || cfg.ServiceDiscovery == nil || cfg.ServiceDiscovery.Version != "" {
+		t.Fatalf("WithServiceDiscovery(): %v %+v", err, cfg.ServiceDiscovery)
+	}
+	meta := map[string]string{"team": "payments"}
+	if err := mono.WithServiceDiscovery(mono.ServiceDiscoveryConfig{Version: "1.2.3-rc.1", Description: "d", Metadata: meta})(cfg); err != nil {
+		t.Fatalf("valid semver rejected: %v", err)
+	}
+	meta["team"] = "changed"
+	if cfg.ServiceDiscovery.Metadata["team"] != "payments" {
+		t.Fatal("metadata should be copied, not aliased")
+	}
+	if err := mono.WithServiceDiscovery(mono.ServiceDiscoveryConfig{Version: "v1.2"})(cfg); !errors.Is(err, monoerrors.ErrInvalidConfiguration) {
+		t.Fatalf("non-semver version: got %v, want ErrInvalidConfiguration", err)
+	}
+}
+
 func TestWithNATSClientOptions(t *testing.T) {
 	cfg := mono.DefaultConfig()
 	if cfg.NATSOptions.ClientName != "" || len(cfg.NATSOptions.ClientOptions) != 0 {

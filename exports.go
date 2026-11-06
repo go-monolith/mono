@@ -148,6 +148,10 @@ type QueueGroupHandler = types.QueueGroupHandler
 // QGHP is a queue group handler pair.
 type QGHP = types.QGHP
 
+// ServiceDiscoveryConfig configures the NATS services protocol responders
+// enabled with WithServiceDiscovery.
+type ServiceDiscoveryConfig = types.ServiceDiscoveryConfig
+
 // ServiceOptions bounds the worker pool that runs the handlers of one
 // request-reply, queue group or event consumer subscription on this instance.
 type ServiceOptions = types.ServiceOptions
