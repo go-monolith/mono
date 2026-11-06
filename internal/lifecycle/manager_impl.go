@@ -78,23 +78,32 @@ func NewLifecycleManager(
 }
 
 // SetDefaultServiceConcurrency sets the MaxConcurrency applied to every
-// request-reply, queue group and event consumer subscription whose own
-// ServiceOptions leave it at 0. Values below 1 select the built-in default
-// (types.DefaultMaxConcurrency). Must be called before Start.
+// request-reply service whose own ServiceOptions leave it at 0. Values below 1
+// select the built-in default (types.DefaultMaxConcurrency). Queue groups and
+// event consumers are serial unless their registration says otherwise and are
+// not affected. Must be called before Start.
 func (lm *lifecycleManager) SetDefaultServiceConcurrency(n int) {
 	lm.mu.Lock()
 	defer lm.mu.Unlock()
 	lm.defaultServiceConcurrency = n
 }
 
-// newPool creates the worker pool of one subscription from its options,
-// resolved against the framework default, and records it for shutdown.
-func (lm *lifecycleManager) newPool(opts types.ServiceOptions, logger types.Logger, kind, name, queue string) *workerpool.Pool {
-	lm.mu.Lock()
-	defaultConcurrency := lm.defaultServiceConcurrency
-	lm.mu.Unlock()
-
-	resolved := opts.Resolve(defaultConcurrency)
+// newPool creates the worker pool of one subscription from its options and
+// records it for shutdown. A pooled-by-default subscription (request-reply)
+// resolves a zero MaxConcurrency against the framework default; a
+// serial-by-default one (queue group, event consumer) resolves it to 1, so
+// its handler keeps seeing messages one at a time unless the registration
+// opted in to concurrency.
+func (lm *lifecycleManager) newPool(opts types.ServiceOptions, pooledByDefault bool, logger types.Logger, kind, name, queue string) *workerpool.Pool {
+	var resolved types.ServiceOptions
+	if pooledByDefault {
+		lm.mu.Lock()
+		defaultConcurrency := lm.defaultServiceConcurrency
+		lm.mu.Unlock()
+		resolved = opts.Resolve(defaultConcurrency)
+	} else {
+		resolved = opts.ResolveSerial()
+	}
 	pool := workerpool.New(resolved.MaxConcurrency, resolved.MaxPending)
 
 	lm.mu.Lock()
@@ -478,7 +487,7 @@ func (lm *lifecycleManager) setupNATSSubscriptions(ctx context.Context) error {
 				// Handlers run on a bounded worker pool: nats.go delivers the
 				// subscription's messages one at a time, so a slow call would
 				// otherwise delay every later call to this service.
-				pool := lm.newPool(entry.Options, logger, "request_reply", serviceName, queueGroup)
+				pool := lm.newPool(entry.Options, true, logger, "request_reply", serviceName, queueGroup)
 				reporter := newOverloadReporter(logger, "service", serviceName, "module", modName)
 
 				handleRequest := func(reqCtx context.Context, msg *types.Msg) {
@@ -542,8 +551,9 @@ func (lm *lifecycleManager) setupNATSSubscriptions(ctx context.Context) error {
 					eventBus := lm.eventBus
 					logger := lm.logger
 
-					// One bounded worker pool per queue group subscription.
-					pool := lm.newPool(pair.Options, logger, "queue_group", serviceName, queueGroup)
+					// One bounded worker pool per queue group subscription,
+					// serial unless the pair opted in to concurrency.
+					pool := lm.newPool(pair.Options, false, logger, "queue_group", serviceName, queueGroup)
 					reporter := newOverloadReporter(logger, "service", serviceName, "queueGroup", queueGroup)
 
 					sub, err := eventBus.QueueSubscribe(entry.Subject, queueGroup, func(reqCtx context.Context, msg *types.Msg) {
@@ -554,10 +564,14 @@ func (lm *lifecycleManager) setupNATSSubscriptions(ctx context.Context) error {
 						//
 						// If the ACK itself cannot be sent, the sender will
 						// time out and re-send, so the handler is skipped to
-						// avoid handling the message twice (best effort: a
-						// worker may already have picked it up).
+						// avoid handling the message twice. The job waits for
+						// the ACK outcome before deciding, so a worker that
+						// picks the message up right away cannot run ahead
+						// of a failed ACK.
+						ackDone := make(chan struct{})
 						var skip atomic.Bool
 						accepted := submitToPool(pool, eventBus, logger, reporter, msg, func() {
+							<-ackDone
 							if skip.Load() {
 								return
 							}
@@ -568,7 +582,11 @@ func (lm *lifecycleManager) setupNATSSubscriptions(ctx context.Context) error {
 									"error", err)
 							}
 						})
-						if !accepted || msg.Reply == "" {
+						if !accepted {
+							return
+						}
+						if msg.Reply == "" {
+							close(ackDone) // optimistic publish: nothing to ACK
 							return
 						}
 
@@ -580,6 +598,7 @@ func (lm *lifecycleManager) setupNATSSubscriptions(ctx context.Context) error {
 								"queueGroup", queueGroup,
 								"error", pubErr)
 						}
+						close(ackDone)
 					})
 					if err != nil {
 						return fmt.Errorf("failed to queue subscribe to %s (queue: %s): %w", entry.Subject, queueGroup, err)
@@ -634,10 +653,11 @@ func (lm *lifecycleManager) setupNATSSubscriptions(ctx context.Context) error {
 			consumerModule := consumer.Module.Name()
 			queueGroup := consumer.QueueGroup
 
-			// One bounded worker pool per event consumer subscription. Events
-			// carry no reply subject, so a full pool applies back-pressure
-			// instead of dropping them.
-			pool := lm.newPool(consumer.Options, logger, "event_consumer", eventName, queueGroup)
+			// One bounded worker pool per event consumer subscription, serial
+			// unless the registration opted in to concurrency. Events carry no
+			// reply subject, so a full pool applies back-pressure instead of
+			// dropping them.
+			pool := lm.newPool(consumer.Options, false, logger, "event_consumer", eventName, queueGroup)
 			reporter := newOverloadReporter(logger, "consumer_module", consumerModule, "event", eventName)
 
 			sub, err := eventBus.QueueSubscribe(consumer.EventDef.Subject, queueGroup, func(ctx context.Context, msg *types.Msg) {

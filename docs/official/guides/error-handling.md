@@ -121,7 +121,7 @@ func (m *OrderModule) handleProcessOrder(ctx context.Context, order *Order) erro
 
 ### Overloaded Services
 
-Request-reply, queue group and event consumer handlers run on a bounded worker pool per subscription. When every worker is busy and the pending queue is full, a request-reply call or an ACK-mode queue group send fails fast with `ErrServiceOverloaded` instead of waiting. The message was **not** handled, so the caller may retry; with several instances the retry usually lands on one with capacity.
+Request-reply, queue group and event consumer handlers run on a bounded worker pool per subscription (request-reply pools several workers by default; queue groups and event consumers have one worker unless they opt in). When every worker is busy and the pending queue is full, a request-reply call or an ACK-mode queue group send fails fast with `ErrServiceOverloaded` instead of waiting. The message was **not** handled, so the caller may retry; with several instances the retry usually lands on one with capacity.
 
 ```go
 resp, err := client.Call(ctx, data)

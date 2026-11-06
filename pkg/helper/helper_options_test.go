@@ -71,6 +71,19 @@ func TestRegisterTypedEventConsumerWithOptions(t *testing.T) {
 	})
 }
 
+func TestRegisterTypedRequestReplyService_ForwardsOptions(t *testing.T) {
+	mock := &mockServiceContainer{}
+	handler := func(_ context.Context, req testRequest, _ *types.Msg) (testRequest, error) { return req, nil }
+	err := helper.RegisterTypedRequestReplyService(mock, "echo", json.Unmarshal, json.Marshal, handler,
+		types.WithMaxConcurrency(3), types.WithMaxPending(9))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if mock.requestReplyOptions != (types.ServiceOptions{MaxConcurrency: 3, MaxPending: 9}) {
+		t.Fatalf("forwarded options = %+v, want {3 9}", mock.requestReplyOptions)
+	}
+}
+
 func TestRegisterTypedQueueGroupService_CarriesOptions(t *testing.T) {
 	mock := &mockServiceContainer{}
 	handler := func(_ context.Context, _ testRequest, _ *types.Msg) error { return nil }

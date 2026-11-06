@@ -93,6 +93,87 @@ func (passThroughChain) RunEventStreamConsumerRegistration(_ context.Context, en
 	return entry
 }
 
+// rebuildingChain models middleware written before ServiceOptions existed: it
+// rebuilds the registration and each QGHP pair with only the fields it knows.
+type rebuildingChain struct{ passThroughChain }
+
+func (rebuildingChain) RunServiceRegistration(_ context.Context, reg types.ServiceRegistration) types.ServiceRegistration {
+	out := types.ServiceRegistration{
+		Type: reg.Type, Name: reg.Name, ModuleName: reg.ModuleName, Subject: reg.Subject,
+		RequestHandler: reg.RequestHandler,
+	}
+	for _, pair := range reg.QueueHandlers {
+		out.QueueHandlers = append(out.QueueHandlers, types.QGHP{QueueGroup: pair.QueueGroup, Handler: pair.Handler})
+	}
+	return out
+}
+
+func TestApplyServiceRegistration_KeepsOptionsDroppedByMiddleware(t *testing.T) {
+	handler := func(_ context.Context, _ *types.Msg) error { return nil }
+
+	t.Run("queue group pair options survive a rebuilt pair", func(t *testing.T) {
+		container := newBoundContainer(t)
+		container.SetMiddlewareChain(rebuildingChain{})
+		err := container.RegisterQueueGroupService("process-order",
+			types.QGHP{QueueGroup: "ordered", Handler: handler, Options: types.ServiceOptions{MaxConcurrency: 1, MaxPending: 5}},
+			types.QGHP{QueueGroup: "parallel", Handler: handler, Options: types.ServiceOptions{MaxConcurrency: 8}},
+		)
+		if err != nil {
+			t.Fatalf("RegisterQueueGroupService failed: %v", err)
+		}
+		pairs := container.services["process-order"].QueueHandlers
+		if pairs[0].Options != (types.ServiceOptions{MaxConcurrency: 1, MaxPending: 5}) {
+			t.Fatalf("pair 0 Options = %+v, want {1 5}", pairs[0].Options)
+		}
+		if pairs[1].Options != (types.ServiceOptions{MaxConcurrency: 8}) {
+			t.Fatalf("pair 1 Options = %+v, want {8 0}", pairs[1].Options)
+		}
+	})
+
+	t.Run("request-reply options survive a rebuilt registration", func(t *testing.T) {
+		container := newBoundContainer(t)
+		container.SetMiddlewareChain(rebuildingChain{})
+		rr := func(_ context.Context, req *types.Msg) ([]byte, error) { return req.Data, nil }
+		if err := container.RegisterRequestReplyService("check-stock", rr, types.WithMaxConcurrency(1)); err != nil {
+			t.Fatalf("RegisterRequestReplyService failed: %v", err)
+		}
+		if got := container.services["check-stock"].Options.MaxConcurrency; got != 1 {
+			t.Fatalf("MaxConcurrency after rebuilding middleware = %d, want 1", got)
+		}
+	})
+
+	t.Run("a middleware that sets options wins", func(t *testing.T) {
+		entry := &types.ServiceEntry{
+			Options:       types.ServiceOptions{MaxConcurrency: 1},
+			QueueHandlers: []types.QGHP{{QueueGroup: "g", Handler: handler, Options: types.ServiceOptions{MaxConcurrency: 1}}},
+		}
+		reg := buildServiceRegistration(entry)
+		reg.Options = types.ServiceOptions{MaxConcurrency: 4}
+		reg.QueueHandlers = []types.QGHP{{QueueGroup: "g", Handler: handler, Options: types.ServiceOptions{MaxConcurrency: 6}}}
+		applyServiceRegistration(entry, reg)
+		if entry.Options.MaxConcurrency != 4 || entry.QueueHandlers[0].Options.MaxConcurrency != 6 {
+			t.Fatalf("explicit middleware options not applied: %+v / %+v", entry.Options, entry.QueueHandlers[0].Options)
+		}
+	})
+
+	t.Run("a renamed or added pair keeps its own (zero) options", func(t *testing.T) {
+		entry := &types.ServiceEntry{
+			QueueHandlers: []types.QGHP{{QueueGroup: "g", Handler: handler, Options: types.ServiceOptions{MaxConcurrency: 1}}},
+		}
+		reg := buildServiceRegistration(entry)
+		reg.QueueHandlers = []types.QGHP{
+			{QueueGroup: "renamed", Handler: handler},
+			{QueueGroup: "added", Handler: handler},
+		}
+		applyServiceRegistration(entry, reg)
+		for i, pair := range entry.QueueHandlers {
+			if pair.Options != (types.ServiceOptions{}) {
+				t.Fatalf("pair %d (%s) Options = %+v, want zero value", i, pair.QueueGroup, pair.Options)
+			}
+		}
+	})
+}
+
 func TestRegisterQueueGroupService_PairOptions(t *testing.T) {
 	handler := func(_ context.Context, _ *types.Msg) error { return nil }
 

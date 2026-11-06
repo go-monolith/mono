@@ -156,7 +156,8 @@ type ServiceOptions = types.ServiceOptions
 type ServiceOption = types.ServiceOption
 
 // WithMaxConcurrency sets the maximum number of handlers running at once for
-// one registration; 1 keeps message order.
+// one registration; 1 (the default for queue groups and event consumers)
+// keeps message order.
 var WithMaxConcurrency = types.WithMaxConcurrency
 
 // WithMaxPending sets the maximum number of messages waiting for a free

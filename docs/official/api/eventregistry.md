@@ -244,19 +244,20 @@ type EventConsumerOptions struct {
 }
 ```
 
-Event handlers run **concurrently by default** (see [Handler Concurrency](container.md#handler-concurrency-worker-pools)). Set `MaxConcurrency: 1` for a handler that must see events in publish order. Events carry no reply subject, so a full pool does not reject them: the subscription waits for a slot instead. Negative values fail registration.
+Event handlers are **serial by default**: one event at a time, in publish order, as with `RegisterEventConsumer`. Set `MaxConcurrency` above 1 to handle events concurrently when the handler does not depend on order (see [Handler Concurrency](container.md#handler-concurrency-worker-pools)). Events carry no reply subject, so a full pool does not reject them: the subscription waits for a slot instead. Negative values fail registration.
 
 **Example:**
 ```go
-func (m *ProjectionModule) RegisterEventConsumers(registry mono.EventRegistry) error {
+func (m *NotificationModule) RegisterEventConsumers(registry mono.EventRegistry) error {
     eventDef, found := registry.GetEventByName("OrderCreated", "v1", "order")
     if !found {
         return fmt.Errorf("event not found")
     }
 
-    // Projections must apply events in order: one at a time
-    return registry.RegisterEventConsumerWithOptions(eventDef, m.applyOrderCreated, m, mono.EventConsumerOptions{
-        ServiceOptions: mono.ServiceOptions{MaxConcurrency: 1, MaxPending: 1000},
+    // Each notification is independent and waits on an external API:
+    // handle up to 16 at once instead of one at a time.
+    return registry.RegisterEventConsumerWithOptions(eventDef, m.notifyOrderCreated, m, mono.EventConsumerOptions{
+        ServiceOptions: mono.ServiceOptions{MaxConcurrency: 16},
     })
 }
 ```

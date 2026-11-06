@@ -102,6 +102,20 @@ func TestServiceOptions_Resolve(t *testing.T) {
 	}
 }
 
+func TestServiceOptions_ResolveSerial(t *testing.T) {
+	got := (types.ServiceOptions{}).ResolveSerial()
+	if got.MaxConcurrency != 1 || got.MaxPending != types.DefaultMaxPendingFloor {
+		t.Fatalf("ResolveSerial() = %+v, want {1 %d}", got, types.DefaultMaxPendingFloor)
+	}
+	got = (types.ServiceOptions{MaxConcurrency: 4, MaxPending: 9}).ResolveSerial()
+	if got.MaxConcurrency != 4 || got.MaxPending != 9 {
+		t.Fatalf("ResolveSerial() with explicit values = %+v, want {4 9}", got)
+	}
+	if got := (types.ServiceOptions{}).ResolveWithDefault(-3); got.MaxConcurrency != 1 {
+		t.Fatalf("ResolveWithDefault(-3).MaxConcurrency = %d, want 1", got.MaxConcurrency)
+	}
+}
+
 func TestDefaultMaxConcurrency(t *testing.T) {
 	if got, want := types.DefaultMaxConcurrency(), runtime.GOMAXPROCS(0)*4; got != want {
 		t.Fatalf("DefaultMaxConcurrency() = %d, want %d", got, want)

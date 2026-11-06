@@ -521,6 +521,7 @@ func RegisterTypedRequestReplyService[Req any, Resp any](
 	unmarshalReq types.Unmarshaler,
 	marshalResp types.Marshaler,
 	handler types.TypedRequestReplyHandler[Req, Resp],
+	opts ...types.ServiceOption,
 ) error {
 	// Wrap the typed handler in a standard RequestReplyHandler
 	wrappedHandler := func(ctx context.Context, msg *types.Msg) ([]byte, error) {
@@ -542,7 +543,7 @@ func RegisterTypedRequestReplyService[Req any, Resp any](
 		return data, nil
 	}
 
-	return container.RegisterRequestReplyService(name, wrappedHandler)
+	return container.RegisterRequestReplyService(name, wrappedHandler, opts...)
 }
 
 // RegisterTypedQueueGroupService registers a type-safe queue group service

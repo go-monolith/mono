@@ -4468,12 +4468,12 @@ func TestLifecycleManager_QueueGroupHandler_ACKPublishError(t *testing.T) {
 	handlers[0](context.Background(), msg)
 
 	// The ACK failure is logged. The sender will time out and re-send, so the
-	// handler is skipped for this delivery (best effort: the worker that
-	// picked the message up checks the flag before running the handler).
+	// handler is skipped for this delivery: the worker waits for the ACK
+	// outcome before deciding, so it cannot run ahead of the failed ACK.
 	if !logger.hasErrorContaining("ACK") {
 		t.Error("Expected error to be logged for ACK publish failure")
 	}
-	// Give a worker time to pick the job up; it must observe the skip flag.
+	// Let the worker observe the outcome; it must not run the handler.
 	time.Sleep(50 * time.Millisecond)
 	if handlerCalled.Load() {
 		t.Error("Handler should be skipped when the ACK publish fails")

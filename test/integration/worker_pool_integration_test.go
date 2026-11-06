@@ -515,13 +515,50 @@ func (m *poolConsumerModule) RegisterEventConsumers(registry mono.EventRegistry)
 	return helper.RegisterTypedEventConsumerWithOptions(registry, poolTickEventDef, handler, m, *m.opts)
 }
 
-// TestWorkerPool_EventConsumersRunConcurrentlyByDefault checks that an event
-// consumer handles events concurrently unless told otherwise.
-func TestWorkerPool_EventConsumersRunConcurrentlyByDefault(t *testing.T) {
+// TestWorkerPool_EventConsumersSerialByDefault checks that an event consumer
+// registered without options still handles events one at a time, in publish
+// order, as before worker pools existed.
+func TestWorkerPool_EventConsumersSerialByDefault(t *testing.T) {
+	fw := newWorkerPoolApp(t)
+
+	const events = 50
+	emitter := &poolEmitterModule{}
+	consumer := &poolConsumerModule{name: "pool-consumer", delay: 500 * time.Microsecond}
+	for _, m := range []mono.Module{emitter, consumer} {
+		if err := fw.Register(m); err != nil {
+			t.Fatalf("Failed to register %s: %v", m.Name(), err)
+		}
+	}
+	startWorkerPoolApp(t, fw)
+
+	for i := 0; i < events; i++ {
+		if err := poolTickEventDef.Publish(emitter.eventBus, poolTickEvent{ID: i}, nil); err != nil {
+			t.Fatalf("publish %d: %v", i, err)
+		}
+	}
+	waitForCount(t, func() int { return len(consumer.tracker.finished()) }, events, 10*time.Second)
+
+	if consumer.tracker.max.Load() != 1 {
+		t.Fatalf("max observed concurrency %d, want 1 (events are serial by default)", consumer.tracker.max.Load())
+	}
+	for i, id := range consumer.tracker.finished() {
+		if id != i {
+			t.Fatalf("event %d was handled at position %d: order not kept", id, i)
+		}
+	}
+}
+
+// TestWorkerPool_EventConsumerOptsIntoConcurrency checks that an event
+// consumer handles events concurrently once its registration asks for it.
+func TestWorkerPool_EventConsumerOptsIntoConcurrency(t *testing.T) {
 	fw := newWorkerPoolApp(t)
 
 	emitter := &poolEmitterModule{}
-	consumer := &poolConsumerModule{name: "pool-consumer", delay: 50 * time.Millisecond}
+	consumer := &poolConsumerModule{
+		name:  "pool-consumer",
+		delay: 50 * time.Millisecond,
+		opts:  &mono.EventConsumerOptions{ServiceOptions: mono.ServiceOptions{MaxConcurrency: 8}},
+	}
 	for _, m := range []mono.Module{emitter, consumer} {
 		if err := fw.Register(m); err != nil {
 			t.Fatalf("Failed to register %s: %v", m.Name(), err)
@@ -539,6 +576,98 @@ func TestWorkerPool_EventConsumersRunConcurrentlyByDefault(t *testing.T) {
 
 	if consumer.tracker.max.Load() < 2 {
 		t.Fatalf("max observed concurrency %d, want >= 2", consumer.tracker.max.Load())
+	}
+}
+
+// TestWorkerPool_QueueGroupSerialByDefault checks that a queue group pair
+// registered without options handles messages one at a time, in order.
+func TestWorkerPool_QueueGroupSerialByDefault(t *testing.T) {
+	fw := newWorkerPoolApp(t)
+
+	const messages = 50
+	tracker := &concurrencyTracker{}
+	worker := &testModule{name: "pool-worker"}
+	worker.registerServicesFunc = func(container mono.ServiceContainer) error {
+		return container.RegisterQueueGroupService("plain", mono.QGHP{
+			QueueGroup: "plain-workers",
+			Handler: func(_ context.Context, msg *mono.Msg) error {
+				tracker.enter()
+				time.Sleep(500 * time.Microsecond)
+				id, _ := strconv.Atoi(string(msg.Data))
+				tracker.exit(id)
+				return nil
+			},
+		})
+	}
+	if err := fw.Register(worker); err != nil {
+		t.Fatalf("Failed to register module: %v", err)
+	}
+	startWorkerPoolApp(t, fw)
+
+	client, err := worker.container.GetQueueGroupService("plain")
+	if err != nil {
+		t.Fatalf("Failed to get client: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	for i := 0; i < messages; i++ {
+		if err := client.Send(ctx, []byte(strconv.Itoa(i))); err != nil {
+			t.Fatalf("send %d: %v", i, err)
+		}
+	}
+	waitForCount(t, func() int { return len(tracker.finished()) }, messages, 10*time.Second)
+
+	if tracker.max.Load() != 1 {
+		t.Fatalf("max observed concurrency %d, want 1 (queue groups are serial by default)", tracker.max.Load())
+	}
+	for i, id := range tracker.finished() {
+		if id != i {
+			t.Fatalf("message %d was handled at position %d: order not kept", id, i)
+		}
+	}
+}
+
+// TestWorkerPool_QueueGroupOptsIntoConcurrency checks that a queue group pair
+// handles messages concurrently once its Options ask for it.
+func TestWorkerPool_QueueGroupOptsIntoConcurrency(t *testing.T) {
+	fw := newWorkerPoolApp(t)
+
+	tracker := &concurrencyTracker{}
+	worker := &testModule{name: "pool-worker"}
+	worker.registerServicesFunc = func(container mono.ServiceContainer) error {
+		return container.RegisterQueueGroupService("parallel", mono.QGHP{
+			QueueGroup: "parallel-workers",
+			Handler: func(_ context.Context, msg *mono.Msg) error {
+				tracker.enter()
+				time.Sleep(50 * time.Millisecond)
+				id, _ := strconv.Atoi(string(msg.Data))
+				tracker.exit(id)
+				return nil
+			},
+			Options: mono.ServiceOptions{MaxConcurrency: 8},
+		})
+	}
+	if err := fw.Register(worker); err != nil {
+		t.Fatalf("Failed to register module: %v", err)
+	}
+	startWorkerPoolApp(t, fw)
+
+	client, err := worker.container.GetQueueGroupService("parallel")
+	if err != nil {
+		t.Fatalf("Failed to get client: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	const messages = 8
+	for i := 0; i < messages; i++ {
+		if err := client.Send(ctx, []byte(strconv.Itoa(i))); err != nil {
+			t.Fatalf("send %d: %v", i, err)
+		}
+	}
+	waitForCount(t, func() int { return len(tracker.finished()) }, messages, 10*time.Second)
+
+	if tracker.max.Load() < 2 {
+		t.Fatalf("max observed concurrency %d, want >= 2", tracker.max.Load())
 	}
 }
 

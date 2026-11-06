@@ -176,7 +176,7 @@ type QGHP struct {
 }
 ```
 
-Each pair is its own NATS subscription with its own worker pool, so `Options` is set per pair. Set `MaxConcurrency: 1` for a handler that must see messages in order (see [Handler Concurrency](#handler-concurrency-worker-pools)).
+Each pair is its own NATS subscription with its own worker pool, so `Options` is set per pair. Queue groups are serial by default (one message at a time, in arrival order); set `MaxConcurrency` above 1 to handle messages concurrently (see [Handler Concurrency](#handler-concurrency-worker-pools)).
 
 **Handler Signature:**
 ```go
@@ -226,14 +226,14 @@ container.RegisterQueueGroupService("process-orders",
 )
 ```
 
-**Ordered Processing Example:**
+**Concurrent Processing Example:**
 ```go
-// One message at a time, in arrival order, with room for a burst of 500
-container.RegisterQueueGroupService("ledger-postings",
+// Up to 16 notifications at once on this instance (each is independent)
+container.RegisterQueueGroupService("send-notification",
     mono.QGHP{
-        QueueGroup: "ledger-writers",
-        Handler:    m.handlePosting,
-        Options:    mono.ServiceOptions{MaxConcurrency: 1, MaxPending: 500},
+        QueueGroup: "notification-workers",
+        Handler:    m.handleNotification,
+        Options:    mono.ServiceOptions{MaxConcurrency: 16},
     },
 )
 ```
@@ -656,7 +656,8 @@ type ServiceOptions struct {
 
 | Setting | Default | How to change |
 |---------|---------|---------------|
-| `MaxConcurrency` | `runtime.GOMAXPROCS(0) * 4` | per registration: `mono.WithMaxConcurrency(n)` / `QGHP.Options` / `EventConsumerOptions`; app-wide: `mono.WithDefaultServiceConcurrency(n)` |
+| `MaxConcurrency` (request-reply) | `runtime.GOMAXPROCS(0) * 4` | per registration: `mono.WithMaxConcurrency(n)`; app-wide: `mono.WithDefaultServiceConcurrency(n)` |
+| `MaxConcurrency` (queue group, event consumer) | `1` (serial, in arrival order) | per registration: `QGHP.Options` / `EventConsumerOptions` |
 | `MaxPending` | `16 × MaxConcurrency`, at least 256 | per registration: `mono.WithMaxPending(n)` / `QGHP.Options` / `EventConsumerOptions` |
 
 **When both are full:**
@@ -668,7 +669,7 @@ type ServiceOptions struct {
 | Queue group send in optimistic publish mode, event | Not rejected: the subscription waits for a free slot (back-pressure through the NATS client buffer). |
 
 {% hint style="warning" %}
-**Behaviour change:** handlers now run concurrently by default. A handler that relies on seeing messages in order, or that uses unsynchronized state, must set `MaxConcurrency: 1`. To keep the previous serial behaviour everywhere, use `mono.WithDefaultServiceConcurrency(1)`.
+**Behaviour change for request-reply:** request-reply handlers now run concurrently by default (each request is independent). A request-reply handler that uses unsynchronized state must set `mono.WithMaxConcurrency(1)`, or the application can keep the previous serial behaviour with `mono.WithDefaultServiceConcurrency(1)`. Queue group and event consumer handlers stay serial and in order unless their registration opts in with `MaxConcurrency` above 1.
 {% endhint %}
 
 The pending default is generous on purpose: before worker pools a burst simply queued in the NATS client buffer and callers never saw an overload error. Lower `MaxPending` where failing fast matters more than absorbing bursts. A bound on the count cannot bound the wait: with a slow handler, a queued request may still wait longer than the caller's timeout. Size `MaxPending` for the burst you want to absorb and `MaxConcurrency` to drain it.
@@ -694,7 +695,8 @@ Workers are started on demand and exit when idle, so an idle service holds no go
 | Max Message Size | 1 MB |
 | Queue Group Batch Size | 10 |
 | Stream Consumer Batch | 100 |
-| Max Concurrency | `runtime.GOMAXPROCS(0) * 4` |
+| Max Concurrency (request-reply) | `runtime.GOMAXPROCS(0) * 4` |
+| Max Concurrency (queue group, event consumer) | `1` |
 | Max Pending | `16 × MaxConcurrency` (minimum 256) |
 
 ## Examples

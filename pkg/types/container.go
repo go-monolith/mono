@@ -132,8 +132,9 @@ type QGHP struct {
 	QueueGroup string            // Queue group name (e.g., "high-priority-workers")
 	Handler    QueueGroupHandler // Handler function for this queue group
 	// Options bounds the worker pool of this queue group's subscription on
-	// this instance. Zero values select the framework defaults; set
-	// MaxConcurrency to 1 for a handler that must see messages in order.
+	// this instance. Queue groups are serial by default (MaxConcurrency 0
+	// means 1), so messages are handled one at a time in arrival order; set
+	// MaxConcurrency above 1 to handle them concurrently.
 	Options ServiceOptions
 }
 

@@ -266,7 +266,23 @@ func buildServiceRegistration(entry *types.ServiceEntry) types.ServiceRegistrati
 func applyServiceRegistration(entry *types.ServiceEntry, reg types.ServiceRegistration) {
 	// Apply handler modifications (middleware may have wrapped them)
 	entry.RequestHandler = reg.RequestHandler
-	entry.Options = reg.Options
+
+	// Worker pool options: middleware written before they existed rebuilds
+	// the registration (or each QGHP pair) without them, which would silently
+	// turn an explicit MaxConcurrency 1 into the pooled default. A zero
+	// Options coming back is therefore read as "untouched" and the original
+	// is kept; a middleware that wants to change them sets a non-zero value.
+	if reg.Options != (types.ServiceOptions{}) {
+		entry.Options = reg.Options
+	}
+	for i := range reg.QueueHandlers {
+		if reg.QueueHandlers[i].Options != (types.ServiceOptions{}) || i >= len(entry.QueueHandlers) {
+			continue
+		}
+		if original := entry.QueueHandlers[i]; original.QueueGroup == reg.QueueHandlers[i].QueueGroup {
+			reg.QueueHandlers[i].Options = original.Options
+		}
+	}
 	entry.QueueHandlers = reg.QueueHandlers
 	entry.StreamConsumerHandler = reg.StreamHandler
 

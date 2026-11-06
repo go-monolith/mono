@@ -553,7 +553,7 @@ mono.WithQueueGroupOptimisticWindow(1 * time.Second)
 func WithDefaultServiceConcurrency(n int) MonoFrameworkOption
 ```
 
-Sets how many handlers may run at once for each request-reply, queue group and event consumer subscription that does not set its own `MaxConcurrency` (see [Handler Concurrency](container.md#handler-concurrency-worker-pools)). Pass `1` to run every handler serially, as versions before worker pools did; a single registration can still override it with `mono.WithMaxConcurrency`.
+Sets how many handlers may run at once for each request-reply service that does not set its own `MaxConcurrency` (see [Handler Concurrency](container.md#handler-concurrency-worker-pools)). Pass `1` to run request-reply handlers serially, as versions before worker pools did; a single registration can still override it with `mono.WithMaxConcurrency`. Queue group and event consumer handlers are serial unless their own registration opts in, so this option does not affect them.
 
 | Property | Value |
 |----------|-------|

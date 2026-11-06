@@ -282,21 +282,21 @@ if err != nil {
 - ✓ Load-balanced (multiple workers)
 - ✓ Horizontal scalability
 - ✓ Good latency (message queued quickly)
-- ✓ Handlers run concurrently on a bounded worker pool per queue group
+- ✓ Serial and in order by default; can opt in to a bounded worker pool per queue group
 - ✗ No response (fire-and-forget)
 - ✗ No persistence
 - ✗ Error handling limited (worker processes independently)
 
 #### Concurrency and Ordering
 
-Messages of one queue group are handled concurrently by default, so a handler that must see them in order sets `MaxConcurrency: 1` on its pair:
+Messages of one queue group are handled one at a time, in arrival order, by default. A handler whose messages are independent can opt in to concurrency on its pair:
 
 ```go
-container.RegisterQueueGroupService("ledger-postings",
+container.RegisterQueueGroupService("send-notification",
     mono.QGHP{
-        QueueGroup: "ledger-writers",
-        Handler:    m.handlePosting,
-        Options:    mono.ServiceOptions{MaxConcurrency: 1, MaxPending: 500},
+        QueueGroup: "notification-workers",
+        Handler:    m.handleNotification,
+        Options:    mono.ServiceOptions{MaxConcurrency: 16},
     },
 )
 ```

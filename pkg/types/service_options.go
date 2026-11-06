@@ -42,16 +42,25 @@ const DefaultMaxPendingFloor = 256
 // Such a message is dropped only if it is still buffered when the instance
 // has finished shutting down.
 //
-// Zero values select the framework defaults; see DefaultMaxConcurrency and
-// DefaultMaxPending. Negative values are rejected at registration.
+// Zero values select the defaults, which differ by kind of subscription:
+//
+//   - Request-reply services are pooled by default: MaxConcurrency 0 means
+//     WithDefaultServiceConcurrency, or runtime.GOMAXPROCS(0)*4 when that is
+//     not set. Each request is independent, so running them concurrently is
+//     safe.
+//   - Queue group services and event consumers stay serial by default:
+//     MaxConcurrency 0 means 1, so a handler sees its messages one at a time
+//     in arrival order, as before worker pools existed. Opt in to concurrency
+//     per registration by setting MaxConcurrency.
+//
+// MaxPending 0 means DefaultMaxPending(MaxConcurrency). Negative values are
+// rejected at registration.
 type ServiceOptions struct {
 	// MaxConcurrency is the maximum number of handlers running at once for
 	// this subscription on this instance.
 	//
-	// 0 selects the framework default (WithDefaultServiceConcurrency, or
-	// runtime.GOMAXPROCS(0)*4 when that is not set). 1 runs handlers one at
-	// a time in arrival order, as versions before this option did (those
-	// versions had no MaxPending bound, though); use it for handlers that
+	// 0 selects the default for the kind of subscription (see ServiceOptions).
+	// 1 runs handlers one at a time in arrival order; use it for handlers that
 	// rely on message order or on unsynchronized state.
 	MaxConcurrency int
 
@@ -118,18 +127,33 @@ func (o ServiceOptions) Validate() error {
 	return nil
 }
 
-// Resolve replaces zero fields with their defaults. defaultConcurrency is the
-// framework-wide default from WithDefaultServiceConcurrency; when it is not
-// positive, DefaultMaxConcurrency is used. The result has both fields
-// positive.
+// Resolve replaces zero fields with the defaults of a pooled-by-default
+// subscription (request-reply). defaultConcurrency is the framework-wide
+// default from WithDefaultServiceConcurrency; when it is not positive,
+// DefaultMaxConcurrency is used. The result has both fields positive.
 func (o ServiceOptions) Resolve(defaultConcurrency int) ServiceOptions {
+	if defaultConcurrency <= 0 {
+		defaultConcurrency = DefaultMaxConcurrency()
+	}
+	return o.ResolveWithDefault(defaultConcurrency)
+}
+
+// ResolveSerial replaces zero fields with the defaults of a serial-by-default
+// subscription (queue group, event consumer): a zero MaxConcurrency becomes 1.
+func (o ServiceOptions) ResolveSerial() ServiceOptions {
+	return o.ResolveWithDefault(1)
+}
+
+// ResolveWithDefault replaces a zero MaxConcurrency with defaultConcurrency
+// (raised to 1 if lower) and a zero MaxPending with DefaultMaxPending of the
+// resulting concurrency. The result has both fields positive.
+func (o ServiceOptions) ResolveWithDefault(defaultConcurrency int) ServiceOptions {
 	resolved := o
 	if resolved.MaxConcurrency <= 0 {
-		if defaultConcurrency > 0 {
-			resolved.MaxConcurrency = defaultConcurrency
-		} else {
-			resolved.MaxConcurrency = DefaultMaxConcurrency()
+		if defaultConcurrency < 1 {
+			defaultConcurrency = 1
 		}
+		resolved.MaxConcurrency = defaultConcurrency
 	}
 	if resolved.MaxPending <= 0 {
 		resolved.MaxPending = DefaultMaxPending(resolved.MaxConcurrency)
@@ -137,10 +161,10 @@ func (o ServiceOptions) Resolve(defaultConcurrency int) ServiceOptions {
 	return resolved
 }
 
-// DefaultMaxConcurrency returns the built-in default for
-// ServiceOptions.MaxConcurrency: runtime.GOMAXPROCS(0)*4. Handlers mostly
-// wait on I/O (a database, another service), so more workers than CPUs keeps
-// the CPUs busy while some of them block.
+// DefaultMaxConcurrency returns the built-in default MaxConcurrency of a
+// request-reply service: runtime.GOMAXPROCS(0)*4. Handlers mostly wait on I/O
+// (a database, another service), so more workers than CPUs keeps the CPUs busy
+// while some of them block.
 func DefaultMaxConcurrency() int {
 	return runtime.GOMAXPROCS(0) * 4
 }
@@ -169,6 +193,8 @@ type EventConsumerOptions struct {
 	QueueGroup string
 
 	// ServiceOptions bounds the worker pool of this consumer's subscription.
-	// Set MaxConcurrency to 1 for a handler that must see events in order.
+	// Event consumers are serial by default (MaxConcurrency 0 means 1), so
+	// events are handled one at a time in publish order; set MaxConcurrency
+	// above 1 to handle them concurrently.
 	ServiceOptions
 }

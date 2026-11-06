@@ -28,10 +28,11 @@ type MonoFrameworkConfig struct {
 	QueueGroupOptimisticWindow time.Duration
 
 	// DefaultServiceConcurrency is the MaxConcurrency applied to every
-	// request-reply, queue group and event consumer subscription whose own
-	// ServiceOptions leave it at 0. When 0 (default), runtime.GOMAXPROCS(0)*4
-	// is used. Set it to 1 to run every handler serially, as versions before
-	// worker pools did.
+	// request-reply service whose own ServiceOptions leave it at 0. When 0
+	// (default), runtime.GOMAXPROCS(0)*4 is used. Set it to 1 to run
+	// request-reply handlers serially, as versions before worker pools did.
+	// Queue group services and event consumers are serial unless their own
+	// registration sets MaxConcurrency, so this default does not affect them.
 	DefaultServiceConcurrency int
 }
 

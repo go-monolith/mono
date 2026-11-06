@@ -293,6 +293,67 @@ func TestWorkerPool_StopWaitsForInFlightHandlers(t *testing.T) {
 	})
 }
 
+// TestWorkerPool_SerialByDefaultForQueueGroupsAndEvents checks that a queue
+// group pair and an event consumer registered without options get a pool of
+// one worker (serial, in order) even when the framework default is higher,
+// while a request-reply service gets the framework default.
+func TestWorkerPool_SerialByDefaultForQueueGroupsAndEvents(t *testing.T) {
+	logger := &mockLogger{}
+	reg := registry.NewModuleRegistry(logger)
+	pluginReg := registry.NewPluginRegistry(logger)
+	eventBus := newMockEventBus()
+	eventReg := newMockEventRegistry()
+	eventReg.consumerEntries = []types.EventConsumerEntry{{
+		EventDef: types.BaseEventDefinition{
+			Name: "TestEvent", Version: "v1", ModuleName: "test-producer",
+			Subject: "events.test-producer.v1.test-event",
+		},
+		Handler:    func(context.Context, *types.Msg) error { return nil },
+		Module:     &mockModule{name: "consumer-module"},
+		QueueGroup: "consumers",
+	}}
+
+	serviceModule := &mockModuleWithServices{
+		mockModule: mockModule{name: "service-module"},
+		serviceEntries: []*types.ServiceEntry{
+			{
+				Name: "rr", Type: types.ServiceTypeRequestReply,
+				Subject:        "services.service-module.rr",
+				RequestHandler: func(context.Context, *types.Msg) ([]byte, error) { return nil, nil },
+				QueueGroup:     "service-module",
+			},
+			{
+				Name: "qg", Type: types.ServiceTypeQueueGroup,
+				Subject: "services.service-module.qg",
+				QueueHandlers: []types.QGHP{{
+					QueueGroup: "workers",
+					Handler:    func(context.Context, *types.Msg) error { return nil },
+				}},
+			},
+		},
+	}
+	if err := reg.Register(serviceModule); err != nil {
+		t.Fatal(err)
+	}
+
+	lm := NewLifecycleManager(reg, pluginReg, eventBus, eventReg, logger, 0)
+	lm.SetDefaultServiceConcurrency(7)
+	if err := lm.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = lm.Stop(context.Background()) }()
+
+	if !logger.hasEntryContaining("kind request_reply name rr queue_group rr max_concurrency 7 ") {
+		t.Error("request-reply pool should use the framework default of 7")
+	}
+	if !logger.hasEntryContaining("kind queue_group name qg queue_group workers max_concurrency 1 ") {
+		t.Error("queue group pool should be serial by default")
+	}
+	if !logger.hasEntryContaining("kind event_consumer name TestEvent queue_group consumers max_concurrency 1 ") {
+		t.Error("event consumer pool should be serial by default")
+	}
+}
+
 // TestWorkerPool_QueueGroupOverloadReply checks that a queue group message
 // rejected by a full pool gets an error response instead of an ACK, so the
 // sender can tell it was not accepted.

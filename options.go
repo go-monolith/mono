@@ -511,14 +511,17 @@ func WithQueueGroupOptimisticWindow(window time.Duration) MonoFrameworkOption {
 }
 
 // WithDefaultServiceConcurrency sets the number of handlers that may run at
-// once for each request-reply, queue group and event consumer subscription
-// whose own options leave MaxConcurrency at 0.
+// once for each request-reply service whose own options leave MaxConcurrency
+// at 0.
 //
 // nats.go delivers a subscription's messages one at a time, so the framework
 // runs handlers on a bounded worker pool per subscription (see ServiceOptions).
-// Without this option the pool size is runtime.GOMAXPROCS(0)*4. Pass 1 to run
-// every handler serially, as versions before worker pools did; a single
-// registration can still override the default with WithMaxConcurrency.
+// Without this option a request-reply pool holds runtime.GOMAXPROCS(0)*4
+// workers. Pass 1 to run request-reply handlers serially, as versions before
+// worker pools did; a single registration can still override the default with
+// WithMaxConcurrency. Queue group services and event consumers are serial
+// unless their own registration sets MaxConcurrency, so this default does not
+// affect them.
 //
 // The value must be at least 1.
 //
