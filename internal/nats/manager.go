@@ -4,9 +4,11 @@ package nats
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/url"
 	"runtime/debug"
+	"strings"
 	"sync"
 	"time"
 
@@ -291,9 +293,10 @@ func (m *natsManager) Start(ctx context.Context) error {
 
 	// Create client connection
 	var conn *nats.Conn
+	clientOpts := m.clientOptions()
 	if m.config.UseInProcessConn {
 		// Use in-process connection via net.Pipe
-		conn, err = nats.Connect("", nats.InProcessServer(ns))
+		conn, err = nats.Connect("", append([]nats.Option{nats.InProcessServer(ns)}, clientOpts...)...)
 		if err != nil {
 			ns.Shutdown()
 			m.server = nil
@@ -307,7 +310,7 @@ func (m *natsManager) Start(ctx context.Context) error {
 	} else {
 		// Use TCP connection
 		clientURL := fmt.Sprintf("nats://%s:%d", m.config.Host, m.config.Port)
-		conn, err = nats.Connect(clientURL)
+		conn, err = nats.Connect(clientURL, clientOpts...)
 		if err != nil {
 			ns.Shutdown()
 			m.server = nil
@@ -410,6 +413,84 @@ func (m *natsManager) Stop(ctx context.Context) error {
 
 	m.logger.Info("NATS server stopped successfully")
 	return nil
+}
+
+// clientOptions returns the nats.go options for the framework's client
+// connection: the framework defaults first (connection name, async error
+// handler that routes slow-consumer and other client errors to the framework
+// logger, connection event handlers, drain timeout), then the options the
+// application supplied through WithClientOptions, so those can override.
+// nats.go runs all these handlers on one asynchronous callback goroutine, so
+// a slow logger delays every later callback.
+func (m *natsManager) clientOptions() []nats.Option {
+	name := m.config.ClientName
+	if name == "" {
+		name = DefaultClientName
+	}
+	opts := []nats.Option{
+		nats.Name(name),
+		nats.ErrorHandler(m.handleClientError),
+		nats.DisconnectErrHandler(func(_ *nats.Conn, err error) {
+			if err != nil {
+				m.logger.Warn("NATS client disconnected", "error", err)
+				return
+			}
+			m.logger.Info("NATS client disconnected")
+		}),
+		nats.ReconnectHandler(func(nc *nats.Conn) {
+			m.logger.Info("NATS client reconnected", "url", nc.ConnectedUrl())
+		}),
+		nats.ClosedHandler(func(nc *nats.Conn) {
+			// LastError keeps the last async error (a slow consumer, for
+			// example) until a reconnect clears it, so it does not mean the
+			// close itself failed; only report other errors.
+			if err := nc.LastError(); err != nil && !errors.Is(err, nats.ErrSlowConsumer) {
+				m.logger.Warn("NATS client connection closed", "error", err)
+				return
+			}
+			m.logger.Info("NATS client connection closed")
+		}),
+		nats.DrainTimeout(connDrainTimeout),
+	}
+	return append(opts, m.config.ClientOptions...)
+}
+
+// handleClientError is the async error callback of the framework's client
+// connection. Without it nats.go prints client errors unstructured to stderr.
+// A slow consumer (the subscription's pending buffer was full and messages
+// were dropped) is logged at Error with the subject, queue group, the module
+// and service derived from a service subject, and the pending and dropped
+// counts; nats.go reports it once per episode, with Dropped() carrying the
+// total.
+func (m *natsManager) handleClientError(_ *nats.Conn, sub *nats.Subscription, err error) {
+	fields := []any{"error", err}
+	if sub != nil {
+		fields = append(fields, "subject", sub.Subject, "queue_group", sub.Queue)
+		if module, service, ok := parseServiceSubject(sub.Subject); ok {
+			fields = append(fields, "module", module, "service", service)
+		}
+		if pendingMsgs, pendingBytes, perr := sub.Pending(); perr == nil {
+			fields = append(fields, "pending_msgs", pendingMsgs, "pending_bytes", pendingBytes)
+		}
+		if dropped, derr := sub.Dropped(); derr == nil {
+			fields = append(fields, "dropped", dropped)
+		}
+	}
+	if errors.Is(err, nats.ErrSlowConsumer) {
+		m.logger.Error("NATS slow consumer: subscription pending buffer full, messages dropped", fields...)
+		return
+	}
+	m.logger.Error("NATS client error", fields...)
+}
+
+// parseServiceSubject extracts module and service names from a
+// services.<module>.<service> subject.
+func parseServiceSubject(subject string) (module, service string, ok bool) {
+	parts := strings.Split(subject, ".")
+	if len(parts) == 3 && parts[0] == "services" {
+		return parts[1], parts[2], true
+	}
+	return "", "", false
 }
 
 // connDrainTimeout bounds how long Stop waits for the client connection to

@@ -164,6 +164,14 @@ var WithMaxConcurrency = types.WithMaxConcurrency
 // worker for one registration.
 var WithMaxPending = types.WithMaxPending
 
+// WithPendingLimits sets the NATS client buffer limits (messages, bytes) of
+// one registration's subscription; -1 means unlimited.
+var WithPendingLimits = types.WithPendingLimits
+
+// SubscriptionStats is a snapshot of one framework-managed NATS subscription
+// and the worker pool behind it, as returned by MonoApplication.SubscriptionStats.
+type SubscriptionStats = types.SubscriptionStats
+
 // QueueGroupServiceClient is a client for queue group services.
 type QueueGroupServiceClient = types.QueueGroupServiceClient
 

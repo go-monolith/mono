@@ -661,6 +661,7 @@ type ServiceOptions struct {
 | `MaxConcurrency` (request-reply) | `runtime.GOMAXPROCS(0) * 4` | per registration: `mono.WithMaxConcurrency(n)`; app-wide: `mono.WithDefaultServiceConcurrency(n)` |
 | `MaxConcurrency` (queue group, event consumer) | `1` (serial, in arrival order) | per registration: `QGHP.Options` / `EventConsumerOptions` |
 | `MaxPending` | `16 × MaxConcurrency`, at least 256 | per registration: `mono.WithMaxPending(n)` / `QGHP.Options` / `EventConsumerOptions` |
+| `PendingMsgs` / `PendingBytes` (NATS client buffer behind the pool) | request-reply: `10000` / `16 MB`; queue group, event consumer: nats.go defaults (`500000` / `64 MB`) | per registration: `mono.WithPendingLimits(msgs, bytes)` / `QGHP.Options` / `EventConsumerOptions`; `-1` = unlimited |
 
 **When both are full:**
 
@@ -674,7 +675,7 @@ type ServiceOptions struct {
 **Behaviour change for request-reply:** request-reply handlers now run concurrently by default (each request is independent). A request-reply handler that uses unsynchronized state must set `mono.WithMaxConcurrency(1)`, or the application can keep the previous serial behaviour with `mono.WithDefaultServiceConcurrency(1)`. Queue group and event consumer handlers stay serial and in order unless their registration opts in with `MaxConcurrency` above 1.
 {% endhint %}
 
-The pending default is generous on purpose: before worker pools a burst simply queued in the NATS client buffer and callers never saw an overload error. Lower `MaxPending` where failing fast matters more than absorbing bursts. A bound on the count cannot bound the wait: with a slow handler, a queued request may still wait longer than the caller's timeout. Size `MaxPending` for the burst you want to absorb and `MaxConcurrency` to drain it.
+The NATS client buffer sits behind the pool: messages wait there before the subscription callback hands them to the pool. For request-reply the callback does not wait for the pool (a request with a reply subject is answered "overloaded" at once), so that buffer only fills when the dispatcher falls behind the socket; a drop there is a slow consumer (logged, counted in `SubscriptionStats().Dropped`) and surfaces to the caller as a timeout, not `ErrServiceOverloaded`. For queue groups and event consumers it is the back-pressure reservoir when the pool is full, so its default is left at nats.go's. The pending default is generous on purpose: before worker pools a burst simply queued in the NATS client buffer and callers never saw an overload error. Lower `MaxPending` where failing fast matters more than absorbing bursts. A bound on the count cannot bound the wait: with a slow handler, a queued request may still wait longer than the caller's timeout. Size `MaxPending` for the burst you want to absorb and `MaxConcurrency` to drain it.
 
 Workers are started on demand and exit when idle, so an idle service holds no goroutines. Stream consumers, event stream consumers and cron services pull messages in their own loops and are not affected.
 

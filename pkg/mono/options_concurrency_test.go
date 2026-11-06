@@ -10,6 +10,7 @@ import (
 	"github.com/go-monolith/mono"
 	monoerrors "github.com/go-monolith/mono/pkg/errors"
 	"github.com/go-monolith/mono/pkg/types"
+	"github.com/nats-io/nats.go"
 )
 
 func TestWithShutdownDrainTimeout(t *testing.T) {
@@ -60,6 +61,41 @@ func TestWithShutdownDrainTimeout(t *testing.T) {
 			t.Fatalf("error should explain the cross-field rule, got %v", err)
 		}
 	})
+}
+
+func TestWithNATSClientOptions(t *testing.T) {
+	cfg := mono.DefaultConfig()
+	if cfg.NATSOptions.ClientName != "" || len(cfg.NATSOptions.ClientOptions) != 0 {
+		t.Fatalf("defaults should leave client name/options empty: %+v", cfg.NATSOptions)
+	}
+	if err := mono.WithNATSClientName("orders-api")(cfg); err != nil || cfg.NATSOptions.ClientName != "orders-api" {
+		t.Fatalf("WithNATSClientName: %v %q", err, cfg.NATSOptions.ClientName)
+	}
+	if err := mono.WithNATSClientName("")(cfg); !errors.Is(err, monoerrors.ErrInvalidConfiguration) {
+		t.Fatalf("empty name: got %v, want ErrInvalidConfiguration", err)
+	}
+	if err := mono.WithNATSClientOptions(nats.ReconnectWait(time.Second), nats.PingInterval(10*time.Second))(cfg); err != nil {
+		t.Fatalf("WithNATSClientOptions: %v", err)
+	}
+	if len(cfg.NATSOptions.ClientOptions) != 2 {
+		t.Fatalf("client options = %d, want 2", len(cfg.NATSOptions.ClientOptions))
+	}
+	if err := mono.WithNATSClientOptions(nil)(cfg); !errors.Is(err, monoerrors.ErrInvalidConfiguration) {
+		t.Fatalf("nil option: got %v, want ErrInvalidConfiguration", err)
+	}
+}
+
+func TestWithSubscriptionStatsLogInterval(t *testing.T) {
+	cfg := mono.DefaultConfig()
+	if cfg.SubscriptionStatsLogInterval != 0 {
+		t.Fatal("stats log should be off by default")
+	}
+	if err := mono.WithSubscriptionStatsLogInterval(30 * time.Second)(cfg); err != nil || cfg.SubscriptionStatsLogInterval != 30*time.Second {
+		t.Fatalf("WithSubscriptionStatsLogInterval: %v %s", err, cfg.SubscriptionStatsLogInterval)
+	}
+	if err := mono.WithSubscriptionStatsLogInterval(-time.Second)(cfg); !errors.Is(err, monoerrors.ErrInvalidConfiguration) {
+		t.Fatalf("negative interval: got %v, want ErrInvalidConfiguration", err)
+	}
 }
 
 func TestWithDeadlineSkewAllowance(t *testing.T) {

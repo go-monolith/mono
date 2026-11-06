@@ -3,6 +3,8 @@ package types
 import (
 	"fmt"
 	"runtime"
+
+	"github.com/nats-io/nats.go"
 )
 
 // DefaultMaxPendingFactor is the multiplier applied to MaxConcurrency to
@@ -73,7 +75,32 @@ type ServiceOptions struct {
 	// callers wait; size MaxPending for the burst you want to absorb and
 	// keep MaxConcurrency high enough to drain it.
 	MaxPending int
+
+	// PendingMsgs and PendingBytes are the nats.go pending limits of the
+	// subscription: how many messages (and bytes) the NATS client buffers
+	// for it before it drops messages as a slow consumer. They sit behind
+	// the worker pool: the pool is the primary load-shedding mechanism, the
+	// client buffer is the last resort, and a drop there surfaces as a
+	// caller timeout, not ErrServiceOverloaded.
+	//
+	// 0 selects the default: DefaultRequestReplyPendingMsgs/Bytes for
+	// request-reply services (whose callback does not wait for the pool when
+	// the request carries a reply subject, so a large buffer only hides a
+	// backlog), and nats.go's own defaults (500,000 messages, 64 MB) for
+	// queue groups and event consumers, whose buffer is the back-pressure
+	// reservoir when their pool is full. -1 means unlimited. Values below -1
+	// are rejected.
+	PendingMsgs  int
+	PendingBytes int
 }
+
+// DefaultRequestReplyPendingMsgs is the default PendingMsgs of a request-reply
+// subscription.
+const DefaultRequestReplyPendingMsgs = 10_000
+
+// DefaultRequestReplyPendingBytes is the default PendingBytes of a
+// request-reply subscription: 16 MB.
+const DefaultRequestReplyPendingBytes = 16 * 1024 * 1024
 
 // ServiceOption configures ServiceOptions. Options are applied in order; the
 // last one wins when two set the same field.
@@ -103,6 +130,20 @@ func WithMaxPending(n int) ServiceOption {
 	}
 }
 
+// WithPendingLimits sets ServiceOptions.PendingMsgs and PendingBytes for one
+// registration: the NATS client buffer behind the worker pool. -1 means
+// unlimited for that dimension.
+//
+// Example:
+//
+//	container.RegisterRequestReplyService("check-stock", handler, mono.WithPendingLimits(1000, 4<<20))
+func WithPendingLimits(msgs, bytes int) ServiceOption {
+	return func(o *ServiceOptions) {
+		o.PendingMsgs = msgs
+		o.PendingBytes = bytes
+	}
+}
+
 // ApplyServiceOptions builds a ServiceOptions from functional options. Zero
 // values are kept as zero so the framework defaults are applied later.
 func ApplyServiceOptions(opts ...ServiceOption) ServiceOptions {
@@ -124,7 +165,42 @@ func (o ServiceOptions) Validate() error {
 	if o.MaxPending < 0 {
 		return fmt.Errorf("MaxPending must be >= 0 (0 = framework default), got %d", o.MaxPending)
 	}
+	if o.PendingMsgs < -1 {
+		return fmt.Errorf("PendingMsgs must be >= -1 (0 = default, -1 = unlimited), got %d", o.PendingMsgs)
+	}
+	if o.PendingBytes < -1 {
+		return fmt.Errorf("PendingBytes must be >= -1 (0 = default, -1 = unlimited), got %d", o.PendingBytes)
+	}
 	return nil
+}
+
+// PendingLimits returns the nats.go pending limits to apply for this
+// registration and whether any should be applied at all. requestReply selects
+// the request-reply defaults for zero fields; for other kinds nothing is
+// applied when both fields are zero, and a single zero field takes nats.go's
+// own default for that dimension (nats.go rejects a limit of 0, so the
+// framework never passes one).
+func (o ServiceOptions) PendingLimits(requestReply bool) (msgs, bytes int, apply bool) {
+	msgs, bytes = o.PendingMsgs, o.PendingBytes
+	if requestReply {
+		if msgs == 0 {
+			msgs = DefaultRequestReplyPendingMsgs
+		}
+		if bytes == 0 {
+			bytes = DefaultRequestReplyPendingBytes
+		}
+		return msgs, bytes, true
+	}
+	if msgs == 0 && bytes == 0 {
+		return 0, 0, false
+	}
+	if msgs == 0 {
+		msgs = nats.DefaultSubPendingMsgsLimit
+	}
+	if bytes == 0 {
+		bytes = nats.DefaultSubPendingBytesLimit
+	}
+	return msgs, bytes, true
 }
 
 // Resolve replaces zero fields with the defaults of a pooled-by-default

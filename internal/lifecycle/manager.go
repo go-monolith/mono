@@ -64,6 +64,12 @@ type LifecycleManager interface {
 	// handler decides that the caller's deadline has passed. Values <= 0 select
 	// types.DefaultDeadlineSkewAllowance. Must be called before Start.
 	SetDeadlineSkewAllowance(d time.Duration)
+	// SetStatsLogInterval sets the period of the Debug log that reports
+	// SubscriptionStats while running; 0 disables it. Must be called before Start.
+	SetStatsLogInterval(d time.Duration)
+
+	// SubscriptionStats returns a snapshot of every pooled subscription.
+	SubscriptionStats() []types.SubscriptionStats
 }
 
 // LifecycleEvent represents a module lifecycle event.

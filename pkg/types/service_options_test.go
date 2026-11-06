@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/go-monolith/mono/pkg/types"
+	"github.com/nats-io/nats.go"
 )
 
 func TestApplyServiceOptions(t *testing.T) {
@@ -138,4 +139,48 @@ func TestDefaultMaxPending(t *testing.T) {
 			t.Errorf("DefaultMaxPending(%d) = %d, want %d", tt.concurrency, got, tt.want)
 		}
 	}
+}
+
+func TestServiceOptions_PendingLimits(t *testing.T) {
+	t.Run("request-reply defaults", func(t *testing.T) {
+		msgs, bytes, apply := (types.ServiceOptions{}).PendingLimits(true)
+		if !apply || msgs != types.DefaultRequestReplyPendingMsgs || bytes != types.DefaultRequestReplyPendingBytes {
+			t.Fatalf("got %d/%d apply=%v", msgs, bytes, apply)
+		}
+	})
+	t.Run("other kinds apply nothing by default", func(t *testing.T) {
+		if _, _, apply := (types.ServiceOptions{}).PendingLimits(false); apply {
+			t.Fatal("zero options must not apply limits for queue groups/events")
+		}
+	})
+	t.Run("explicit values and unlimited", func(t *testing.T) {
+		msgs, bytes, apply := (types.ServiceOptions{PendingMsgs: 100, PendingBytes: -1}).PendingLimits(false)
+		if !apply || msgs != 100 || bytes != -1 {
+			t.Fatalf("got %d/%d apply=%v", msgs, bytes, apply)
+		}
+		msgs, bytes, _ = (types.ServiceOptions{PendingMsgs: 100}).PendingLimits(true)
+		if msgs != 100 || bytes != types.DefaultRequestReplyPendingBytes {
+			t.Fatalf("request-reply with explicit msgs: got %d/%d", msgs, bytes)
+		}
+		// Queue group / event with one dimension: the other is never 0.
+		msgs, bytes, apply = (types.ServiceOptions{PendingBytes: 1 << 20}).PendingLimits(false)
+		if !apply || msgs != nats.DefaultSubPendingMsgsLimit || bytes != 1<<20 {
+			t.Fatalf("single dimension: got %d/%d apply=%v", msgs, bytes, apply)
+		}
+	})
+	t.Run("validation and option", func(t *testing.T) {
+		if err := (types.ServiceOptions{PendingMsgs: -2}).Validate(); err == nil {
+			t.Fatal("PendingMsgs -2 must be rejected")
+		}
+		if err := (types.ServiceOptions{PendingBytes: -2}).Validate(); err == nil {
+			t.Fatal("PendingBytes -2 must be rejected")
+		}
+		if err := (types.ServiceOptions{PendingMsgs: -1, PendingBytes: -1}).Validate(); err != nil {
+			t.Fatalf("-1 (unlimited) must be valid: %v", err)
+		}
+		got := types.ApplyServiceOptions(types.WithPendingLimits(5, 6))
+		if got.PendingMsgs != 5 || got.PendingBytes != 6 {
+			t.Fatalf("WithPendingLimits = %+v", got)
+		}
+	})
 }
