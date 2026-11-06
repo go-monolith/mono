@@ -286,11 +286,8 @@ func TestWorkerPool_StopWaitsForInFlightHandlers(t *testing.T) {
 	})
 
 	t.Run("gives up after the drain timeout with a background context", func(t *testing.T) {
-		previous := drainTimeout
-		drainTimeout = 200 * time.Millisecond
-		defer func() { drainTimeout = previous }()
-
 		f := newBlockingRequestReplyFixture(t, types.ServiceOptions{}, 0)
+		f.lm.SetDrainTimeout(200 * time.Millisecond)
 		defer close(f.release)
 		f.send("reply")
 		f.waitStarted(t)
@@ -302,7 +299,7 @@ func TestWorkerPool_StopWaitsForInFlightHandlers(t *testing.T) {
 		if elapsed := time.Since(start); elapsed > 3*time.Second {
 			t.Fatalf("Stop took %s with a 200ms drain timeout and a stuck handler", elapsed)
 		}
-		if !f.logger.hasWarnContaining("handlers still running") {
+		if !f.logger.hasWarnContaining("Shutdown drain incomplete") {
 			t.Error("expected a warning that handlers were still running")
 		}
 	})
@@ -322,7 +319,7 @@ func TestWorkerPool_StopWaitsForInFlightHandlers(t *testing.T) {
 		if elapsed := time.Since(start); elapsed > 3*time.Second {
 			t.Fatalf("Stop took %s with a 100ms context", elapsed)
 		}
-		if !f.logger.hasWarnContaining("handlers still running") {
+		if !f.logger.hasWarnContaining("Shutdown drain incomplete") {
 			t.Error("expected a warning that handlers were still running")
 		}
 	})

@@ -37,16 +37,15 @@ type lifecycleManager struct {
 	shutdownOnce               sync.Once
 	runtimeCtx                 context.Context
 	cancelRuntime              context.CancelFunc
+	fetchCtx                   context.Context               // parent of every fetch loop; cancelled first at shutdown, before the runtime context
+	cancelFetch                context.CancelFunc            // cancels fetchCtx
+	loopWG                     sync.WaitGroup                // fetch loop goroutines (stream, event stream, cron)
+	drainTimeout               time.Duration                 // Stop's budget for draining and in-flight handlers (0 = default)
 	streamConsumers            map[string]context.CancelFunc // cancel funcs for stream consumer fetch loops
 	queueGroupOptimisticWindow time.Duration                 // Optimistic publish window for queue groups
 	defaultServiceConcurrency  int                           // MaxConcurrency for subscriptions that leave it at 0 (0 = built-in default)
 	pools                      []*workerpool.Pool            // worker pools of request-reply, queue group and event consumer subscriptions
 }
-
-// drainTimeout bounds how long Stop waits for subscriptions to drain and for
-// in-flight handlers to finish before modules are stopped. A variable so
-// tests can shorten it.
-var drainTimeout = 5 * time.Second
 
 // NewLifecycleManager creates a new lifecycle manager
 func NewLifecycleManager(
@@ -59,6 +58,10 @@ func NewLifecycleManager(
 ) LifecycleManager {
 	// Create runtime context for graceful shutdown
 	runtimeCtx, cancelRuntime := context.WithCancel(context.Background()) //nolint:gosec // G118: cancelRuntime is stored in lm.cancelRuntime and called in shutdown
+	// The fetch context is independent of the runtime context: Stop cancels
+	// it first so fetch loops stop taking new batches while in-flight handlers
+	// keep a live runtime context.
+	fetchCtx, cancelFetch := context.WithCancel(context.Background()) //nolint:gosec // G118: cancelFetch is stored in lm.cancelFetch and called in shutdown
 
 	return &lifecycleManager{
 		registry:                   reg,
@@ -72,6 +75,8 @@ func NewLifecycleManager(
 		shutdownCh:                 make(chan struct{}),
 		runtimeCtx:                 runtimeCtx,
 		cancelRuntime:              cancelRuntime,
+		fetchCtx:                   fetchCtx,
+		cancelFetch:                cancelFetch,
 		streamConsumers:            make(map[string]context.CancelFunc),
 		queueGroupOptimisticWindow: queueGroupOptimisticWindow,
 	}
@@ -86,6 +91,55 @@ func (lm *lifecycleManager) SetDefaultServiceConcurrency(n int) {
 	lm.mu.Lock()
 	defer lm.mu.Unlock()
 	lm.defaultServiceConcurrency = n
+}
+
+// SetDrainTimeout sets Stop's budget for draining subscriptions and waiting for
+// in-flight handlers. Values <= 0 select types.DefaultShutdownDrainTimeout.
+func (lm *lifecycleManager) SetDrainTimeout(d time.Duration) {
+	lm.mu.Lock()
+	defer lm.mu.Unlock()
+	lm.drainTimeout = d
+}
+
+// drainBudget returns the configured drain timeout, or the default.
+func (lm *lifecycleManager) drainBudget() time.Duration {
+	lm.mu.RLock()
+	defer lm.mu.RUnlock()
+	if lm.drainTimeout > 0 {
+		return lm.drainTimeout
+	}
+	return types.DefaultShutdownDrainTimeout
+}
+
+// handlerContext returns the context handed to handlers: the runtime context,
+// which stays live until the drain has finished at shutdown.
+func (lm *lifecycleManager) handlerContext() context.Context {
+	lm.mu.RLock()
+	defer lm.mu.RUnlock()
+	if lm.runtimeCtx != nil {
+		return lm.runtimeCtx
+	}
+	return context.Background()
+}
+
+// newLoopContext returns a cancellable child of the fetch context for one
+// fetch loop and registers the loop goroutine with loopWG; the loop must call
+// loopDone when it returns. A manager built without NewLifecycleManager (tests)
+// gets a fetch context on first use.
+func (lm *lifecycleManager) newLoopContext() (context.Context, context.CancelFunc) {
+	lm.mu.Lock()
+	if lm.fetchCtx == nil {
+		lm.fetchCtx, lm.cancelFetch = context.WithCancel(context.Background()) //nolint:gosec // G118: cancelFetch is stored and called in shutdown
+	}
+	parent := lm.fetchCtx
+	lm.mu.Unlock()
+	lm.loopWG.Add(1)
+	return context.WithCancel(parent)
+}
+
+// loopDone marks a fetch loop goroutine as finished.
+func (lm *lifecycleManager) loopDone() {
+	lm.loopWG.Done()
 }
 
 // newPool creates the worker pool of one subscription from its options and
@@ -721,13 +775,15 @@ func (lm *lifecycleManager) setupNATSSubscriptions(ctx context.Context) error {
 func (lm *lifecycleManager) Stop(ctx context.Context) error {
 	lm.logger.Info("Stopping all modules")
 
-	// Cancel runtime context to signal all handlers to stop
-	lm.cancelRuntime()
-
-	// Teardown NATS subscriptions first
+	// 1. Stop taking new messages and wait for in-flight handlers, with the
+	//    runtime context still live so they can finish their work.
 	if err := lm.teardownNATSSubscriptions(ctx); err != nil {
 		lm.logger.Error("Error tearing down NATS subscriptions", "error", err)
 	}
+
+	// 2. Only now cancel the runtime context: anything still running after the
+	//    drain budget is told to stop, and channel routers exit.
+	lm.cancelRuntime()
 
 	// Get modules in reverse dependency order
 	ordered, err := registry.ResolveDependencies(lm.registry)
@@ -851,46 +907,57 @@ func (lm *lifecycleManager) stopMiddlewareModule(ctx context.Context, mw types.M
 	return nil
 }
 
-// teardownNATSSubscriptions drains and unsubscribes all NATS subscriptions
+// teardownNATSSubscriptions stops the framework from taking new messages and
+// waits for the work already accepted to finish.
+//
+// It cancels the fetch context (stream, event stream and cron loops stop
+// fetching; a blocked Fetch returns after at most Fetch.Timeout) and drains
+// every subscription, then waits, within one drain budget (the Stop context
+// bounded by the configured drain timeout), until the subscriptions are
+// invalid (nats.go's Drain returns before the buffered messages have been
+// delivered), the worker pools have run their in-flight and queued handlers,
+// and the loop goroutines have returned. The runtime context is not cancelled
+// here, so handlers finish with a live context. What has not finished when
+// the budget runs out is counted and logged.
 func (lm *lifecycleManager) teardownNATSSubscriptions(ctx context.Context) error {
 	lm.logger.Debug("Tearing down NATS subscriptions")
 
-	// Cancel all stream consumer loops first (no deletion - durable!)
+	// One budget for everything below.
+	drainCtx, cancelDrain := context.WithTimeout(ctx, lm.drainBudget())
+	defer cancelDrain()
+
+	// Stop fetch loops from taking new batches (no deletion - durable!).
 	lm.mu.RLock()
 	streamConsumers := make(map[string]context.CancelFunc, len(lm.streamConsumers))
 	for k, v := range lm.streamConsumers {
 		streamConsumers[k] = v
 	}
-	lm.mu.RUnlock()
-
-	for name, cancel := range streamConsumers {
-		lm.logger.Debug("Stopping stream consumer", "service", name)
-		cancel()
-	}
-
-	lm.mu.RLock()
+	cancelFetch := lm.cancelFetch
 	subscriptions := make(map[string][]types.Subscription, len(lm.subscriptions))
 	for k, v := range lm.subscriptions {
 		subscriptions[k] = v
 	}
 	lm.mu.RUnlock()
 
-	// One budget for both waits: the subscription drain and, after it, the
-	// in-flight handlers on the worker pools.
-	drainCtx, cancelDrain := context.WithTimeout(ctx, drainTimeout)
-	defer cancelDrain()
+	if cancelFetch != nil {
+		cancelFetch()
+	}
+	for name, cancel := range streamConsumers {
+		lm.logger.Debug("Stopping stream consumer", "service", name)
+		cancel()
+	}
 
-	// Drain all subscriptions concurrently. nats.go's Drain returns as soon as
-	// the unsubscribe is sent, while the messages already buffered are still
-	// being delivered to the callback, so wait until each subscription is no
-	// longer valid: that is when its buffered messages have all been handed
-	// to the worker pools.
-	var wg sync.WaitGroup
-	for moduleName, subs := range subscriptions {
-		for _, sub := range subs {
-			wg.Add(1)
+	// Drain all subscriptions concurrently, and wait until each is no longer
+	// valid: that is when its buffered messages have all been handed to the
+	// worker pools.
+	var drainWG sync.WaitGroup
+	var subs []types.Subscription
+	for moduleName, moduleSubs := range subscriptions {
+		for _, sub := range moduleSubs {
+			subs = append(subs, sub)
+			drainWG.Add(1)
 			go func(s types.Subscription, mod string) {
-				defer wg.Done()
+				defer drainWG.Done()
 				if err := s.Drain(); err != nil {
 					lm.logger.Error("Failed to drain subscription", "module", mod, "error", err)
 					return
@@ -900,30 +967,67 @@ func (lm *lifecycleManager) teardownNATSSubscriptions(ctx context.Context) error
 		}
 	}
 
-	// Wait for drains to complete (with timeout)
-	done := make(chan struct{})
+	drained := make(chan struct{})
 	go func() {
-		wg.Wait()
-		close(done)
+		drainWG.Wait()
+		close(drained)
 	}()
-
 	select {
-	case <-done:
-		lm.logger.Info("All subscriptions drained successfully")
+	case <-drained:
+		lm.logger.Info("All subscriptions drained", "subscriptions", len(subs))
 	case <-drainCtx.Done():
 		if ctx.Err() != nil {
 			lm.logger.Warn("Drain interrupted by context cancellation")
 		} else {
-			lm.logger.Warn("Drain timeout exceeded, some subscriptions may not have drained")
+			lm.logger.Warn("Drain timeout exceeded, some subscriptions may not have drained",
+				"drain_timeout", lm.drainBudget())
 		}
 	}
 
-	// Wait for the handlers the worker pools are still running, so modules
-	// are not stopped underneath them.
-	lm.closeWorkerPools(drainCtx)
+	// Wait for the handlers the worker pools are still running and for the
+	// fetch loops to return, so modules are not stopped underneath them.
+	poolsBusy := lm.closeWorkerPools(drainCtx)
+	loopsRunning := lm.waitFetchLoops(drainCtx)
 
-	lm.logger.Info("NATS subscriptions teardown complete")
+	notDrained := 0
+	for _, s := range subs {
+		if s.IsValid() {
+			notDrained++
+		}
+	}
+	if notDrained > 0 || poolsBusy > 0 || loopsRunning > 0 {
+		lm.logger.Warn("Shutdown drain incomplete; stopping modules anyway",
+			"subscriptions_not_drained", notDrained,
+			"pools_still_busy", poolsBusy,
+			"fetch_loops_still_running", loopsRunning,
+			"drain_timeout", lm.drainBudget())
+	} else {
+		lm.logger.Info("NATS subscriptions teardown complete")
+	}
 	return nil
+}
+
+// waitFetchLoops waits for the stream, event stream and cron fetch loops to
+// return, until ctx is done. It returns the number of loops still running.
+func (lm *lifecycleManager) waitFetchLoops(ctx context.Context) int {
+	done := make(chan struct{})
+	go func() {
+		lm.loopWG.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		return 0
+	case <-ctx.Done():
+		// Count what is left without blocking: loopWG has no counter, so
+		// re-check briefly after the deadline.
+		select {
+		case <-done:
+			return 0
+		default:
+			return 1
+		}
+	}
 }
 
 // drainPollInterval is how often a draining subscription is checked for
@@ -947,14 +1051,14 @@ func waitSubscriptionDrained(ctx context.Context, sub types.Subscription) {
 
 // closeWorkerPools stops every worker pool from taking new messages and waits
 // for their in-flight and queued handlers to finish, until ctx is done. It
-// logs the number of pools still busy at that point.
-func (lm *lifecycleManager) closeWorkerPools(ctx context.Context) {
+// returns the number of pools that were still busy at that point.
+func (lm *lifecycleManager) closeWorkerPools(ctx context.Context) int {
 	lm.mu.RLock()
 	pools := make([]*workerpool.Pool, len(lm.pools))
 	copy(pools, lm.pools)
 	lm.mu.RUnlock()
 	if len(pools) == 0 {
-		return
+		return 0
 	}
 
 	var wg sync.WaitGroup
@@ -971,11 +1075,10 @@ func (lm *lifecycleManager) closeWorkerPools(ctx context.Context) {
 	wg.Wait()
 
 	if n := stillBusy.Load(); n > 0 {
-		lm.logger.Warn("Drain timeout exceeded, handlers still running; stopping modules anyway",
-			"pools_still_busy", n, "pools", len(pools))
-		return
+		return int(n)
 	}
 	lm.logger.Info("All in-flight handlers finished", "pools", len(pools))
+	return 0
 }
 
 // rollback stops all started modules in reverse order
@@ -1241,13 +1344,17 @@ func (lm *lifecycleManager) setupStreamConsumer(ctx context.Context, entry *type
 		return fmt.Errorf("failed to create consumer %s: %w", consumerName, err)
 	}
 
-	// Start fetch loop goroutine
-	loopCtx, cancel := context.WithCancel(lm.runtimeCtx) //nolint:gosec // G118: cancel is stored in lm.streamConsumers and called in shutdown
+	// Start fetch loop goroutine. The loop context only controls fetching;
+	// handlers get the runtime context (see runStreamConsumerLoop).
+	loopCtx, cancel := lm.newLoopContext()
 	lm.mu.Lock()
 	lm.streamConsumers[entry.Name] = cancel
 	lm.mu.Unlock()
 
-	go lm.runStreamConsumerLoop(loopCtx, consumer, entry)
+	go func() {
+		defer lm.loopDone()
+		lm.runStreamConsumerLoop(loopCtx, consumer, entry)
+	}()
 
 	lm.logger.Info("Stream consumer started",
 		"service", entry.Name,
@@ -1363,13 +1470,16 @@ func (lm *lifecycleManager) setupCronService(ctx context.Context, entry *types.S
 	// service never collides with a same-named service in another module (or a
 	// stream consumer), which would overwrite the cancel func and leak this
 	// fetch loop past shutdown.
-	loopCtx, cancel := context.WithCancel(lm.runtimeCtx) //nolint:gosec // G118: cancel is stored in lm.streamConsumers and called in shutdown
+	loopCtx, cancel := lm.newLoopContext()
 	consumerKey := fmt.Sprintf("cron-%s-%s", entry.ModuleName, entry.Name)
 	lm.mu.Lock()
 	lm.streamConsumers[consumerKey] = cancel
 	lm.mu.Unlock()
 
-	go lm.runCronConsumerLoop(loopCtx, consumer, entry)
+	go func() {
+		defer lm.loopDone()
+		lm.runCronConsumerLoop(loopCtx, consumer, entry)
+	}()
 
 	lm.logger.Info("Cron service started",
 		"service", entry.Name,
@@ -1462,7 +1572,8 @@ func (lm *lifecycleManager) runCronConsumerLoop(ctx context.Context, consumer je
 					}
 					return
 				}
-				lm.dispatchCronTick(ctx, entry, eventbus.WrapJetStreamMsg(msg))
+				// The handler gets the runtime context, not the loop context.
+				lm.dispatchCronTick(lm.handlerContext(), entry, eventbus.WrapJetStreamMsg(msg))
 			}
 
 			if msgs.Error() != nil && !errors.Is(msgs.Error(), nats.ErrTimeout) {
@@ -1594,15 +1705,19 @@ func (lm *lifecycleManager) setupEventStreamConsumer(ctx context.Context, entry 
 	}
 	lm.warnLeftoverLegacyNames(cfg.Stream.Name, streamCfg.Retention, durable)
 
-	// Start fetch loop goroutine
-	loopCtx, cancel := context.WithCancel(lm.runtimeCtx) //nolint:gosec // G118: cancel is stored in lm.streamConsumers and called in shutdown
+	// Start fetch loop goroutine. The loop context only controls fetching;
+	// handlers get the runtime context (see runEventStreamConsumerLoop).
+	loopCtx, cancel := lm.newLoopContext()
 	// Use sequence ID for unique key to avoid collision with other consumers
 	consumerKey := fmt.Sprintf("event-stream-%d", entry.SequenceID)
 	lm.mu.Lock()
 	lm.streamConsumers[consumerKey] = cancel
 	lm.mu.Unlock()
 
-	go lm.runEventStreamConsumerLoop(loopCtx, consumer, entry)
+	go func() {
+		defer lm.loopDone()
+		lm.runEventStreamConsumerLoop(loopCtx, consumer, entry)
+	}()
 
 	lm.logger.Info("Event stream consumer started",
 		"event_module", entry.EventDef.ModuleName,
@@ -1681,10 +1796,10 @@ func (lm *lifecycleManager) runEventStreamConsumerLoop(
 				continue
 			}
 
-			// Call handler with runtime context. A panic is recovered into an
-			// error; acknowledgement stays with the handler, so whatever it did
-			// not Ack is redelivered after AckWait, as for a returned error.
-			if err := invokeBatchHandler(ctx, entry.Handler, batch); err != nil {
+			// Call handler with the runtime context (see runStreamConsumerLoop).
+			// A panic is recovered into an error; acknowledgement stays with the
+			// handler, so whatever it did not Ack is redelivered after AckWait.
+			if err := invokeBatchHandler(lm.handlerContext(), entry.Handler, batch); err != nil {
 				lm.logger.Error("Event stream consumer handler error",
 					append([]any{"event", eventName, "consumer_module", consumerModule, "subject", entry.EventDef.Subject, "batch_size", len(batch)}, handlerErrorFields(err)...)...)
 			}
@@ -1752,10 +1867,12 @@ func (lm *lifecycleManager) runStreamConsumerLoop(
 				continue
 			}
 
-			// Call handler with runtime context. A panic is recovered into an
-			// error; acknowledgement stays with the handler, so whatever it did
-			// not Ack is redelivered after AckWait, as for a returned error.
-			if err := invokeBatchHandler(ctx, entry.StreamConsumerHandler, batch); err != nil {
+			// Call handler with the runtime context (not the loop context: at
+			// shutdown the loop stops fetching first while the handler keeps a
+			// live context until the drain is over). A panic is recovered into
+			// an error; acknowledgement stays with the handler, so whatever it
+			// did not Ack is redelivered after AckWait, as for a returned error.
+			if err := invokeBatchHandler(lm.handlerContext(), entry.StreamConsumerHandler, batch); err != nil {
 				lm.logger.Error("Handler error",
 					append([]any{"service", entry.Name, "module", entry.ModuleName, "subject", entry.Subject, "batch_size", len(batch)}, handlerErrorFields(err)...)...)
 			}

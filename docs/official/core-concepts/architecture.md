@@ -293,14 +293,17 @@ When `app.Stop()` is called:
    └─ Application begins shutdown
 
 2. Stop Accepting New Work
-   └─ No new subscriptions or requests accepted
+   ├─ Fetch loops (stream, event stream, cron) stop fetching
+   └─ Every subscription is drained (no new deliveries)
 
-3. Drain In-Flight Operations
-   ├─ Wait for active message processing (with timeout)
-   └─ ~10 seconds default
+3. Wait for In-Flight Handlers
+   ├─ Buffered messages still reach the worker pools
+   ├─ Running handlers finish with a LIVE context
+   ├─ Bounded by WithShutdownDrainTimeout (30s default)
+   └─ What has not finished is counted and logged
 
-4. Unsubscribe from NATS
-   └─ Remove all subject subscriptions
+4. Cancel Runtime Context
+   └─ Anything still running is told to stop
 
 5. Stop Modules (Reverse Order)
    ├─ For each module in REVERSE dependency order:
@@ -308,12 +311,15 @@ When `app.Stop()` is called:
    │
    └─ Cleanup resources (close files, release locks)
 
-6. Stop NATS Server
+6. Stop NATS
+   ├─ Drain the client connection (pending replies are delivered)
    └─ Shutdown embedded NATS server
 
 7. Return
    └─ Application fully stopped
 ```
+
+`WithShutdownTimeout` (30s default) bounds the whole sequence when the context given to `Stop` has no deadline. Keep the drain timeout below the shutdown timeout, and both below your orchestrator's termination grace period, so module `Stop` always gets to run.
 
 ## Key Design Decisions
 

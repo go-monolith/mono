@@ -18,17 +18,33 @@ import (
 
 // frameworkApplication implements the types.MonoFramework interface.
 type frameworkApplication struct {
-	mu                         sync.RWMutex
-	natsManager                nats.NATSManager
-	eventBus                   types.EventBus
-	eventRegistry              types.EventRegistry
-	logger                     types.Logger
-	registry                   registry.ModuleRegistry
-	pluginRegistry             registry.PluginRegistry
-	lifecycleManager           lifecycle.LifecycleManager
-	state                      types.MonoFrameworkState
-	queueGroupOptimisticWindow time.Duration
-	defaultServiceConcurrency  int
+	mu               sync.RWMutex
+	natsManager      nats.NATSManager
+	eventBus         types.EventBus
+	eventRegistry    types.EventRegistry
+	logger           types.Logger
+	registry         registry.ModuleRegistry
+	pluginRegistry   registry.PluginRegistry
+	lifecycleManager lifecycle.LifecycleManager
+	state            types.MonoFrameworkState
+	settings         Settings
+}
+
+// Settings carries the framework-level tunables from MonoFrameworkConfig that
+// are not NATS server or logger options.
+type Settings struct {
+	// QueueGroupOptimisticWindow is the optimistic publish window for queue
+	// group clients (0 = always ACK).
+	QueueGroupOptimisticWindow time.Duration
+	// DefaultServiceConcurrency is the MaxConcurrency of request-reply services
+	// whose options leave it at 0 (0 = types.DefaultMaxConcurrency).
+	DefaultServiceConcurrency int
+	// ShutdownTimeout bounds Stop when the caller's context has no deadline
+	// (0 = unbounded).
+	ShutdownTimeout time.Duration
+	// ShutdownDrainTimeout bounds the drain and in-flight handler wait during
+	// Stop (0 = types.DefaultShutdownDrainTimeout).
+	ShutdownDrainTimeout time.Duration
 }
 
 // NewFrameworkAppInstance creates a new framework instance with the given logger.
@@ -43,16 +59,11 @@ type frameworkApplication struct {
 //
 // Modules can be registered before or after framework initialization,
 // but must be registered before calling Start().
-//
-// defaultServiceConcurrency is the MaxConcurrency applied to request-reply,
-// queue group and event consumer subscriptions whose options leave it at 0;
-// 0 selects the built-in default (types.DefaultMaxConcurrency).
-func NewFrameworkAppInstance(logger types.Logger, queueGroupOptimisticWindow time.Duration, defaultServiceConcurrency int, natsOptions ...nats.NATSOption) (types.MonoFramework, error) {
+func NewFrameworkAppInstance(logger types.Logger, settings Settings, natsOptions ...nats.NATSOption) (types.MonoFramework, error) {
 	fwApp := &frameworkApplication{
-		logger:                     logger,
-		state:                      types.StateCreated,
-		queueGroupOptimisticWindow: queueGroupOptimisticWindow,
-		defaultServiceConcurrency:  defaultServiceConcurrency,
+		logger:   logger,
+		state:    types.StateCreated,
+		settings: settings,
 	}
 
 	// Step 1: Initialize NATS manager
@@ -93,9 +104,10 @@ func NewFrameworkAppInstance(logger types.Logger, queueGroupOptimisticWindow tim
 		fwApp.eventBus,
 		fwApp.eventRegistry,
 		fwApp.logger,
-		fwApp.queueGroupOptimisticWindow,
+		fwApp.settings.QueueGroupOptimisticWindow,
 	)
-	fwApp.lifecycleManager.SetDefaultServiceConcurrency(fwApp.defaultServiceConcurrency)
+	fwApp.lifecycleManager.SetDefaultServiceConcurrency(fwApp.settings.DefaultServiceConcurrency)
+	fwApp.lifecycleManager.SetDrainTimeout(fwApp.settings.ShutdownDrainTimeout)
 
 	// Step 6: Set runtime context on event bus for graceful shutdown
 	runtimeCtx := fwApp.lifecycleManager.GetRuntimeContext()
@@ -194,6 +206,14 @@ func (fw *frameworkApplication) Stop(ctx context.Context) error {
 	fw.mu.Unlock()
 
 	fw.logger.Info("Stopping application")
+
+	// Bound the shutdown with the configured ShutdownTimeout when the caller
+	// did not set a deadline of its own.
+	if _, hasDeadline := ctx.Deadline(); !hasDeadline && fw.settings.ShutdownTimeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, fw.settings.ShutdownTimeout)
+		defer cancel()
+	}
 
 	var stopErr error
 	// Only stop modules if the framework was actually running

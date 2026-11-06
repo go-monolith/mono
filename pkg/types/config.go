@@ -19,8 +19,19 @@ type MonoFrameworkConfig struct {
 	// Logger is the logger instance used by the framework and modules
 	Logger Logger
 
-	// ShutdownTimeout is the maximum time to wait for graceful shutdown
+	// ShutdownTimeout is the maximum time to wait for graceful shutdown. It
+	// bounds the whole of Stop (drain, in-flight handlers, module and plugin
+	// Stop) when the caller's context has no deadline of its own.
 	ShutdownTimeout time.Duration
+
+	// ShutdownDrainTimeout is how long Stop waits, after it has stopped taking
+	// new messages, for subscriptions to finish draining and for in-flight
+	// handlers to complete before it cancels the runtime context and stops
+	// modules. Zero (the default) selects DefaultShutdownDrainTimeout capped at
+	// ShutdownTimeout; an explicit value must not exceed ShutdownTimeout. Set
+	// it below the orchestrator's termination grace period (Kubernetes
+	// defaults to 30s) so module Stop still gets to run.
+	ShutdownDrainTimeout time.Duration
 
 	// QueueGroupOptimisticWindow configures the optimistic publish window for queue group services.
 	// When > 0, after a successful ACK, subsequent sends within this window use fire-and-forget publish.
@@ -35,6 +46,10 @@ type MonoFrameworkConfig struct {
 	// registration sets MaxConcurrency, so this default does not affect them.
 	DefaultServiceConcurrency int
 }
+
+// DefaultShutdownDrainTimeout is the default ShutdownDrainTimeout, the same as
+// nats.go's DefaultDrainTimeout.
+const DefaultShutdownDrainTimeout = 30 * time.Second
 
 // NATSOptions holds NATS server configuration.
 type NATSOptions struct {

@@ -3,7 +3,6 @@ package app
 import (
 	"fmt"
 	"os"
-	"time"
 
 	internallogger "github.com/go-monolith/mono/internal/logger"
 	"github.com/go-monolith/mono/internal/nats"
@@ -17,12 +16,11 @@ import (
 //   - logger: Optional custom logger. If nil, a default logger is created based on loggerOpts.
 //   - loggerOpts: Logger configuration options (level, format, output, etc.)
 //   - natsOpts: NATS server configuration options
-//   - queueGroupOptimisticWindow: Optimistic publish window for queue groups (0 = disabled)
-//   - defaultServiceConcurrency: MaxConcurrency for subscriptions whose options leave it at 0
-//     (0 = runtime.GOMAXPROCS(0)*4)
+//   - settings: framework-level tunables (queue group optimistic window, default
+//     service concurrency, shutdown and drain timeouts)
 //
 // Returns the created MonoFramework or an error if creation fails.
-func CreateFrameworkAppInstance(logger types.Logger, loggerOpts types.LoggerOptions, natsOpts types.NATSOptions, queueGroupOptimisticWindow time.Duration, defaultServiceConcurrency int) (types.MonoFramework, error) {
+func CreateFrameworkAppInstance(logger types.Logger, loggerOpts types.LoggerOptions, natsOpts types.NATSOptions, settings Settings) (types.MonoFramework, error) {
 	// Initialize logger if not provided
 	if logger == nil {
 		var err error
@@ -36,7 +34,7 @@ func CreateFrameworkAppInstance(logger types.Logger, loggerOpts types.LoggerOpti
 	internalNatsOpts := buildNATSOptions(natsOpts)
 
 	// Call internal framework constructor with config
-	fwApp, err := NewFrameworkAppInstance(logger, queueGroupOptimisticWindow, defaultServiceConcurrency, internalNatsOpts...)
+	fwApp, err := NewFrameworkAppInstance(logger, settings, internalNatsOpts...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create framework: %w", err)
 	}

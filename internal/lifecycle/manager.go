@@ -4,6 +4,7 @@ package lifecycle
 
 import (
 	"context"
+	"time"
 
 	"github.com/go-monolith/mono/pkg/types"
 )
@@ -52,6 +53,12 @@ type LifecycleManager interface {
 	// queue group and event consumer subscriptions whose options leave it at 0.
 	// Must be called before Start.
 	SetDefaultServiceConcurrency(n int)
+
+	// SetDrainTimeout sets how long Stop waits for subscriptions to drain and
+	// in-flight handlers to finish before cancelling the runtime context and
+	// stopping modules. Values <= 0 select types.DefaultShutdownDrainTimeout.
+	// Must be called before Stop.
+	SetDrainTimeout(d time.Duration)
 }
 
 // LifecycleEvent represents a module lifecycle event.

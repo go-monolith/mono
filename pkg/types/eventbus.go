@@ -134,9 +134,10 @@ type EventBusWithConn[T any] interface {
 // framework runs them through a bounded worker pool (see ServiceOptions). Handlers
 // passed to Subscribe or QueueSubscribe directly are invoked serially.
 //
-// Context cancellation: When the EventBus's runtime context is cancelled (typically during
-// graceful shutdown), handlers may receive calls with a cancelled context. Handlers should
-// check context.Err() and terminate cleanly.
+// Context cancellation: the context is the framework's runtime context. During graceful
+// shutdown it stays live while subscriptions drain and in-flight handlers finish (up to the
+// configured ShutdownDrainTimeout), and is cancelled only after that, so a handler that is
+// still running then should check context.Err() and terminate cleanly.
 //
 // Example:
 //

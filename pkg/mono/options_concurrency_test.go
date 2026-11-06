@@ -1,12 +1,66 @@
 package mono_test
 
 import (
+	"context"
 	"errors"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/go-monolith/mono"
 	monoerrors "github.com/go-monolith/mono/pkg/errors"
+	"github.com/go-monolith/mono/pkg/types"
 )
+
+func TestWithShutdownDrainTimeout(t *testing.T) {
+	t.Run("default is derived from the shutdown timeout", func(t *testing.T) {
+		if got := mono.DefaultConfig().ShutdownDrainTimeout; got != 0 {
+			t.Fatalf("DefaultConfig().ShutdownDrainTimeout = %s, want 0 (derived at NewMonoApplication)", got)
+		}
+		if types.DefaultShutdownDrainTimeout != 30*time.Second {
+			t.Fatalf("DefaultShutdownDrainTimeout = %s, want 30s", types.DefaultShutdownDrainTimeout)
+		}
+		// A short shutdown timeout alone must remain a valid configuration
+		// (examples and the quickstart use 5s/10s): the drain follows it.
+		app, err := mono.NewMonoApplication(
+			mono.WithNATSDontListen(), mono.WithNATSInProcessConn(),
+			mono.WithShutdownTimeout(5*time.Second),
+		)
+		if err != nil {
+			t.Fatalf("WithShutdownTimeout(5s) alone must be valid, got %v", err)
+		}
+		_ = app.Stop(context.Background())
+	})
+	t.Run("sets the value", func(t *testing.T) {
+		cfg := mono.DefaultConfig()
+		if err := mono.WithShutdownDrainTimeout(10 * time.Second)(cfg); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if cfg.ShutdownDrainTimeout != 10*time.Second {
+			t.Fatalf("ShutdownDrainTimeout = %s, want 10s", cfg.ShutdownDrainTimeout)
+		}
+	})
+	t.Run("rejects non-positive values", func(t *testing.T) {
+		for _, d := range []time.Duration{0, -time.Second} {
+			err := mono.WithShutdownDrainTimeout(d)(mono.DefaultConfig())
+			if !errors.Is(err, monoerrors.ErrInvalidConfiguration) {
+				t.Fatalf("WithShutdownDrainTimeout(%s): got %v, want ErrInvalidConfiguration", d, err)
+			}
+		}
+	})
+	t.Run("must not exceed the shutdown timeout", func(t *testing.T) {
+		_, err := mono.NewMonoApplication(
+			mono.WithShutdownTimeout(5*time.Second),
+			mono.WithShutdownDrainTimeout(6*time.Second),
+		)
+		if !errors.Is(err, monoerrors.ErrInvalidConfiguration) {
+			t.Fatalf("got %v, want ErrInvalidConfiguration", err)
+		}
+		if err == nil || !strings.Contains(err.Error(), "must not exceed the shutdown timeout") {
+			t.Fatalf("error should explain the cross-field rule, got %v", err)
+		}
+	})
+}
 
 func TestWithDefaultServiceConcurrency(t *testing.T) {
 	t.Run("default is zero (built-in GOMAXPROCS*4)", func(t *testing.T) {

@@ -4,6 +4,8 @@ import (
 	"fmt"
 
 	"github.com/go-monolith/mono/internal/app"
+	"github.com/go-monolith/mono/pkg/errors"
+	"github.com/go-monolith/mono/pkg/types"
 )
 
 // NewMonoApplication creates a new MonoFramework application instance with the given options.
@@ -36,9 +38,24 @@ func NewMonoApplication(opts ...MonoFrameworkOption) (MonoApplication, error) {
 		}
 	}
 
+	// Cross-field validation, once every option has been applied. An unset
+	// drain timeout follows the shutdown timeout; an explicit one must fit in it.
+	switch {
+	case cfg.ShutdownDrainTimeout <= 0:
+		cfg.ShutdownDrainTimeout = min(types.DefaultShutdownDrainTimeout, cfg.ShutdownTimeout)
+	case cfg.ShutdownDrainTimeout > cfg.ShutdownTimeout:
+		return nil, errors.WrapInvalidConfiguration(len(opts), "WithShutdownDrainTimeout", cfg.ShutdownDrainTimeout,
+			fmt.Sprintf("drain timeout must not exceed the shutdown timeout (%s)", cfg.ShutdownTimeout))
+	}
+
 	// Call internal app directly to create framework.
 	// Both packages share types from pkg/types, so we can pass config structs directly.
-	frameworkAppInstance, err := app.CreateFrameworkAppInstance(cfg.Logger, cfg.LoggerOptions, cfg.NATSOptions, cfg.QueueGroupOptimisticWindow, cfg.DefaultServiceConcurrency)
+	frameworkAppInstance, err := app.CreateFrameworkAppInstance(cfg.Logger, cfg.LoggerOptions, cfg.NATSOptions, app.Settings{
+		QueueGroupOptimisticWindow: cfg.QueueGroupOptimisticWindow,
+		DefaultServiceConcurrency:  cfg.DefaultServiceConcurrency,
+		ShutdownTimeout:            cfg.ShutdownTimeout,
+		ShutdownDrainTimeout:       cfg.ShutdownDrainTimeout,
+	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to create framework: %w", err)
 	}

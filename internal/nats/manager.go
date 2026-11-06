@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"runtime/debug"
 	"sync"
+	"time"
 
 	"github.com/go-monolith/mono/pkg/types"
 	"github.com/nats-io/nats-server/v2/server"
@@ -346,9 +347,13 @@ func (m *natsManager) Stop(ctx context.Context) error {
 
 	m.logger.Info("Stopping NATS server")
 
-	// Close client connection first to prevent new requests
+	// Drain the client connection before stopping the server: closing it
+	// outright can drop a message the server has already routed back to this
+	// process, such as the reply to a request that finished during the
+	// lifecycle drain, whose requester is waiting on an inbox subscription on
+	// this very connection.
 	if m.conn != nil {
-		m.conn.Close()
+		m.drainConnection(ctx)
 		m.conn = nil
 	}
 
@@ -398,6 +403,48 @@ func (m *natsManager) Stop(ctx context.Context) error {
 
 	m.logger.Info("NATS server stopped successfully")
 	return nil
+}
+
+// connDrainTimeout bounds how long Stop waits for the client connection to
+// drain before closing it anyway. The framework's own subscriptions were
+// drained by the lifecycle manager already; what remains are module-owned
+// subscriptions and the request/reply inbox, which drain in milliseconds.
+const connDrainTimeout = 5 * time.Second
+
+// drainConnection asks the client to drain and waits for it to close:
+// subscriptions stop taking new messages, the messages already delivered to
+// them are processed, pending publishes are flushed, and the connection is
+// closed. The wait is bounded by ctx and connDrainTimeout; on timeout or
+// error the connection is closed outright.
+func (m *natsManager) drainConnection(ctx context.Context) {
+	conn := m.conn
+	if conn.IsClosed() {
+		return
+	}
+	if err := conn.Drain(); err != nil {
+		m.logger.Warn("Failed to drain NATS connection, closing it", "error", err)
+		conn.Close()
+		return
+	}
+
+	deadline := time.NewTimer(connDrainTimeout)
+	defer deadline.Stop()
+	ticker := time.NewTicker(5 * time.Millisecond)
+	defer ticker.Stop()
+	for !conn.IsClosed() {
+		select {
+		case <-ticker.C:
+		case <-deadline.C:
+			m.logger.Warn("NATS connection did not finish draining in time, closing it", "timeout", connDrainTimeout)
+			conn.Close()
+			return
+		case <-ctx.Done():
+			m.logger.Warn("NATS connection drain interrupted, closing it", "error", ctx.Err())
+			conn.Close()
+			return
+		}
+	}
+	m.logger.Debug("NATS connection drained")
 }
 
 // Connection returns a client connection to the embedded server.
