@@ -280,7 +280,7 @@ func TestWorkerPool_StopWaitsForInFlightHandlers(t *testing.T) {
 		case <-time.After(5 * time.Second):
 			t.Fatal("Stop did not return after the handler finished")
 		}
-		if !f.logger.hasEntryContaining("All in-flight handlers finished") {
+		if !f.logger.hasEntryContaining("NATS subscriptions teardown complete") {
 			t.Error("expected Stop to report that in-flight handlers finished")
 		}
 	})

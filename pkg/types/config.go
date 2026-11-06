@@ -20,8 +20,10 @@ type MonoFrameworkConfig struct {
 	Logger Logger
 
 	// ShutdownTimeout is the maximum time to wait for graceful shutdown. It
-	// bounds the whole of Stop (drain, in-flight handlers, module and plugin
-	// Stop) when the caller's context has no deadline of its own.
+	// bounds the lifecycle part of Stop (drain, in-flight handlers, module and
+	// plugin Stop) when the caller's context has no deadline of its own; the
+	// final NATS connection drain and server shutdown add at most a few
+	// seconds beyond it.
 	ShutdownTimeout time.Duration
 
 	// ShutdownDrainTimeout is how long Stop waits, after it has stopped taking

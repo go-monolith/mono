@@ -44,7 +44,7 @@ func NewMonoApplication(opts ...MonoFrameworkOption) (MonoApplication, error) {
 	case cfg.ShutdownDrainTimeout <= 0:
 		cfg.ShutdownDrainTimeout = min(types.DefaultShutdownDrainTimeout, cfg.ShutdownTimeout)
 	case cfg.ShutdownDrainTimeout > cfg.ShutdownTimeout:
-		return nil, errors.WrapInvalidConfiguration(len(opts), "WithShutdownDrainTimeout", cfg.ShutdownDrainTimeout,
+		return nil, errors.WrapInvalidConfiguration(0, "WithShutdownDrainTimeout", cfg.ShutdownDrainTimeout,
 			fmt.Sprintf("drain timeout must not exceed the shutdown timeout (%s)", cfg.ShutdownTimeout))
 	}
 

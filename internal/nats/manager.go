@@ -339,22 +339,29 @@ func (m *natsManager) Start(ctx context.Context) error {
 // Stop gracefully stops the NATS server.
 func (m *natsManager) Stop(ctx context.Context) error {
 	m.mu.Lock()
-	defer m.mu.Unlock()
-
 	if m.server == nil {
+		m.mu.Unlock()
 		return fmt.Errorf("NATS server not started")
 	}
-
 	m.logger.Info("Stopping NATS server")
+	conn := m.conn
+	m.conn = nil
+	m.mu.Unlock()
 
 	// Drain the client connection before stopping the server: closing it
 	// outright can drop a message the server has already routed back to this
 	// process, such as the reply to a request that finished during the
 	// lifecycle drain, whose requester is waiting on an inbox subscription on
-	// this very connection.
-	if m.conn != nil {
-		m.drainConnection(ctx)
-		m.conn = nil
+	// this very connection. Done without holding the lock, so health checks
+	// and ServerInfo callers are not blocked for the duration.
+	if conn != nil {
+		m.drainConnection(ctx, conn)
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.server == nil {
+		return nil // a concurrent Stop finished first
 	}
 
 	// Clear JetStream client
@@ -416,8 +423,7 @@ const connDrainTimeout = 5 * time.Second
 // them are processed, pending publishes are flushed, and the connection is
 // closed. The wait is bounded by ctx and connDrainTimeout; on timeout or
 // error the connection is closed outright.
-func (m *natsManager) drainConnection(ctx context.Context) {
-	conn := m.conn
+func (m *natsManager) drainConnection(ctx context.Context, conn *nats.Conn) {
 	if conn.IsClosed() {
 		return
 	}

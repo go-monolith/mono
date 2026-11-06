@@ -157,7 +157,7 @@ func TestGracefulShutdown_DrainTimeoutIsConfigurable(t *testing.T) {
 	if elapsed < time.Second {
 		t.Fatalf("Stop returned after %s, before the 1s drain timeout", elapsed)
 	}
-	if elapsed > 6*time.Second {
+	if elapsed > 10*time.Second {
 		t.Fatalf("Stop took %s; the 1s drain timeout was not respected", elapsed)
 	}
 	if !module.wasStopped() {

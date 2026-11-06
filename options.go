@@ -205,10 +205,11 @@ func WithNATSAutoTLS(autoTLS types.AutoTLSConfig) MonoFrameworkOption {
 	}
 }
 
-// WithShutdownTimeout sets the graceful shutdown timeout. It bounds the whole
-// of Stop (drain, in-flight handlers, module and plugin Stop) when the context
-// passed to Stop has no deadline of its own; a context with a deadline is used
-// as is. The timeout must be at least 1 second to allow proper cleanup, and at
+// WithShutdownTimeout sets the graceful shutdown timeout. It bounds the
+// lifecycle part of Stop (drain, in-flight handlers, module and plugin Stop)
+// when the context passed to Stop has no deadline of its own; a context with a
+// deadline is used as is. The drain keeps 5s of the remaining time (or half of
+// it, whichever is larger) for module Stop. The timeout must be at least 1 second to allow proper cleanup, and at
 // least WithShutdownDrainTimeout.
 //
 // Example:

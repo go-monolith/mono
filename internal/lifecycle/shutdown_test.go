@@ -129,8 +129,9 @@ func TestStop_FetchLoopStopsWhileHandlerKeepsLiveContext(t *testing.T) {
 
 	loopCtx, cancel := lm.newLoopContext()
 	defer cancel()
+	loopReturned := make(chan struct{})
 	go func() {
-		defer lm.loopDone()
+		defer close(loopReturned)
 		lm.runStreamConsumerLoop(loopCtx, consumer, entry)
 	}()
 	select {
@@ -139,26 +140,36 @@ func TestStop_FetchLoopStopsWhileHandlerKeepsLiveContext(t *testing.T) {
 		t.Fatal("handler did not start")
 	}
 
-	// Stop fetching: the loop is still inside the handler, so it is counted
-	// as running until the handler returns.
+	// Stop fetching: the handler in flight is counted until it returns.
+	lm.mu.Lock()
 	lm.cancelFetch()
+	lm.mu.Unlock()
 	waitCtx, waitCancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
-	if n := lm.waitFetchLoops(waitCtx); n != 1 {
-		t.Fatalf("loops still running = %d, want 1 while the handler is in flight", n)
+	if n := lm.waitInFlightHandlers(waitCtx); n != 1 {
+		t.Fatalf("handlers in flight = %d, want 1 while the handler is running", n)
 	}
 	waitCancel()
 
 	close(release)
 	waitCtx2, waitCancel2 := context.WithTimeout(context.Background(), 5*time.Second)
 	defer waitCancel2()
-	if n := lm.waitFetchLoops(waitCtx2); n != 0 {
-		t.Fatalf("loops still running = %d after the handler returned, want 0", n)
+	if n := lm.waitInFlightHandlers(waitCtx2); n != 0 {
+		t.Fatalf("handlers in flight = %d after the handler returned, want 0", n)
 	}
 	if !ctxLiveAtEnd.Load() {
 		t.Fatal("handler context was cancelled by the fetch context cancellation")
 	}
+	select {
+	case <-loopReturned:
+	case <-time.After(5 * time.Second):
+		t.Fatal("loop did not return after the fetch context was cancelled")
+	}
 	if calls.Load() != 1 {
-		t.Fatalf("handler called %d times, want 1: the loop must not fetch again after the fetch context is cancelled", calls.Load())
+		t.Fatalf("handler called %d times, want 1: a batch fetched after shutdown began must not be handled", calls.Load())
+	}
+	if !logger.hasEntryContaining("left for redelivery") && calls.Load() == 1 {
+		// The loop may have exited on ctx.Done before fetching again; both are fine.
+		t.Log("loop exited without fetching another batch")
 	}
 }
 

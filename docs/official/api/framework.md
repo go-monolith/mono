@@ -515,7 +515,7 @@ mono.WithCustomLogger(customLogger)
 func WithShutdownTimeout(timeout time.Duration) MonoFrameworkOption
 ```
 
-Sets the maximum time to wait for graceful shutdown. It bounds the whole of `Stop` (drain, in-flight handlers, module and plugin `Stop`) when the context passed to `Stop` has no deadline of its own; a context with a deadline is used as is. Default is 30 seconds. Must be at least 1 second and at least `WithShutdownDrainTimeout`.
+Sets the maximum time to wait for graceful shutdown. It bounds the lifecycle part of `Stop` (drain, in-flight handlers, module and plugin `Stop`) when the context passed to `Stop` has no deadline of its own; a context with a deadline is used as is. The final NATS connection drain (capped at 5s) and server shutdown run after that bound. The drain keeps 5s of the remaining time (or half of it, whichever is larger) for module `Stop`. Default is 30 seconds. Must be at least 1 second and at least `WithShutdownDrainTimeout`.
 
 | Property | Value |
 |----------|-------|
@@ -534,7 +534,7 @@ mono.WithShutdownTimeout(60 * time.Second)
 func WithShutdownDrainTimeout(timeout time.Duration) MonoFrameworkOption
 ```
 
-Sets how long `Stop` waits, after it has stopped taking new messages, for subscriptions to finish draining and for in-flight handlers (worker pools and stream/cron fetch loops) to complete, before it cancels the runtime context and stops modules. Handlers keep a live context during this wait, so a request that started just before `Stop` completes normally. Whatever has not finished when the budget runs out is counted in a warning (`subscriptions_not_drained`, `pools_still_busy`, `fetch_loops_still_running`) and shutdown proceeds.
+Sets how long `Stop` waits, after it has stopped taking new messages, for subscriptions to finish draining and for in-flight handlers (worker pools and stream/cron fetch loops) to complete, before it cancels the runtime context and stops modules. Handlers keep a live context during this wait, so a request that started just before `Stop` completes normally. Whatever has not finished when the budget runs out is counted in a warning (`subscriptions_not_drained`, `pools_still_busy`, `fetch_loop_handlers_still_running`) and shutdown proceeds.
 
 Keep it below the orchestrator's termination grace period (Kubernetes defaults to 30s), with room for module `Stop`.
 
