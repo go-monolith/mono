@@ -7,12 +7,14 @@ import (
 	"reflect"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/go-monolith/mono/internal/container"
 	"github.com/go-monolith/mono/internal/eventbus"
 	"github.com/go-monolith/mono/internal/middleware"
 	"github.com/go-monolith/mono/internal/registry"
+	"github.com/go-monolith/mono/internal/workerpool"
 	monoerrors "github.com/go-monolith/mono/pkg/errors"
 	"github.com/go-monolith/mono/pkg/types"
 	"github.com/nats-io/nats.go"
@@ -37,7 +39,14 @@ type lifecycleManager struct {
 	cancelRuntime              context.CancelFunc
 	streamConsumers            map[string]context.CancelFunc // cancel funcs for stream consumer fetch loops
 	queueGroupOptimisticWindow time.Duration                 // Optimistic publish window for queue groups
+	defaultServiceConcurrency  int                           // MaxConcurrency for subscriptions that leave it at 0 (0 = built-in default)
+	pools                      []*workerpool.Pool            // worker pools of request-reply, queue group and event consumer subscriptions
 }
+
+// drainTimeout bounds how long Stop waits for subscriptions to drain and for
+// in-flight handlers to finish before modules are stopped. A variable so
+// tests can shorten it.
+var drainTimeout = 5 * time.Second
 
 // NewLifecycleManager creates a new lifecycle manager
 func NewLifecycleManager(
@@ -66,6 +75,158 @@ func NewLifecycleManager(
 		streamConsumers:            make(map[string]context.CancelFunc),
 		queueGroupOptimisticWindow: queueGroupOptimisticWindow,
 	}
+}
+
+// SetDefaultServiceConcurrency sets the MaxConcurrency applied to every
+// request-reply, queue group and event consumer subscription whose own
+// ServiceOptions leave it at 0. Values below 1 select the built-in default
+// (types.DefaultMaxConcurrency). Must be called before Start.
+func (lm *lifecycleManager) SetDefaultServiceConcurrency(n int) {
+	lm.mu.Lock()
+	defer lm.mu.Unlock()
+	lm.defaultServiceConcurrency = n
+}
+
+// newPool creates the worker pool of one subscription from its options,
+// resolved against the framework default, and records it for shutdown.
+func (lm *lifecycleManager) newPool(opts types.ServiceOptions, logger types.Logger, kind, name, queue string) *workerpool.Pool {
+	lm.mu.Lock()
+	defaultConcurrency := lm.defaultServiceConcurrency
+	lm.mu.Unlock()
+
+	resolved := opts.Resolve(defaultConcurrency)
+	pool := workerpool.New(resolved.MaxConcurrency, resolved.MaxPending)
+
+	lm.mu.Lock()
+	lm.pools = append(lm.pools, pool)
+	lm.mu.Unlock()
+
+	logger.Debug("Worker pool created",
+		"kind", kind,
+		"name", name,
+		"queue_group", queue,
+		"max_concurrency", resolved.MaxConcurrency,
+		"max_pending", resolved.MaxPending)
+	return pool
+}
+
+// overloadLogInterval rate-limits the warning logged when a subscription
+// rejects or drops messages: under sustained overload one line per interval
+// per subscription, instead of one per message.
+const overloadLogInterval = time.Second
+
+// overloadReporter logs rejected (or dropped) messages at most once per
+// overloadLogInterval per subscription, with the number affected since the
+// previous line.
+type overloadReporter struct {
+	logger   types.Logger
+	fields   []any
+	lastLog  atomic.Int64 // unix nanoseconds of the last line written
+	rejected atomic.Int64 // rejected or dropped since the last line
+}
+
+func newOverloadReporter(logger types.Logger, fields ...any) *overloadReporter {
+	return &overloadReporter{logger: logger, fields: fields}
+}
+
+// withFields returns a new slice of the reporter's fields followed by extra.
+// It never appends to r.fields in place: the reporter is shared by concurrent
+// subscription callbacks.
+func (r *overloadReporter) withFields(extra ...any) []any {
+	fields := make([]any, 0, len(r.fields)+len(extra))
+	fields = append(fields, r.fields...)
+	return append(fields, extra...)
+}
+
+// reject records one rejected message and writes the warning when due.
+func (r *overloadReporter) reject(pool *workerpool.Pool) {
+	r.report("Messages rejected: worker pool and pending queue are full", pool, "rejected")
+}
+
+// drop records one message dropped because it was delivered after the pool
+// closed, and writes the warning when due.
+func (r *overloadReporter) drop(pool *workerpool.Pool) {
+	r.report("Messages dropped: still buffered when the worker pool closed during shutdown", pool, "dropped")
+}
+
+// report counts one affected message and writes msg at most once per interval,
+// with the count accumulated since the previous line under countKey.
+func (r *overloadReporter) report(msg string, pool *workerpool.Pool, countKey string) {
+	n := r.rejected.Add(1)
+	now := time.Now().UnixNano()
+	last := r.lastLog.Load()
+	if now-last < int64(overloadLogInterval) || !r.lastLog.CompareAndSwap(last, now) {
+		return
+	}
+	r.rejected.Add(-n)
+	active, pending := pool.Stats()
+	r.logger.Warn(msg, r.withFields(
+		countKey, n,
+		"max_concurrency", pool.MaxWorkers(),
+		"max_pending", pool.MaxPending(),
+		"active", active,
+		"pending", pending)...)
+}
+
+// frameworkErrorReply builds the error response the framework sends for a
+// message it could not hand to a handler. errorType is one of the
+// types.ErrorType* values so the client can map it to a sentinel error.
+func frameworkErrorReply(reply, errorType, message string) *types.Msg {
+	return &types.Msg{
+		Subject: reply,
+		Header: types.Header{
+			types.HeaderError:        []string{"true"},
+			types.HeaderErrorMessage: []string{message},
+			types.HeaderErrorType:    []string{errorType},
+		},
+	}
+}
+
+// submitToPool hands a message's handler run to the pool and answers the
+// sender when the pool cannot take it.
+//
+// A message with a reply subject (a request-reply call, or a queue group send
+// awaiting its ACK) is never made to wait: when the pool and its queue are
+// full it is answered at once with an overloaded error, and after shutdown
+// began with a shutting-down error, so the caller fails fast and can retry
+// elsewhere. A message without a reply subject (an event, or a queue group
+// send in optimistic publish mode) cannot be answered, so the subscription
+// waits for a queue slot instead of dropping it; only a message still
+// buffered when the pool closed at the end of shutdown is dropped, with a
+// rate-limited warning.
+//
+// It returns true when the pool accepted the job.
+func submitToPool(pool *workerpool.Pool, eventBus types.EventBus, logger types.Logger, reporter *overloadReporter, msg *types.Msg, job workerpool.Job) bool {
+	wait := msg.Reply == ""
+	err := pool.Submit(job, wait)
+	if err == nil {
+		return true
+	}
+
+	switch {
+	case errors.Is(err, workerpool.ErrOverloaded):
+		reporter.reject(pool)
+		if msg.Reply != "" {
+			replyMsg := frameworkErrorReply(msg.Reply, types.ErrorTypeOverloaded,
+				"service overloaded: all workers are busy and the pending queue is full")
+			if pubErr := eventBus.PublishMsg(replyMsg); pubErr != nil {
+				logger.Error("Failed to publish overloaded response", reporter.withFields("error", pubErr)...)
+			}
+		}
+	case errors.Is(err, workerpool.ErrClosed):
+		if msg.Reply != "" {
+			replyMsg := frameworkErrorReply(msg.Reply, types.ErrorTypeShuttingDown,
+				"service unavailable: the handling instance is shutting down")
+			if pubErr := eventBus.PublishMsg(replyMsg); pubErr != nil {
+				logger.Error("Failed to publish shutting-down response", reporter.withFields("error", pubErr)...)
+			}
+		} else {
+			reporter.drop(pool)
+		}
+	default:
+		logger.Error("Failed to submit message to worker pool", reporter.withFields("error", err)...)
+	}
+	return false
 }
 
 // detectMiddlewareModules scans all registered modules and builds the middleware chain.
@@ -312,10 +473,16 @@ func (lm *lifecycleManager) setupNATSSubscriptions(ctx context.Context) error {
 				serviceName := entry.Name
 				modName := moduleName // Capture module name for error responses
 				queueGroup := entry.QueueGroup
+				handler := entry.RequestHandler
 
-				// Create NATS request-reply subscription with queue group for "at most one" delivery
-				sub, err := eventBus.QueueSubscribe(entry.Subject, queueGroup, func(reqCtx context.Context, msg *types.Msg) {
-					response, err := entry.RequestHandler(reqCtx, msg)
+				// Handlers run on a bounded worker pool: nats.go delivers the
+				// subscription's messages one at a time, so a slow call would
+				// otherwise delay every later call to this service.
+				pool := lm.newPool(entry.Options, logger, "request_reply", serviceName, queueGroup)
+				reporter := newOverloadReporter(logger, "service", serviceName, "module", modName)
+
+				handleRequest := func(reqCtx context.Context, msg *types.Msg) {
+					response, err := handler(reqCtx, msg)
 					if err != nil {
 						logger.Error("RequestReply handler error", "service", serviceName, "module", modName, "error", err)
 
@@ -351,6 +518,11 @@ func (lm *lifecycleManager) setupNATSSubscriptions(ctx context.Context) error {
 					} else {
 						logger.Warn("No reply subject specified, response not sent", "service", serviceName)
 					}
+				}
+
+				// Create NATS request-reply subscription with queue group for "at most one" delivery
+				sub, err := eventBus.QueueSubscribe(entry.Subject, queueGroup, func(reqCtx context.Context, msg *types.Msg) {
+					submitToPool(pool, eventBus, logger, reporter, msg, func() { handleRequest(reqCtx, msg) })
 				})
 				if err != nil {
 					return fmt.Errorf("failed to subscribe to %s: %w", entry.Subject, err)
@@ -370,24 +542,43 @@ func (lm *lifecycleManager) setupNATSSubscriptions(ctx context.Context) error {
 					eventBus := lm.eventBus
 					logger := lm.logger
 
+					// One bounded worker pool per queue group subscription.
+					pool := lm.newPool(pair.Options, logger, "queue_group", serviceName, queueGroup)
+					reporter := newOverloadReporter(logger, "service", serviceName, "queueGroup", queueGroup)
+
 					sub, err := eventBus.QueueSubscribe(entry.Subject, queueGroup, func(reqCtx context.Context, msg *types.Msg) {
-						// Immediately send ACK before processing
-						if msg.Reply != "" {
-							if pubErr := eventBus.Publish(msg.Reply, []byte{}); pubErr != nil {
-								logger.Error("Failed to send ACK for QueueGroup message",
-									"service", serviceName,
-									"queueGroup", queueGroup,
-									"error", pubErr)
+						// Hand the message to the pool first: the ACK means
+						// "accepted for processing", and a rejected message is
+						// answered with an error instead, so the sender can
+						// tell the two apart and re-send.
+						//
+						// If the ACK itself cannot be sent, the sender will
+						// time out and re-send, so the handler is skipped to
+						// avoid handling the message twice (best effort: a
+						// worker may already have picked it up).
+						var skip atomic.Bool
+						accepted := submitToPool(pool, eventBus, logger, reporter, msg, func() {
+							if skip.Load() {
 								return
 							}
+							if err := handler(reqCtx, msg); err != nil {
+								logger.Error("QueueGroup handler error",
+									"service", serviceName,
+									"queueGroup", queueGroup,
+									"error", err)
+							}
+						})
+						if !accepted || msg.Reply == "" {
+							return
 						}
 
-						// Call handler synchronously (handler can spawn goroutine if async needed)
-						if err := handler(reqCtx, msg); err != nil {
-							logger.Error("QueueGroup handler error",
+						// Send ACK before processing completes (fire-and-forget semantics)
+						if pubErr := eventBus.Publish(msg.Reply, []byte{}); pubErr != nil {
+							skip.Store(true)
+							logger.Error("Failed to send ACK for QueueGroup message; handler skipped so the re-sent message is not handled twice",
 								"service", serviceName,
 								"queueGroup", queueGroup,
-								"error", err)
+								"error", pubErr)
 						}
 					})
 					if err != nil {
@@ -443,13 +634,21 @@ func (lm *lifecycleManager) setupNATSSubscriptions(ctx context.Context) error {
 			consumerModule := consumer.Module.Name()
 			queueGroup := consumer.QueueGroup
 
+			// One bounded worker pool per event consumer subscription. Events
+			// carry no reply subject, so a full pool applies back-pressure
+			// instead of dropping them.
+			pool := lm.newPool(consumer.Options, logger, "event_consumer", eventName, queueGroup)
+			reporter := newOverloadReporter(logger, "consumer_module", consumerModule, "event", eventName)
+
 			sub, err := eventBus.QueueSubscribe(consumer.EventDef.Subject, queueGroup, func(ctx context.Context, msg *types.Msg) {
-				if err := handler(ctx, msg); err != nil {
-					logger.Error("Event consumer handler error",
-						"consumer_module", consumerModule,
-						"event", eventName,
-						"error", err)
-				}
+				submitToPool(pool, eventBus, logger, reporter, msg, func() {
+					if err := handler(ctx, msg); err != nil {
+						logger.Error("Event consumer handler error",
+							"consumer_module", consumerModule,
+							"event", eventName,
+							"error", err)
+					}
+				})
 			})
 			if err != nil {
 				return fmt.Errorf("failed to subscribe to event %s.%s: %w",
@@ -645,7 +844,16 @@ func (lm *lifecycleManager) teardownNATSSubscriptions(ctx context.Context) error
 	}
 	lm.mu.RUnlock()
 
-	// Drain all subscriptions concurrently
+	// One budget for both waits: the subscription drain and, after it, the
+	// in-flight handlers on the worker pools.
+	drainCtx, cancelDrain := context.WithTimeout(ctx, drainTimeout)
+	defer cancelDrain()
+
+	// Drain all subscriptions concurrently. nats.go's Drain returns as soon as
+	// the unsubscribe is sent, while the messages already buffered are still
+	// being delivered to the callback, so wait until each subscription is no
+	// longer valid: that is when its buffered messages have all been handed
+	// to the worker pools.
 	var wg sync.WaitGroup
 	for moduleName, subs := range subscriptions {
 		for _, sub := range subs {
@@ -654,7 +862,9 @@ func (lm *lifecycleManager) teardownNATSSubscriptions(ctx context.Context) error
 				defer wg.Done()
 				if err := s.Drain(); err != nil {
 					lm.logger.Error("Failed to drain subscription", "module", mod, "error", err)
+					return
 				}
+				waitSubscriptionDrained(drainCtx, s)
 			}(sub, moduleName)
 		}
 	}
@@ -669,14 +879,72 @@ func (lm *lifecycleManager) teardownNATSSubscriptions(ctx context.Context) error
 	select {
 	case <-done:
 		lm.logger.Info("All subscriptions drained successfully")
-	case <-time.After(5 * time.Second):
-		lm.logger.Warn("Drain timeout exceeded, some subscriptions may not have drained")
-	case <-ctx.Done():
-		lm.logger.Warn("Drain interrupted by context cancellation")
+	case <-drainCtx.Done():
+		if ctx.Err() != nil {
+			lm.logger.Warn("Drain interrupted by context cancellation")
+		} else {
+			lm.logger.Warn("Drain timeout exceeded, some subscriptions may not have drained")
+		}
 	}
+
+	// Wait for the handlers the worker pools are still running, so modules
+	// are not stopped underneath them.
+	lm.closeWorkerPools(drainCtx)
 
 	lm.logger.Info("NATS subscriptions teardown complete")
 	return nil
+}
+
+// drainPollInterval is how often a draining subscription is checked for
+// completion.
+const drainPollInterval = 10 * time.Millisecond
+
+// waitSubscriptionDrained blocks until the subscription reports it is no
+// longer valid (its drain has completed and every buffered message has been
+// delivered) or ctx is done.
+func waitSubscriptionDrained(ctx context.Context, sub types.Subscription) {
+	ticker := time.NewTicker(drainPollInterval)
+	defer ticker.Stop()
+	for sub.IsValid() {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+	}
+}
+
+// closeWorkerPools stops every worker pool from taking new messages and waits
+// for their in-flight and queued handlers to finish, until ctx is done. It
+// logs the number of pools still busy at that point.
+func (lm *lifecycleManager) closeWorkerPools(ctx context.Context) {
+	lm.mu.RLock()
+	pools := make([]*workerpool.Pool, len(lm.pools))
+	copy(pools, lm.pools)
+	lm.mu.RUnlock()
+	if len(pools) == 0 {
+		return
+	}
+
+	var wg sync.WaitGroup
+	var stillBusy atomic.Int32
+	for _, pool := range pools {
+		wg.Add(1)
+		go func(p *workerpool.Pool) {
+			defer wg.Done()
+			if err := p.Close(ctx); err != nil {
+				stillBusy.Add(1)
+			}
+		}(pool)
+	}
+	wg.Wait()
+
+	if n := stillBusy.Load(); n > 0 {
+		lm.logger.Warn("Drain timeout exceeded, handlers still running; stopping modules anyway",
+			"pools_still_busy", n, "pools", len(pools))
+		return
+	}
+	lm.logger.Info("All in-flight handlers finished", "pools", len(pools))
 }
 
 // rollback stops all started modules in reverse order

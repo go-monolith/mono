@@ -18,9 +18,11 @@ import (
 //   - loggerOpts: Logger configuration options (level, format, output, etc.)
 //   - natsOpts: NATS server configuration options
 //   - queueGroupOptimisticWindow: Optimistic publish window for queue groups (0 = disabled)
+//   - defaultServiceConcurrency: MaxConcurrency for subscriptions whose options leave it at 0
+//     (0 = runtime.GOMAXPROCS(0)*4)
 //
 // Returns the created MonoFramework or an error if creation fails.
-func CreateFrameworkAppInstance(logger types.Logger, loggerOpts types.LoggerOptions, natsOpts types.NATSOptions, queueGroupOptimisticWindow time.Duration) (types.MonoFramework, error) {
+func CreateFrameworkAppInstance(logger types.Logger, loggerOpts types.LoggerOptions, natsOpts types.NATSOptions, queueGroupOptimisticWindow time.Duration, defaultServiceConcurrency int) (types.MonoFramework, error) {
 	// Initialize logger if not provided
 	if logger == nil {
 		var err error
@@ -34,7 +36,7 @@ func CreateFrameworkAppInstance(logger types.Logger, loggerOpts types.LoggerOpti
 	internalNatsOpts := buildNATSOptions(natsOpts)
 
 	// Call internal framework constructor with config
-	fwApp, err := NewFrameworkAppInstance(logger, queueGroupOptimisticWindow, internalNatsOpts...)
+	fwApp, err := NewFrameworkAppInstance(logger, queueGroupOptimisticWindow, defaultServiceConcurrency, internalNatsOpts...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create framework: %w", err)
 	}

@@ -252,6 +252,7 @@ func buildServiceRegistration(entry *types.ServiceEntry) types.ServiceRegistrati
 		ModuleName:           entry.ModuleName,
 		Subject:              entry.Subject,
 		RequestHandler:       entry.RequestHandler,
+		Options:              entry.Options,
 		QueueHandlers:        entry.QueueHandlers,
 		StreamHandler:        entry.StreamConsumerHandler,
 		StreamConsumerConfig: entry.StreamConsumerConfig,
@@ -265,6 +266,7 @@ func buildServiceRegistration(entry *types.ServiceEntry) types.ServiceRegistrati
 func applyServiceRegistration(entry *types.ServiceEntry, reg types.ServiceRegistration) {
 	// Apply handler modifications (middleware may have wrapped them)
 	entry.RequestHandler = reg.RequestHandler
+	entry.Options = reg.Options
 	entry.QueueHandlers = reg.QueueHandlers
 	entry.StreamConsumerHandler = reg.StreamHandler
 

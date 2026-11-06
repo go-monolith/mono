@@ -85,6 +85,7 @@ func (m *OrderModule) RegisterServices(container mono.ServiceContainer) error {
 func (container ServiceContainer) RegisterRequestReplyService(
     name string,
     handler RequestReplyHandler,
+    opts ...ServiceOption,
 ) error
 ```
 
@@ -93,6 +94,7 @@ Registers a request-reply service for synchronous inter-module calls via NATS.
 **Parameters:**
 - `name` - Service name (subject: `services.<module>.<name>`)
 - `handler` - Function handling requests
+- `opts` - Optional worker pool bounds: `mono.WithMaxConcurrency(n)`, `mono.WithMaxPending(n)` (see [Handler Concurrency](#handler-concurrency-worker-pools)). Negative values fail registration.
 
 **Handler Signature:**
 ```go
@@ -131,6 +133,17 @@ func (m *PaymentModule) handleProcess(ctx context.Context, req *mono.Msg) ([]byt
 }
 ```
 
+**Concurrency Example:**
+```go
+// Up to 32 handlers at once on this instance, at most 256 requests waiting
+container.RegisterRequestReplyService("check-stock", m.handleCheckStock,
+    mono.WithMaxConcurrency(32), mono.WithMaxPending(256))
+
+// Strictly one request at a time, in arrival order
+container.RegisterRequestReplyService("apply-ledger-entry", m.handleLedger,
+    mono.WithMaxConcurrency(1))
+```
+
 **Typed Handler (helper):**
 
 For type-safe handlers, use the `TypedRequestReplyHandler`:
@@ -159,8 +172,11 @@ Registers a queue group service with one or more handler pairs for load-balanced
 type QGHP struct {
     QueueGroup string            // Queue group name (e.g., "high-priority-workers")
     Handler    QueueGroupHandler // Handler function for this queue group
+    Options    ServiceOptions    // Worker pool bounds for this queue group (zero = defaults)
 }
 ```
+
+Each pair is its own NATS subscription with its own worker pool, so `Options` is set per pair. Set `MaxConcurrency: 1` for a handler that must see messages in order (see [Handler Concurrency](#handler-concurrency-worker-pools)).
 
 **Handler Signature:**
 ```go
@@ -207,6 +223,18 @@ func (m *AuditModule) handleAuditLog(ctx context.Context, msg *mono.Msg) error {
 container.RegisterQueueGroupService("process-orders",
     mono.QGHP{QueueGroup: "high-priority", Handler: m.handleHighPriority},
     mono.QGHP{QueueGroup: "low-priority", Handler: m.handleLowPriority},
+)
+```
+
+**Ordered Processing Example:**
+```go
+// One message at a time, in arrival order, with room for a burst of 500
+container.RegisterQueueGroupService("ledger-postings",
+    mono.QGHP{
+        QueueGroup: "ledger-writers",
+        Handler:    m.handlePosting,
+        Options:    mono.ServiceOptions{MaxConcurrency: 1, MaxPending: 500},
+    },
 )
 ```
 
@@ -613,6 +641,40 @@ const (
 
 Use `FormatServiceType(serviceType)` to convert to string representation.
 
+## Handler Concurrency (Worker Pools)
+
+NATS delivers the messages of one subscription to its callback **one at a time**. Request-reply services, queue group services and event consumers are each one subscription, so without a pool a single slow handler call (a blocking HTTP call, a slow query, a lock wait) delays every later message to that service on that instance.
+
+The framework therefore runs these handlers on a **bounded worker pool per subscription**. The subscription callback only hands the message over; a worker goroutine runs the handler.
+
+```go
+type ServiceOptions struct {
+    MaxConcurrency int // handlers running at once on this instance; 0 = default, 1 = serial, in order
+    MaxPending     int // messages waiting for a free worker; 0 = default
+}
+```
+
+| Setting | Default | How to change |
+|---------|---------|---------------|
+| `MaxConcurrency` | `runtime.GOMAXPROCS(0) * 4` | per registration: `mono.WithMaxConcurrency(n)` / `QGHP.Options` / `EventConsumerOptions`; app-wide: `mono.WithDefaultServiceConcurrency(n)` |
+| `MaxPending` | `16 × MaxConcurrency`, at least 256 | per registration: `mono.WithMaxPending(n)` / `QGHP.Options` / `EventConsumerOptions` |
+
+**When both are full:**
+
+| Message | Behaviour |
+|---------|-----------|
+| Request-reply call | Answered at once with an error the caller sees as `errors.ErrServiceOverloaded`. The request was not handled; retry, ideally on another instance. |
+| Queue group `Send` (ACK mode) | `Send` returns `ErrServiceOverloaded` instead of an ACK. The message was not handled. |
+| Queue group send in optimistic publish mode, event | Not rejected: the subscription waits for a free slot (back-pressure through the NATS client buffer). |
+
+{% hint style="warning" %}
+**Behaviour change:** handlers now run concurrently by default. A handler that relies on seeing messages in order, or that uses unsynchronized state, must set `MaxConcurrency: 1`. To keep the previous serial behaviour everywhere, use `mono.WithDefaultServiceConcurrency(1)`.
+{% endhint %}
+
+The pending default is generous on purpose: before worker pools a burst simply queued in the NATS client buffer and callers never saw an overload error. Lower `MaxPending` where failing fast matters more than absorbing bursts. A bound on the count cannot bound the wait: with a slow handler, a queued request may still wait longer than the caller's timeout. Size `MaxPending` for the burst you want to absorb and `MaxConcurrency` to drain it.
+
+Workers are started on demand and exit when idle, so an idle service holds no goroutines. Stream consumers, event stream consumers and cron services pull messages in their own loops and are not affected.
+
 ## Configuration Table
 
 | Property | Type | Description | Example |
@@ -621,6 +683,8 @@ Use `FormatServiceType(serviceType)` to convert to string representation.
 | Request Timeout | `time.Duration` | Max wait for response | `5 * time.Second` |
 | Message Size | `int` | Max message payload | `1048576` (1MB) |
 | Batch Size | `int` | Messages per batch | `100` |
+| Max Concurrency | `int` | Handlers running at once per subscription | `32` |
+| Max Pending | `int` | Messages waiting for a worker per subscription | `256` |
 
 ## Default Configuration
 
@@ -630,6 +694,8 @@ Use `FormatServiceType(serviceType)` to convert to string representation.
 | Max Message Size | 1 MB |
 | Queue Group Batch Size | 10 |
 | Stream Consumer Batch | 100 |
+| Max Concurrency | `runtime.GOMAXPROCS(0) * 4` |
+| Max Pending | `16 × MaxConcurrency` (minimum 256) |
 
 ## Examples
 

@@ -37,12 +37,15 @@ type ServiceContainer interface {
 	// RegisterChannelService registers a bidirectional Go channel service
 	RegisterChannelService(name string, in chan *Msg, out chan *Msg) error
 
-	// RegisterRequestReplyService registers a request-reply service over NATS
-	RegisterRequestReplyService(name string, handler RequestReplyHandler) error
+	// RegisterRequestReplyService registers a request-reply service over NATS.
+	// Options bound the worker pool that runs the handler on this instance; see
+	// ServiceOptions. Without options the framework defaults apply.
+	RegisterRequestReplyService(name string, handler RequestReplyHandler, opts ...ServiceOption) error
 
 	// RegisterQueueGroupService registers a queue group service with multiple handlers and acknowledgment.
 	// All handlers share the same subject (services.<module>.<service>) but use different queue groups.
 	// Handlers send an ACK before processing to enable "no responder" error detection.
+	// Each pair's Options bound the worker pool of its queue group's subscription.
 	RegisterQueueGroupService(name string, pairs ...QGHP) error
 
 	// RegisterStreamConsumerService registers a JetStream durable pull consumer service.
@@ -128,6 +131,10 @@ type TypedQueueGroupHandler[T any] func(ctx context.Context, payload T, msg *Msg
 type QGHP struct {
 	QueueGroup string            // Queue group name (e.g., "high-priority-workers")
 	Handler    QueueGroupHandler // Handler function for this queue group
+	// Options bounds the worker pool of this queue group's subscription on
+	// this instance. Zero values select the framework defaults; set
+	// MaxConcurrency to 1 for a handler that must see messages in order.
+	Options ServiceOptions
 }
 
 // TypedQGHP associates a queue group name with a typed handler.
@@ -135,6 +142,9 @@ type QGHP struct {
 type TypedQGHP[T any] struct {
 	QueueGroup string                    // Queue group name (e.g., "high-priority-workers")
 	Handler    TypedQueueGroupHandler[T] // Typed handler function for this queue group
+	// Options bounds the worker pool of this queue group's subscription on
+	// this instance; see QGHP.Options.
+	Options ServiceOptions
 }
 
 // StreamConsumerHandler processes batches of messages from a JetStream pull consumer.
@@ -184,6 +194,7 @@ type ServiceEntry struct {
 	// when creating new consumer channels.
 	ConsumerMu            sync.RWMutex
 	RequestHandler        RequestReplyHandler
+	Options               ServiceOptions        // Worker pool bounds for RequestReply services (zero = framework defaults)
 	QueueGroup            string                // Queue group for RequestReply services
 	QueueHandlers         []QGHP                // Multiple handler pairs for QueueGroup services
 	StreamConsumerConfig  *StreamConsumerConfig // For StreamConsumer type

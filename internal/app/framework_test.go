@@ -98,6 +98,7 @@ func newTestFramework(t *testing.T) types.MonoFramework {
 	fw, err := NewFrameworkAppInstance(
 		logger,
 		0,                        // No queue group optimistic window
+		0,                        // Default service concurrency
 		nats.WithDontListen(),    // Don't bind TCP port
 		nats.WithInProcessConn(), // Use in-process connections only
 	)
@@ -932,6 +933,7 @@ func TestNewFrameworkAppInstance_InvalidNATSOptions(t *testing.T) {
 	_, err := NewFrameworkAppInstance(
 		logger,
 		0,
+		0,
 		nats.WithPort(70000), // Invalid port > 65535
 	)
 
@@ -954,6 +956,7 @@ func TestNewFrameworkAppInstance_NATSManagerCreationFailure(t *testing.T) {
 	// DontListen requires UseInProcessConn to be true
 	_, err := NewFrameworkAppInstance(
 		logger,
+		0,
 		0,
 		nats.WithDontListen(), // DontListen without InProcessConn should fail validation
 	)
@@ -1051,6 +1054,8 @@ func (m *mockLifecycleManager) GetPlugin(_ string) types.PluginModule {
 func (m *mockLifecycleManager) GetPluginContainer(_ string) types.ServiceContainer {
 	return nil
 }
+
+func (m *mockLifecycleManager) SetDefaultServiceConcurrency(_ int) {}
 
 // TestFramework_Stop_NATSManagerError tests Stop() when NATS manager fails
 func TestFramework_Stop_NATSManagerError(t *testing.T) {

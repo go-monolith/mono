@@ -148,6 +148,21 @@ type QueueGroupHandler = types.QueueGroupHandler
 // QGHP is a queue group handler pair.
 type QGHP = types.QGHP
 
+// ServiceOptions bounds the worker pool that runs the handlers of one
+// request-reply, queue group or event consumer subscription on this instance.
+type ServiceOptions = types.ServiceOptions
+
+// ServiceOption configures ServiceOptions for one registration.
+type ServiceOption = types.ServiceOption
+
+// WithMaxConcurrency sets the maximum number of handlers running at once for
+// one registration; 1 keeps message order.
+var WithMaxConcurrency = types.WithMaxConcurrency
+
+// WithMaxPending sets the maximum number of messages waiting for a free
+// worker for one registration.
+var WithMaxPending = types.WithMaxPending
+
 // QueueGroupServiceClient is a client for queue group services.
 type QueueGroupServiceClient = types.QueueGroupServiceClient
 
@@ -209,6 +224,11 @@ type TypedEventConsumerHandler[T any] = types.TypedEventConsumerHandler[T]
 
 // EventConsumerEntry tracks an event consumer registration.
 type EventConsumerEntry = types.EventConsumerEntry
+
+// EventConsumerOptions configures an event consumer registered with
+// EventRegistry.RegisterEventConsumerWithOptions: its queue group and the
+// bounds of the worker pool that runs its handler.
+type EventConsumerOptions = types.EventConsumerOptions
 
 // EventStreamConsumerHandler handles batches of JetStream messages.
 type EventStreamConsumerHandler = types.EventStreamConsumerHandler

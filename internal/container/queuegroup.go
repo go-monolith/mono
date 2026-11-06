@@ -20,9 +20,13 @@ import (
 //
 // Parameters:
 //   - name: Service name (must be kebab-case)
-//   - pairs: One or more QueueGroupHandlerPair, each defining a queue group and handler
+//   - pairs: One or more QueueGroupHandlerPair, each defining a queue group and handler.
+//     A pair's Options bound the worker pool of its subscription on this instance
+//     (see types.ServiceOptions); zero values select the framework defaults.
 //
 // The service subject is computed as: services.<module>.<service>
+//
+// Returns an error if a pair's Options are negative.
 //
 // Example:
 //
@@ -55,6 +59,9 @@ func (c *serviceContainer) RegisterQueueGroupService(name string, pairs ...types
 		}
 		if seen[pair.QueueGroup] {
 			return fmt.Errorf("duplicate queue group '%s' in service '%s'", pair.QueueGroup, name)
+		}
+		if err := pair.Options.Validate(); err != nil {
+			return fmt.Errorf("invalid options for pair %d (queue group '%s') in service '%s': %w", i, pair.QueueGroup, name, err)
 		}
 		seen[pair.QueueGroup] = true
 	}
@@ -212,7 +219,7 @@ func (c *queueGroupClient) sendInternal(ctx context.Context, data []byte) error 
 	}
 
 	// Use request-reply to wait for ACK with headers
-	_, err = c.eventBus.RequestMsgWithContext(ctx, msg)
+	ack, err := c.eventBus.RequestMsgWithContext(ctx, msg)
 	if err != nil {
 		// Wrap context deadline exceeded errors with timeout error
 		if errors.Is(err, context.DeadlineExceeded) {
@@ -222,11 +229,44 @@ func (c *queueGroupClient) sendInternal(ctx context.Context, data []byte) error 
 		// when nats.ErrNoResponders occurs
 		return err
 	}
+	if err := c.checkACK(ack); err != nil {
+		return err
+	}
 
 	// Success - update last ACK time (atomic store)
 	c.lastSuccessfulACK.Store(now)
 
 	return nil
+}
+
+// checkACK inspects the acknowledgement of a send. The handling instance
+// answers with an error response instead of an empty ACK when it rejected the
+// message: because its worker pool and pending queue are full
+// (ErrServiceOverloaded) or because it is shutting down
+// (ErrServiceUnavailable). Such a message was not handled, so the caller may
+// retry. Any other error response is reported as a RemoteError.
+func (c *queueGroupClient) checkACK(ack *types.Msg) error {
+	if ack == nil || ack.Header == nil {
+		return nil
+	}
+	errorValues := ack.Header[types.HeaderError]
+	if len(errorValues) == 0 || errorValues[0] != "true" {
+		return nil
+	}
+
+	errorType := ""
+	if typeValues := ack.Header[types.HeaderErrorType]; len(typeValues) > 0 {
+		errorType = typeValues[0]
+	}
+	if err := frameworkErrorResponse(c.serviceName, c.moduleName, types.ServiceTypeQueueGroup, errorType); err != nil {
+		return err
+	}
+
+	message := "unknown error"
+	if msgValues := ack.Header[types.HeaderErrorMessage]; len(msgValues) > 0 {
+		message = msgValues[0]
+	}
+	return monoerrors.WrapRemoteError(c.serviceName, c.moduleName, message, errorType)
 }
 
 // sendInternalMsg implements smart switching for queue group sends with full message support.
@@ -275,12 +315,15 @@ func (c *queueGroupClient) sendInternalMsg(ctx context.Context, msg *types.Msg) 
 	}
 
 	// Use request-reply to wait for ACK with headers
-	_, err = c.eventBus.RequestMsgWithContext(ctx, fullMsg)
+	ack, err := c.eventBus.RequestMsgWithContext(ctx, fullMsg)
 	if err != nil {
 		// Wrap context deadline exceeded errors with timeout error
 		if errors.Is(err, context.DeadlineExceeded) {
 			return monoerrors.WrapTimeout("queue-group", c.timeout, err)
 		}
+		return err
+	}
+	if err := c.checkACK(ack); err != nil {
 		return err
 	}
 
@@ -296,9 +339,11 @@ func (c *queueGroupClient) sendInternalMsg(ctx context.Context, msg *types.Msg) 
 // - On publish failure, resets to ACK mode for next send (current send fails)
 //
 // Errors returned indicate:
-// - Service unavailable (no handlers online)
-// - Timeout waiting for ACK
-// - Context cancellation
+//   - Service unavailable (no handlers online, or the handling instance is shutting down)
+//   - Service overloaded (the handling instance's worker pool and pending queue are full;
+//     the message was not handled and may be re-sent)
+//   - Timeout waiting for ACK
+//   - Context cancellation
 //
 // Handler processing errors do NOT propagate to the sender as processing
 // happens asynchronously after ACK.
@@ -327,9 +372,11 @@ func (c *queueGroupClient) Send(ctx context.Context, data []byte) error {
 // as the service subject is always used for routing.
 //
 // Errors returned indicate:
-// - Service unavailable (no handlers online)
-// - Timeout waiting for ACK
-// - Context cancellation
+//   - Service unavailable (no handlers online, or the handling instance is shutting down)
+//   - Service overloaded (the handling instance's worker pool and pending queue are full;
+//     the message was not handled and may be re-sent)
+//   - Timeout waiting for ACK
+//   - Context cancellation
 //
 // Handler processing errors do NOT propagate to the sender.
 //

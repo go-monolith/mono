@@ -26,6 +26,13 @@ type MonoFrameworkConfig struct {
 	// When > 0, after a successful ACK, subsequent sends within this window use fire-and-forget publish.
 	// When 0 (default), always use ACK mode (disabled).
 	QueueGroupOptimisticWindow time.Duration
+
+	// DefaultServiceConcurrency is the MaxConcurrency applied to every
+	// request-reply, queue group and event consumer subscription whose own
+	// ServiceOptions leave it at 0. When 0 (default), runtime.GOMAXPROCS(0)*4
+	// is used. Set it to 1 to run every handler serially, as versions before
+	// worker pools did.
+	DefaultServiceConcurrency int
 }
 
 // NATSOptions holds NATS server configuration.

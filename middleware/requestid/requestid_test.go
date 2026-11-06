@@ -406,6 +406,26 @@ func TestOnServiceRegistration(t *testing.T) {
 		}
 	})
 
+	t.Run("keeps QueueGroup pair options", func(t *testing.T) {
+		handler := func(_ context.Context, _ *types.Msg) error { return nil }
+		reg := types.ServiceRegistration{
+			Type: types.ServiceTypeQueueGroup,
+			QueueHandlers: []types.QGHP{
+				{QueueGroup: "ordered", Handler: handler, Options: types.ServiceOptions{MaxConcurrency: 1, MaxPending: 7}},
+			},
+			Options: types.ServiceOptions{MaxConcurrency: 3},
+		}
+
+		result := m.OnServiceRegistration(context.Background(), reg)
+
+		if got := result.QueueHandlers[0].Options; got != (types.ServiceOptions{MaxConcurrency: 1, MaxPending: 7}) {
+			t.Fatalf("pair options after wrapping = %+v, want {1 7}", got)
+		}
+		if result.Options.MaxConcurrency != 3 {
+			t.Fatalf("registration options after wrapping = %+v, want MaxConcurrency 3", result.Options)
+		}
+	})
+
 	t.Run("wraps QueueGroup handlers", func(t *testing.T) {
 		handler1 := func(ctx context.Context, msg *types.Msg) error {
 			return nil

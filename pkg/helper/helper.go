@@ -141,6 +141,40 @@ func RegisterTypedEventConsumer[T any](
 	return registry.RegisterEventConsumer(eventDef.ToBase(), wrappedHandler, module, queueGroup...)
 }
 
+// RegisterTypedEventConsumerWithOptions is RegisterTypedEventConsumer with
+// explicit options: the queue group and the bounds of the worker pool that runs
+// the handler on this instance (see types.ServiceOptions). Use MaxConcurrency 1
+// for a handler that must see events in order.
+//
+// Example:
+//
+//	err := helper.RegisterTypedEventConsumerWithOptions(
+//	    registry,
+//	    order.OrderCreatedV1,
+//	    m.handleOrderCreated,
+//	    m,
+//	    types.EventConsumerOptions{
+//	        ServiceOptions: types.ServiceOptions{MaxConcurrency: 1},
+//	    },
+//	)
+func RegisterTypedEventConsumerWithOptions[T any](
+	registry types.EventRegistry,
+	eventDef types.EventDefinition[T],
+	handler types.TypedEventConsumerHandler[T],
+	module types.Module,
+	opts types.EventConsumerOptions,
+) error {
+	wrappedHandler := func(ctx context.Context, msg *types.Msg) error {
+		event, err := eventDef.Unmarshal(msg)
+		if err != nil {
+			return err
+		}
+		return handler(ctx, event, msg)
+	}
+
+	return registry.RegisterEventConsumerWithOptions(eventDef.ToBase(), wrappedHandler, module, opts)
+}
+
 // RegisterTypedEventStreamConsumer registers a type-safe JetStream consumer for an event.
 // This is a convenience function that wraps the typed handler in a standard
 // EventStreamConsumerHandler with automatic unmarshaling of batched messages.
@@ -518,6 +552,7 @@ func RegisterTypedRequestReplyService[Req any, Resp any](
 //   - Converting typed handler pairs (TypedQGHP) to standard QGHP pairs
 //   - Wrapping each typed handler to automatically unmarshal message data
 //   - Passing the typed payload to the handler along with the original message
+//   - Carrying each pair's Options (worker pool bounds) over unchanged
 //
 // Type Parameters:
 //   - T: The message payload type (must be unmarshalable)
@@ -584,6 +619,7 @@ func RegisterTypedQueueGroupService[T any](
 		qghpPairs = append(qghpPairs, types.QGHP{
 			QueueGroup: queueGroup,
 			Handler:    wrappedHandler,
+			Options:    typedPair.Options,
 		})
 	}
 

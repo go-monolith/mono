@@ -353,6 +353,10 @@ type EventConsumerEntry struct {
 	// Defaults to the consumer module's name if not explicitly provided.
 	// Multiple consumers in the same queue group will share event processing (load balancing).
 	QueueGroup string
+
+	// Options bounds the worker pool of this consumer's subscription on this
+	// instance. Zero values select the framework defaults.
+	Options ServiceOptions
 }
 
 // EventStreamConsumerHandler processes batches of messages from a JetStream pull consumer.
@@ -498,6 +502,18 @@ type EventRegistry interface {
 	// Importance: EventConsumer doesn't detect "no responder" error. There is a risk
 	// of "loss event" when there is no consumer is available
 	RegisterEventConsumer(eventDef BaseEventDefinition, handler EventConsumerHandler, module Module, queueGroup ...string) error
+
+	// RegisterEventConsumerWithOptions is RegisterEventConsumer with explicit
+	// options: the queue group and the bounds of the worker pool that runs the
+	// handler on this instance. Use MaxConcurrency 1 for a handler that must
+	// see events in order.
+	//
+	// Example:
+	//
+	//	err := registry.RegisterEventConsumerWithOptions(eventDef, handler, m, mono.EventConsumerOptions{
+	//	    ServiceOptions: mono.ServiceOptions{MaxConcurrency: 1},
+	//	})
+	RegisterEventConsumerWithOptions(eventDef BaseEventDefinition, handler EventConsumerHandler, module Module, opts EventConsumerOptions) error
 
 	// Entries returns all registered event consumers.
 	// Framework uses this during setupNATSSubscriptions phase.

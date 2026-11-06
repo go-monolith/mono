@@ -196,6 +196,47 @@ func (r *eventRegistry) GetAllEvents() []types.BaseEventDefinition {
 //	// Custom queue group (for multiple handlers of same event in same module)
 //	err := registry.RegisterEventConsumer(eventDef.ToBase(), handler, module, "custom-queue")
 func (r *eventRegistry) RegisterEventConsumer(eventDef types.BaseEventDefinition, handler types.EventConsumerHandler, module types.Module, queueGroup ...string) error {
+	var opts types.EventConsumerOptions
+	if len(queueGroup) > 0 {
+		opts.QueueGroup = queueGroup[0]
+		// Warn if multiple queue groups provided (only first is used)
+		if len(queueGroup) > 1 {
+			used := opts.QueueGroup
+			if used == "" {
+				used = moduleNameOrEmpty(module)
+			}
+			r.logger.Warn("Multiple queue groups provided, using first non-empty value",
+				"provided_count", len(queueGroup),
+				"used", used,
+				"consumer_module", moduleNameOrEmpty(module))
+		}
+	}
+	return r.RegisterEventConsumerWithOptions(eventDef, handler, module, opts)
+}
+
+// moduleNameOrEmpty returns module.Name(), or "" for a nil module.
+func moduleNameOrEmpty(module types.Module) string {
+	if module == nil {
+		return ""
+	}
+	return module.Name()
+}
+
+// RegisterEventConsumerWithOptions registers a consumer handler for an event
+// with an explicit queue group and worker pool bounds.
+//
+// opts.QueueGroup defaults to module.Name() when empty. opts.ServiceOptions
+// bounds the worker pool that runs the handler on this instance; zero values
+// select the framework defaults, and negative values are rejected. Set
+// MaxConcurrency to 1 for a handler that must see events in order.
+//
+// Example:
+//
+//	err := registry.RegisterEventConsumerWithOptions(eventDef.ToBase(), handler, module, types.EventConsumerOptions{
+//	    QueueGroup:     "order-projector",
+//	    ServiceOptions: types.ServiceOptions{MaxConcurrency: 1},
+//	})
+func (r *eventRegistry) RegisterEventConsumerWithOptions(eventDef types.BaseEventDefinition, handler types.EventConsumerHandler, module types.Module, opts types.EventConsumerOptions) error {
 	if handler == nil {
 		return fmt.Errorf("event consumer handler cannot be nil")
 	}
@@ -205,20 +246,15 @@ func (r *eventRegistry) RegisterEventConsumer(eventDef types.BaseEventDefinition
 	if eventDef.Subject == "" {
 		return fmt.Errorf("event definition subject cannot be empty")
 	}
+	if err := opts.Validate(); err != nil {
+		return fmt.Errorf("invalid options for event consumer %s.%s in module '%s': %w",
+			eventDef.ModuleName, eventDef.Name, module.Name(), err)
+	}
 
 	// Compute queue group: default to module name if not provided or empty
-	computedQueueGroup := module.Name()
-	if len(queueGroup) > 0 {
-		if queueGroup[0] != "" {
-			computedQueueGroup = queueGroup[0]
-		}
-		// Warn if multiple queue groups provided (only first is used)
-		if len(queueGroup) > 1 {
-			r.logger.Warn("Multiple queue groups provided, using first non-empty value",
-				"provided_count", len(queueGroup),
-				"used", computedQueueGroup,
-				"consumer_module", module.Name())
-		}
+	computedQueueGroup := opts.QueueGroup
+	if computedQueueGroup == "" {
+		computedQueueGroup = module.Name()
 	}
 
 	entry := types.EventConsumerEntry{
@@ -226,6 +262,7 @@ func (r *eventRegistry) RegisterEventConsumer(eventDef types.BaseEventDefinition
 		Handler:    handler,
 		Module:     module,
 		QueueGroup: computedQueueGroup,
+		Options:    opts.ServiceOptions,
 	}
 
 	// Run entry through middleware chain if available

@@ -210,8 +210,22 @@ fmt.Printf("Transaction: %s\n", response.TransactionID)
 - ✓ Type-safe with generics
 - ✓ Error propagation back to caller
 - ✓ Good latency (~1ms over NATS)
+- ✓ Handlers run concurrently on a bounded worker pool (one slow call does not delay the others)
 - ✗ No persistence
 - ✗ Caller blocked waiting for response
+
+#### Concurrency
+
+Each service runs its handler on a bounded worker pool per instance. By default up to `runtime.GOMAXPROCS(0) * 4` requests are handled at once; when the pool and its pending queue are full, further requests fail fast with `ErrServiceOverloaded` so the caller can retry on another instance. Tune per service, or app-wide with `mono.WithDefaultServiceConcurrency(n)`:
+
+```go
+container.RegisterRequestReplyService("process-payment", m.handleProcessPayment,
+    mono.WithMaxConcurrency(32), // handlers running at once
+    mono.WithMaxPending(128),    // requests waiting for a worker
+)
+```
+
+See [Handler Concurrency](../api/container.md#handler-concurrency-worker-pools).
 
 ---
 
@@ -268,9 +282,26 @@ if err != nil {
 - ✓ Load-balanced (multiple workers)
 - ✓ Horizontal scalability
 - ✓ Good latency (message queued quickly)
+- ✓ Handlers run concurrently on a bounded worker pool per queue group
 - ✗ No response (fire-and-forget)
 - ✗ No persistence
 - ✗ Error handling limited (worker processes independently)
+
+#### Concurrency and Ordering
+
+Messages of one queue group are handled concurrently by default, so a handler that must see them in order sets `MaxConcurrency: 1` on its pair:
+
+```go
+container.RegisterQueueGroupService("ledger-postings",
+    mono.QGHP{
+        QueueGroup: "ledger-writers",
+        Handler:    m.handlePosting,
+        Options:    mono.ServiceOptions{MaxConcurrency: 1, MaxPending: 500},
+    },
+)
+```
+
+When the pool and its pending queue are full, `Send` in ACK mode returns `ErrServiceOverloaded` (the message was not accepted); a send in optimistic publish mode is held back until a slot frees instead of being dropped. See [Handler Concurrency](../api/container.md#handler-concurrency-worker-pools).
 
 ---
 
