@@ -26,6 +26,13 @@ const (
 	// full (see ServiceOptions). Clients map it to errors.ErrServiceOverloaded.
 	ErrorTypeOverloaded = "overloaded"
 
+	// ErrorTypeHandlerPanic is the HeaderErrorType value of the error response the
+	// framework sends when the request-reply handler panicked. The panic is
+	// recovered and logged with its stack on the handling instance; clients map
+	// this value to errors.ErrHandlerPanic. The value contains a hyphen so no
+	// Go error type name (lower-cased, "Error" suffix removed) can produce it.
+	ErrorTypeHandlerPanic = "handler-panic"
+
 	// ErrorTypeShuttingDown is the HeaderErrorType value of the error response
 	// the framework sends to a request that arrives while the instance is
 	// shutting down and no longer accepts work. Clients map it to

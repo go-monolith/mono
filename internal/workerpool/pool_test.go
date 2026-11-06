@@ -296,6 +296,37 @@ func TestSubmit_ConcurrentSubmitAndClose(t *testing.T) {
 	}
 }
 
+// TestPanicHandler checks that a job panic is handed to PanicHandler, the
+// worker survives it and the pool keeps accepting and running jobs.
+func TestPanicHandler(t *testing.T) {
+	p := workerpool.New(1, 4)
+	var got atomic.Value
+	p.PanicHandler = func(recovered any, stack []byte) {
+		if len(stack) == 0 {
+			t.Error("expected a stack trace")
+		}
+		got.Store(recovered)
+	}
+	var wg sync.WaitGroup
+	wg.Add(2)
+	if err := p.Submit(func() { defer wg.Done(); panic("job bug") }, false); err != nil {
+		t.Fatalf("submit: %v", err)
+	}
+	if err := p.Submit(func() { wg.Done() }, false); err != nil {
+		t.Fatalf("submit: %v", err)
+	}
+	wg.Wait()
+	if err := p.Close(context.Background()); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	if v := got.Load(); v != "job bug" {
+		t.Fatalf("PanicHandler got %v, want job bug", v)
+	}
+	if active, pending := p.Stats(); active != 0 || pending != 0 {
+		t.Fatalf("after panic: active=%d pending=%d, want 0/0", active, pending)
+	}
+}
+
 // TestWorker_ExitsWhenIdle checks that workers do not linger after the work
 // is done, so an idle pool holds no goroutines.
 func TestWorker_ExitsWhenIdle(t *testing.T) {

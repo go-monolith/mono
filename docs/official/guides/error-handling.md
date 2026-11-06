@@ -119,6 +119,19 @@ func (m *OrderModule) handleProcessOrder(ctx context.Context, order *Order) erro
 }
 ```
 
+### Handler Panics
+
+A panic inside any handler (request-reply, queue group, event consumer, stream consumer, event stream consumer, cron) is recovered by the framework. It is logged at `Error` level with `panic=true` and the stack trace, and the subscription keeps running, so one bad message does not crash the process. A request-reply caller receives `ErrHandlerPanic` immediately instead of waiting for a timeout:
+
+```go
+resp, err := client.Call(ctx, data)
+if errors.Is(err, monoerrors.ErrHandlerPanic) {
+    // The handler crashed on this request; it was logged with a stack trace on the handling instance.
+}
+```
+
+Acknowledgement is unchanged: a cron occurrence is Nak'd, while a stream or event stream consumer batch is neither Ack'd nor Nak'd, so the messages the handler did not acknowledge are redelivered after `AckWait` (bounded by `MaxDeliver`). Recovery is a safety net, not a substitute for returning errors; a handler that panics on every delivery still burns its redeliveries.
+
 ### Overloaded Services
 
 Request-reply, queue group and event consumer handlers run on a bounded worker pool per subscription (request-reply pools several workers by default; queue groups and event consumers have one worker unless they opt in). When every worker is busy and the pending queue is full, a request-reply call or an ACK-mode queue group send fails fast with `ErrServiceOverloaded` instead of waiting. The message was **not** handled, so the caller may retry; with several instances the retry usually lands on one with capacity.
