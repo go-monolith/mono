@@ -20,6 +20,17 @@ const (
 	// HeaderErrorType contains the error classification (e.g., "service", "timeout").
 	// This is optional and helps clients handle errors differently based on type.
 	HeaderErrorType = "Mono-Error-Type"
+
+	// ErrorTypeOverloaded is the HeaderErrorType value of the error response the
+	// framework sends when a subscription's worker pool and pending queue are
+	// full (see ServiceOptions). Clients map it to errors.ErrServiceOverloaded.
+	ErrorTypeOverloaded = "overloaded"
+
+	// ErrorTypeShuttingDown is the HeaderErrorType value of the error response
+	// the framework sends to a request that arrives while the instance is
+	// shutting down and no longer accepts work. Clients map it to
+	// errors.ErrServiceUnavailable.
+	ErrorTypeShuttingDown = "shutting-down"
 )
 
 // EventBus provides event-driven communication wrapping NATS client.
@@ -109,8 +120,12 @@ type EventBusWithConn[T any] interface {
 // (logging, retrying, etc.). Errors in handlers do not affect the subscription - the handler
 // is responsible for error recovery.
 //
-// Performance note: Handlers are invoked asynchronously in a dedicated goroutine. Blocking
-// operations in the handler will not block other message processing or the event loop.
+// Concurrency note: nats.go delivers the messages of one subscription to this handler
+// one at a time, on a single goroutine per subscription. A handler that blocks delays
+// every later message on the same subscription. The handlers of request-reply, queue
+// group and event consumer registrations are therefore not invoked directly: the
+// framework runs them through a bounded worker pool (see ServiceOptions). Handlers
+// passed to Subscribe or QueueSubscribe directly are invoked serially.
 //
 // Context cancellation: When the EventBus's runtime context is cancelled (typically during
 // graceful shutdown), handlers may receive calls with a cancelled context. Handlers should

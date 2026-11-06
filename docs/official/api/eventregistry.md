@@ -15,6 +15,7 @@ func GetAllEvents() []BaseEventDefinition
 
 // Consumer registration
 func RegisterEventConsumer(eventDef BaseEventDefinition, handler EventConsumerHandler, module Module, queueGroup ...string) error
+func RegisterEventConsumerWithOptions(eventDef BaseEventDefinition, handler EventConsumerHandler, module Module, opts EventConsumerOptions) error
 func RegisterEventStreamConsumer(eventDef BaseEventDefinition, config StreamConsumerConfig, handler EventStreamConsumerHandler, module Module) error
 
 // Consumer inspection
@@ -222,6 +223,46 @@ For type-safe handlers with automatic unmarshaling, use `TypedEventConsumerHandl
 ```go
 type TypedEventConsumerHandler[T any] func(ctx context.Context, event T, msg *Msg) error
 ```
+
+### RegisterEventConsumerWithOptions
+
+```go
+func (registry EventRegistry) RegisterEventConsumerWithOptions(
+    eventDef BaseEventDefinition,
+    handler EventConsumerHandler,
+    module Module,
+    opts EventConsumerOptions,
+) error
+```
+
+`RegisterEventConsumer` with explicit options: the queue group and the bounds of the worker pool that runs the handler on this instance.
+
+```go
+type EventConsumerOptions struct {
+    QueueGroup string // "" = module name
+    ServiceOptions    // MaxConcurrency, MaxPending (zero = framework defaults)
+}
+```
+
+Event handlers are **serial by default**: one event at a time, in publish order, as with `RegisterEventConsumer`. Set `MaxConcurrency` above 1 to handle events concurrently when the handler does not depend on order (see [Handler Concurrency](container.md#handler-concurrency-worker-pools)). Events carry no reply subject, so a full pool does not reject them: the subscription waits for a slot instead. Negative values fail registration.
+
+**Example:**
+```go
+func (m *NotificationModule) RegisterEventConsumers(registry mono.EventRegistry) error {
+    eventDef, found := registry.GetEventByName("OrderCreated", "v1", "order")
+    if !found {
+        return fmt.Errorf("event not found")
+    }
+
+    // Each notification is independent and waits on an external API:
+    // handle up to 16 at once instead of one at a time.
+    return registry.RegisterEventConsumerWithOptions(eventDef, m.notifyOrderCreated, m, mono.EventConsumerOptions{
+        ServiceOptions: mono.ServiceOptions{MaxConcurrency: 16},
+    })
+}
+```
+
+**Typed Handler (helper):** `helper.RegisterTypedEventConsumerWithOptions(registry, eventDef, handler, module, opts)`.
 
 ### RegisterEventStreamConsumer
 

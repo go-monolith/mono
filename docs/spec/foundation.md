@@ -91,6 +91,17 @@ Four distinct patterns for inter-module communication:
 - **Retiring a cron service (two-phase)**: set `Deprecated: true` and deploy — the framework purges the server-side schedule (publishing a cancel to `services.<module>.<service>.control`) and does not start the consumer, while keeping the registration code. In a later release, remove the `RegisterCronService` call. Removing the call without first deprecating leaves an orphaned durable schedule; the framework logs a warning on startup when it detects a `MONO_CRON_*` stream with no matching registration (it never auto-deletes).
 - **Middleware**: cron handlers are not currently wrapped by the middleware chain (access-log, audit, request-id).
 
+### Handler Concurrency (Worker Pools)
+
+- **Why**: nats.go delivers the messages of one asynchronous subscription to its callback one at a time, on a single goroutine per subscription. Request-reply services, queue group services and event consumers are each one `QueueSubscribe`, so without a pool one slow handler call (a blocking HTTP call, a slow query, a lock wait) delays every later message on the same subscription, adding instances helps only per message rather than per free worker, and the backlog sits invisibly in the client's pending buffer.
+- **Design**: the subscription callback only copies the message and hands it to a **bounded worker pool per subscription** (`internal/workerpool`); a worker goroutine runs the handler. Workers are started on demand up to `MaxConcurrency` and exit when idle, so an idle pool holds no goroutines. Pending jobs wait in a FIFO queue bounded by `MaxPending`; with `MaxConcurrency: 1` the pool runs handlers strictly in arrival order (the behaviour of versions before worker pools). All pool state sits behind one mutex so a job is never queued without a worker to run it.
+- **Options**: `types.ServiceOptions{MaxConcurrency, MaxPending}`; zero means the default for the kind of subscription (below), negative is rejected at registration (fail fast). Middleware written before the options existed rebuilds registrations and `QGHP` pairs without them, so `applyServiceRegistration` keeps the original options when a registration or a same-named pair comes back with zero options. Set per registration with `RegisterRequestReplyService(name, handler, WithMaxConcurrency(n), WithMaxPending(n))`, `QGHP.Options` (one pool per queue group), and `EventRegistry.RegisterEventConsumerWithOptions(def, handler, module, EventConsumerOptions{QueueGroup, ServiceOptions})`. The framework-wide default is `WithDefaultServiceConcurrency(n)`; without it `MaxConcurrency` defaults to `runtime.GOMAXPROCS(0)*4` and `MaxPending` to `16 × MaxConcurrency` with a floor of 256. The pending default is deliberately generous: before worker pools a burst simply queued in the NATS client buffer and callers never saw an overload error, so the default absorbs bursts first and sheds load only once a backlog has clearly built up. A count bound cannot bound wait time: time-based shedding belongs to deadline propagation (issue #20).
+- **Defaults differ by kind.** Request-reply services are **pooled by default**: each request is independent, so a zero `MaxConcurrency` means the framework default. Queue group services and event consumers are **serial by default**: a zero `MaxConcurrency` means 1, so a handler keeps seeing its messages one at a time in arrival order, exactly as before worker pools existed (downstream consumers that count, sum or apply state transitions in order are not affected). Opt in per registration by setting `MaxConcurrency` above 1. `WithDefaultServiceConcurrency` therefore applies to request-reply only; `WithDefaultServiceConcurrency(1)` restores the fully serial behaviour of earlier versions.
+- **Overload**: when the pool and its queue are both full, a message that carries a reply subject (a request-reply call, or a queue group send awaiting its ACK) is answered immediately with `Mono-Error: true`, `Mono-Error-Type: overloaded`; the client maps it to a `ServiceError` wrapping `errors.ErrServiceOverloaded`, so the caller fails fast and can retry (with several instances the retry usually lands elsewhere). A message without a reply subject (an event, or a queue group send in optimistic publish mode) cannot be answered, so it is **not rejected**: the subscription callback blocks until a queue slot frees, which applies back-pressure through the NATS client's pending buffer (should that buffer's own limits ever be reached, nats.go reports a slow consumer). Rejections are logged at most once per second per subscription, with the count.
+- **Queue group ACK** is sent after the pool accepted the message, so an ACK means "accepted for processing" and a rejection is distinguishable from it. The worker waits for the ACK outcome before running the handler: if the ACK publish itself fails, the handler is skipped, because the sender will time out and re-send and the message must not be handled twice (the behaviour of earlier versions, which ACKed before calling the handler and returned on failure).
+- **Shutdown**: `Stop` calls `Drain()` on every subscription and then waits until each one is no longer valid (nats.go's `Drain` returns before the buffered messages have been delivered), so buffered messages still reach the pools. It then closes every pool and waits for in-flight and queued handlers to finish. One deadline, the stop context bounded by the drain timeout (5s), covers both waits, after which modules are stopped. A request delivered after the pools closed is answered with `Mono-Error-Type: shutting-down` (mapped to `ErrServiceUnavailable`); an event still buffered at that point is dropped with a rate-limited warning. The runtime context is still cancelled before the drain (issue #21 covers reordering that and making the timeout configurable).
+- **Out of scope**: stream consumer, event stream consumer and cron services are pull-based loops and are not pooled. Panics in handlers are not recovered here (issue #22).
+
 ### Event Consumer Patterns
 
 Two patterns for consuming broadcast events:
@@ -183,6 +194,7 @@ The core framework provides modular monolith architecture with embedded NATS for
 - Request-Reply: Errors propagated immediately to caller
 - Queue Group: Errors logged but don't affect sender (fire-and-forget)
 - Channel Service: Handler owns error handling
+- Overload (all pooled handlers): a request or ACK-mode send rejected by a full worker pool fails fast with `ErrServiceOverloaded`; events and optimistic sends are held back instead of dropped (see "Handler Concurrency")
 
 **Configuration Validation**: Each option validates immediately during application. First error stops processing. Cross-field validation occurs after all options applied. Error messages include context ("option N failed: specific error").
 
@@ -190,9 +202,10 @@ The core framework provides modular monolith architecture with embedded NATS for
 1. Stop accepting new work
 2. Drain in-flight operations (with timeout)
 3. Unsubscribe from all NATS subscriptions
-4. Stop all modules in reverse dependency order
-5. Close NATS connection and stop embedded NATS server
-6. Force shutdown if timeout exceeded
+4. Close the worker pools and wait for in-flight handlers (within the same timeout)
+5. Stop all modules in reverse dependency order
+6. Close NATS connection and stop embedded NATS server
+7. Force shutdown if timeout exceeded
 
 ### Performance Targets
 
@@ -231,7 +244,8 @@ mono-framework/
 │   ├── logger/                    # Logger implementation
 │   ├── middleware/                # Middleware chain execution
 │   ├── nats/                      # NATS server setup & embedded server
-│   └── registry/                  # Module registry & event registry impl
+│   ├── registry/                  # Module registry & event registry impl
+│   └── workerpool/                # Bounded worker pool for subscription handlers
 │
 ├── middleware/                    # BUILT-IN MIDDLEWARE MODULES
 │   ├── accesslog/                 # Access logging middleware

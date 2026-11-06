@@ -110,7 +110,9 @@ func (m *mockModuleWithServices) RegisterServices(container types.ServiceContain
 	for _, entry := range m.serviceEntries {
 		switch entry.Type {
 		case types.ServiceTypeRequestReply:
-			if err := container.RegisterRequestReplyService(entry.Name, entry.RequestHandler); err != nil {
+			options := entry.Options
+			withOptions := func(o *types.ServiceOptions) { *o = options }
+			if err := container.RegisterRequestReplyService(entry.Name, entry.RequestHandler, withOptions); err != nil {
 				return err
 			}
 		case types.ServiceTypeQueueGroup:
@@ -201,6 +203,7 @@ type mockEventBus struct {
 	subscriptions        map[string][]types.MsgHandler
 	queueSubscriptions   map[string]map[string][]types.MsgHandler // subject -> queue -> handlers
 	publishedMessages    []publishedMessage
+	publishedMsgs        []*types.Msg // messages published with PublishMsg (headers kept)
 	publishErr           error
 	publishNotify        chan struct{}
 	eventStream          types.EventStream // For testing stream consumers
@@ -336,7 +339,26 @@ func (m *mockEventBus) EventStream() (types.EventStream, error) {
 }
 
 func (m *mockEventBus) PublishMsg(msg *types.Msg) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.publishErr != nil {
+		return m.publishErr
+	}
+	m.publishedMsgs = append(m.publishedMsgs, msg)
 	return nil
+}
+
+// getPublishedMsgs returns the messages published with PublishMsg to subject.
+func (m *mockEventBus) getPublishedMsgs(subject string) []*types.Msg {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var out []*types.Msg
+	for _, msg := range m.publishedMsgs {
+		if msg.Subject == subject {
+			out = append(out, msg)
+		}
+	}
+	return out
 }
 
 func (m *mockEventBus) SetRuntimeContext(ctx context.Context) {
@@ -346,7 +368,7 @@ func (m *mockEventBus) SetRuntimeContext(ctx context.Context) {
 // mockSubscription implements types.Subscription
 type mockSubscription struct {
 	subject string
-	drained bool
+	drained atomic.Bool
 }
 
 func (m *mockSubscription) Unsubscribe() error {
@@ -354,12 +376,14 @@ func (m *mockSubscription) Unsubscribe() error {
 }
 
 func (m *mockSubscription) Drain() error {
-	m.drained = true
+	m.drained.Store(true)
 	return nil
 }
 
+// IsValid reports false once drained, like a real subscription whose drain
+// has completed.
 func (m *mockSubscription) IsValid() bool {
-	return true
+	return !m.drained.Load()
 }
 
 func (m *mockSubscription) Subject() string {
@@ -1115,6 +1139,10 @@ func (m *mockEventRegistry) GetAllEvents() []types.BaseEventDefinition {
 }
 
 func (m *mockEventRegistry) RegisterEventConsumer(eventDef types.BaseEventDefinition, handler types.EventConsumerHandler, module types.Module, queueGroup ...string) error {
+	return nil
+}
+
+func (m *mockEventRegistry) RegisterEventConsumerWithOptions(_ types.BaseEventDefinition, _ types.EventConsumerHandler, _ types.Module, _ types.EventConsumerOptions) error {
 	return nil
 }
 
@@ -4224,9 +4252,8 @@ func TestLifecycleManager_RequestReplyHandler_Error(t *testing.T) {
 	handlers[0](context.Background(), msg)
 
 	// Verify error was logged
-	if !logger.hasErrorContaining("handler") {
-		t.Error("Expected error to be logged for handler error")
-	}
+	eventually(t, func() bool { return logger.hasErrorContaining("handler") },
+		"Expected error to be logged for handler error")
 }
 
 // TestLifecycleManager_RequestReplyHandler_PublishError tests RequestReply publish response error
@@ -4283,9 +4310,8 @@ func TestLifecycleManager_RequestReplyHandler_PublishError(t *testing.T) {
 	handlers[0](context.Background(), msg)
 
 	// Verify error was logged
-	if !logger.hasErrorContaining("publish") {
-		t.Error("Expected error to be logged for publish failure")
-	}
+	eventually(t, func() bool { return logger.hasErrorContaining("publish") },
+		"Expected error to be logged for publish failure")
 }
 
 // TestLifecycleManager_RequestReplyHandler_NoReplySubject tests RequestReply with no reply subject
@@ -4339,8 +4365,24 @@ func TestLifecycleManager_RequestReplyHandler_NoReplySubject(t *testing.T) {
 	handlers[0](context.Background(), msg)
 
 	// Verify warning was logged
-	if !logger.hasWarnContaining("reply") {
-		t.Error("Expected warning to be logged for missing reply subject")
+	eventually(t, func() bool { return logger.hasWarnContaining("reply") },
+		"Expected warning to be logged for missing reply subject")
+}
+
+// eventually polls cond until it returns true or two seconds pass. Handlers
+// of request-reply, queue group and event consumer subscriptions run on a
+// worker pool, so their effects are observed asynchronously.
+func eventually(t *testing.T, cond func() bool, failMsg string) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if cond() {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if !cond() {
+		t.Error(failMsg)
 	}
 }
 
@@ -4376,7 +4418,7 @@ func TestLifecycleManager_QueueGroupHandler_ACKPublishError(t *testing.T) {
 
 	lm := NewLifecycleManager(reg, pluginReg, eventBus, eventRegistry, logger, 0)
 
-	handlerCalled := false
+	var handlerCalled atomic.Bool
 	serviceModule := &mockModuleWithQueueGroupServices{
 		mockModule: mockModule{name: "qg-module"},
 		serviceEntries: []*types.ServiceEntry{
@@ -4388,7 +4430,7 @@ func TestLifecycleManager_QueueGroupHandler_ACKPublishError(t *testing.T) {
 					{
 						QueueGroup: "qg-module",
 						Handler: func(ctx context.Context, msg *types.Msg) error {
-							handlerCalled = true
+							handlerCalled.Store(true)
 							return nil
 						},
 					},
@@ -4425,12 +4467,16 @@ func TestLifecycleManager_QueueGroupHandler_ACKPublishError(t *testing.T) {
 	}
 	handlers[0](context.Background(), msg)
 
-	// Verify error was logged and handler was NOT called (early return on ACK failure)
+	// The ACK failure is logged. The sender will time out and re-send, so the
+	// handler is skipped for this delivery: the worker waits for the ACK
+	// outcome before deciding, so it cannot run ahead of the failed ACK.
 	if !logger.hasErrorContaining("ACK") {
 		t.Error("Expected error to be logged for ACK publish failure")
 	}
-	if handlerCalled {
-		t.Error("Handler should not be called when ACK fails")
+	// Let the worker observe the outcome; it must not run the handler.
+	time.Sleep(50 * time.Millisecond)
+	if handlerCalled.Load() {
+		t.Error("Handler should be skipped when the ACK publish fails")
 	}
 }
 
@@ -4490,9 +4536,8 @@ func TestLifecycleManager_QueueGroupHandler_HandlerError(t *testing.T) {
 	handlers[0](context.Background(), msg)
 
 	// Verify error was logged
-	if !logger.hasErrorContaining("QueueGroup handler error") {
-		t.Error("Expected error to be logged for QueueGroup handler error")
-	}
+	eventually(t, func() bool { return logger.hasErrorContaining("QueueGroup handler error") },
+		"Expected error to be logged for QueueGroup handler error")
 }
 
 // TestLifecycleManager_QueueGroupHandler_SuccessWithACK tests QueueGroup successful flow with ACK
@@ -4505,7 +4550,7 @@ func TestLifecycleManager_QueueGroupHandler_SuccessWithACK(t *testing.T) {
 
 	lm := NewLifecycleManager(reg, pluginReg, eventBus, eventRegistry, logger, 0)
 
-	handlerCalled := false
+	var handlerCalled atomic.Bool
 	serviceModule := &mockModuleWithQueueGroupServices{
 		mockModule: mockModule{name: "qg-module"},
 		serviceEntries: []*types.ServiceEntry{
@@ -4517,7 +4562,7 @@ func TestLifecycleManager_QueueGroupHandler_SuccessWithACK(t *testing.T) {
 					{
 						QueueGroup: "qg-module",
 						Handler: func(ctx context.Context, msg *types.Msg) error {
-							handlerCalled = true
+							handlerCalled.Store(true)
 							return nil
 						},
 					},
@@ -4552,9 +4597,7 @@ func TestLifecycleManager_QueueGroupHandler_SuccessWithACK(t *testing.T) {
 	handlers[0](context.Background(), msg)
 
 	// Verify handler was called and ACK was sent
-	if !handlerCalled {
-		t.Error("Handler should have been called")
-	}
+	eventually(t, handlerCalled.Load, "Handler should have been called")
 
 	// Verify ACK was published
 	ackMsgs := eventBus.getPublishedMessages("ack-reply-subject")
@@ -4661,9 +4704,8 @@ func TestLifecycleManager_EventConsumerHandler_Error(t *testing.T) {
 	handlers[0](context.Background(), msg)
 
 	// Verify error was logged
-	if !logger.hasErrorContaining("Event consumer handler error") {
-		t.Error("Expected error to be logged for event consumer handler error")
-	}
+	eventually(t, func() bool { return logger.hasErrorContaining("Event consumer handler error") },
+		"Expected error to be logged for event consumer handler error")
 }
 
 // TestLifecycleManager_EventConsumerSubscriptionError tests event consumer subscription error

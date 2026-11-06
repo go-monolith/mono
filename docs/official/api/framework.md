@@ -547,6 +547,25 @@ Enables optimistic publish mode for queue group services. When set, the first se
 mono.WithQueueGroupOptimisticWindow(1 * time.Second)
 ```
 
+#### WithDefaultServiceConcurrency
+
+```go
+func WithDefaultServiceConcurrency(n int) MonoFrameworkOption
+```
+
+Sets how many handlers may run at once for each request-reply service that does not set its own `MaxConcurrency` (see [Handler Concurrency](container.md#handler-concurrency-worker-pools)). Pass `1` to run request-reply handlers serially, as versions before worker pools did; a single registration can still override it with `mono.WithMaxConcurrency`. Queue group and event consumer handlers are serial unless their own registration opts in, so this option does not affect them.
+
+| Property | Value |
+|----------|-------|
+| Type | `int` |
+| Default | `0` = `runtime.GOMAXPROCS(0) * 4` |
+| Constraints | ≥ 1 |
+
+**Example:**
+```go
+mono.WithDefaultServiceConcurrency(16)
+```
+
 ## Default Configuration
 
 ```go
@@ -572,6 +591,7 @@ Returns a configuration with all default values. Useful for testing.
 | Log Source | `false` |
 | Shutdown Timeout | `30 * time.Second` |
 | Queue Group Optimistic Window | `0` (disabled) |
+| Default Service Concurrency | `0` (= `runtime.GOMAXPROCS(0) * 4`) |
 
 ## Constants and Enums
 

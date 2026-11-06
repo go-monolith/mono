@@ -66,7 +66,7 @@ func (m *mockServiceContainer) MustGetChannelService(name string, consumerModule
 	return in, out
 }
 
-func (m *mockServiceContainer) RegisterRequestReplyService(_ string, _ types.RequestReplyHandler) error {
+func (m *mockServiceContainer) RegisterRequestReplyService(_ string, _ types.RequestReplyHandler, _ ...types.ServiceOption) error {
 	return nil
 }
 func (m *mockServiceContainer) GetRequestReplyService(_ string) (types.RequestReplyServiceClient, error) {

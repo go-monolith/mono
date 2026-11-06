@@ -503,6 +503,30 @@ func TestWrapServiceFunctions(t *testing.T) {
 			t.Error("expected error to wrap ErrServiceUnavailable")
 		}
 	})
+
+	t.Run("WrapServiceOverloaded", func(t *testing.T) {
+		err := pkgerrors.WrapServiceOverloaded("busy-service", "test-module", types.ServiceTypeQueueGroup)
+		if err == nil {
+			t.Fatal("expected error, got nil")
+		}
+		if !errors.Is(err, pkgerrors.ErrServiceOverloaded) {
+			t.Error("expected error to wrap ErrServiceOverloaded")
+		}
+		if errors.Is(err, pkgerrors.ErrServiceUnavailable) {
+			t.Error("overloaded must be distinguishable from unavailable")
+		}
+		var svcErr *pkgerrors.ServiceError
+		if !errors.As(err, &svcErr) {
+			t.Fatal("expected a ServiceError")
+		}
+		if svcErr.ServiceName != "busy-service" || svcErr.ModuleName != "test-module" || svcErr.ServiceType != types.ServiceTypeQueueGroup {
+			t.Errorf("unexpected ServiceError fields: %+v", svcErr)
+		}
+		want := "service 'busy-service' (queue_group) in module 'test-module': service overloaded"
+		if err.Error() != want {
+			t.Errorf("Error() = %q, want %q", err.Error(), want)
+		}
+	})
 }
 
 // TestWrapDependencyFunctions tests dependency error wrapper functions

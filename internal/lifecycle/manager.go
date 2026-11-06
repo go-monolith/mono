@@ -47,6 +47,11 @@ type LifecycleManager interface {
 	// GetPluginContainer returns the service container for a registered plugin.
 	// Returns nil if the plugin is not found or hasn't been started yet.
 	GetPluginContainer(alias string) types.ServiceContainer
+
+	// SetDefaultServiceConcurrency sets the MaxConcurrency applied to request-reply,
+	// queue group and event consumer subscriptions whose options leave it at 0.
+	// Must be called before Start.
+	SetDefaultServiceConcurrency(n int)
 }
 
 // LifecycleEvent represents a module lifecycle event.

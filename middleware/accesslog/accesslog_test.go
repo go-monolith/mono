@@ -527,6 +527,29 @@ func TestExtractRequestID(t *testing.T) {
 
 // TestOnServiceRegistration verifies full service registration flow.
 func TestOnServiceRegistration(t *testing.T) {
+	t.Run("keeps queue group pair options", func(t *testing.T) {
+		m, _ := New(WithOutput(&syncWriter{}))
+		handler := func(_ context.Context, _ *types.Msg) error { return nil }
+		reg := types.ServiceRegistration{
+			Type:       types.ServiceTypeQueueGroup,
+			Name:       "test-service",
+			ModuleName: "test-module",
+			QueueHandlers: []types.QGHP{
+				{QueueGroup: "ordered", Handler: handler, Options: types.ServiceOptions{MaxConcurrency: 1, MaxPending: 7}},
+			},
+			Options: types.ServiceOptions{MaxConcurrency: 3},
+		}
+
+		wrapped := m.OnServiceRegistration(context.Background(), reg)
+
+		if got := wrapped.QueueHandlers[0].Options; got != (types.ServiceOptions{MaxConcurrency: 1, MaxPending: 7}) {
+			t.Fatalf("pair options after wrapping = %+v, want {1 7}", got)
+		}
+		if wrapped.Options.MaxConcurrency != 3 {
+			t.Fatalf("registration options after wrapping = %+v, want MaxConcurrency 3", wrapped.Options)
+		}
+	})
+
 	t.Run("wraps request-reply handler", func(t *testing.T) {
 		buf := &syncWriter{}
 		m, _ := New(WithOutput(buf))

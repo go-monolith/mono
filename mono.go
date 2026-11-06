@@ -38,7 +38,7 @@ func NewMonoApplication(opts ...MonoFrameworkOption) (MonoApplication, error) {
 
 	// Call internal app directly to create framework.
 	// Both packages share types from pkg/types, so we can pass config structs directly.
-	frameworkAppInstance, err := app.CreateFrameworkAppInstance(cfg.Logger, cfg.LoggerOptions, cfg.NATSOptions, cfg.QueueGroupOptimisticWindow)
+	frameworkAppInstance, err := app.CreateFrameworkAppInstance(cfg.Logger, cfg.LoggerOptions, cfg.NATSOptions, cfg.QueueGroupOptimisticWindow, cfg.DefaultServiceConcurrency)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create framework: %w", err)
 	}

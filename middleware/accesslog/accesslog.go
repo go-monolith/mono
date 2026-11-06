@@ -237,6 +237,7 @@ func (m *AccessLogModule) OnServiceRegistration(_ context.Context, reg types.Ser
 				wrappedPairs[i] = types.QGHP{
 					QueueGroup: pair.QueueGroup,
 					Handler:    m.wrapQueueGroupHandler(pair.Handler, reg.ModuleName, reg.Name),
+					Options:    pair.Options, // worker pool bounds must survive wrapping
 				}
 			}
 			reg.QueueHandlers = wrappedPairs

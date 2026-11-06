@@ -35,6 +35,12 @@ var (
 	// ErrServiceUnavailable is returned when a service is temporarily unavailable
 	ErrServiceUnavailable = errors.New("service unavailable")
 
+	// ErrServiceOverloaded is returned when the instance that received a request
+	// has every worker of the service busy and its pending queue full
+	// (see types.ServiceOptions). The request was not handled; the caller may
+	// retry, and with several instances the retry usually lands on another one.
+	ErrServiceOverloaded = errors.New("service overloaded")
+
 	// ErrInvalidConfiguration is returned when configuration validation fails
 	ErrInvalidConfiguration = errors.New("invalid configuration")
 
@@ -375,6 +381,19 @@ func WrapServiceUnavailable(serviceName, moduleName string, serviceType types.Se
 		ModuleName:  moduleName,
 		ServiceType: serviceType,
 		Err:         fmt.Errorf("%w: %v", ErrServiceUnavailable, err),
+	}
+}
+
+// WrapServiceOverloaded wraps ErrServiceOverloaded with service context.
+// It is returned by request-reply and queue group clients when the handling
+// instance rejected the message because its worker pool and pending queue
+// were full.
+func WrapServiceOverloaded(serviceName, moduleName string, serviceType types.ServiceType) error {
+	return &ServiceError{
+		ServiceName: serviceName,
+		ModuleName:  moduleName,
+		ServiceType: serviceType,
+		Err:         ErrServiceOverloaded,
 	}
 }
 

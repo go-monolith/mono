@@ -30,7 +30,7 @@ func (m *mockServiceContainer) SetMiddlewareChain(_ types.MiddlewareChainRunner)
 func (m *mockServiceContainer) RegisterChannelService(_ string, _ chan *types.Msg, _ chan *types.Msg) error {
 	return nil
 }
-func (m *mockServiceContainer) RegisterRequestReplyService(_ string, _ types.RequestReplyHandler) error {
+func (m *mockServiceContainer) RegisterRequestReplyService(_ string, _ types.RequestReplyHandler, _ ...types.ServiceOption) error {
 	return nil
 }
 func (m *mockServiceContainer) RegisterQueueGroupService(_ string, _ ...types.QGHP) error { return nil }

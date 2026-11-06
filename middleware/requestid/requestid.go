@@ -96,6 +96,7 @@ func (m *RequestIDModule) OnServiceRegistration(_ context.Context, reg types.Ser
 				wrappedPairs[i] = types.QGHP{
 					QueueGroup: pair.QueueGroup,
 					Handler:    m.wrapQueueGroupHandler(pair.Handler),
+					Options:    pair.Options, // worker pool bounds must survive wrapping
 				}
 			}
 			reg.QueueHandlers = wrappedPairs

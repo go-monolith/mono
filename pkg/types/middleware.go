@@ -165,6 +165,10 @@ type ServiceRegistration struct {
 	// RequestHandler processes RequestReply requests (can be wrapped by middleware)
 	RequestHandler RequestReplyHandler
 
+	// Options bounds the worker pool of a RequestReply service (can be modified by middleware).
+	// Queue group services carry theirs in each QueueHandlers pair.
+	Options ServiceOptions
+
 	// QueueHandlers contains queue group handler pairs (handlers can be wrapped)
 	QueueHandlers []QGHP
 

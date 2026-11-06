@@ -128,6 +128,7 @@ func TestToKebabCase(t *testing.T) {
 // mockServiceContainer is a test double for ServiceContainer
 type mockServiceContainer struct {
 	requestReplyHandler    types.RequestReplyHandler
+	requestReplyOptions    types.ServiceOptions
 	queueGroupPairs        []types.QGHP
 	streamConsumerHandler  types.StreamConsumerHandler
 	streamConsumerConfig   *types.StreamConsumerConfig
@@ -143,12 +144,13 @@ func (m *mockServiceContainer) RegisterChannelService(_ string, _ chan *types.Ms
 	return nil
 }
 
-func (m *mockServiceContainer) RegisterRequestReplyService(name string, handler types.RequestReplyHandler) error {
+func (m *mockServiceContainer) RegisterRequestReplyService(name string, handler types.RequestReplyHandler, opts ...types.ServiceOption) error {
 	if m.returnError != nil {
 		return m.returnError
 	}
 	m.registeredServiceNames = append(m.registeredServiceNames, name)
 	m.requestReplyHandler = handler
+	m.requestReplyOptions = types.ApplyServiceOptions(opts...)
 	return nil
 }
 
@@ -648,9 +650,10 @@ func TestEventDefinition(t *testing.T) {
 
 // mockEventRegistry for testing event registration
 type mockEventRegistry struct {
-	registeredConsumers map[string]types.EventConsumerHandler
-	registeredStreams   map[string]types.EventStreamConsumerHandler
-	returnError         error
+	registeredConsumers       map[string]types.EventConsumerHandler
+	registeredConsumerOptions map[string]types.EventConsumerOptions
+	registeredStreams         map[string]types.EventStreamConsumerHandler
+	returnError               error
 }
 
 func newMockEventRegistry() *mockEventRegistry {
@@ -681,6 +684,18 @@ func (m *mockEventRegistry) RegisterEventConsumer(def types.BaseEventDefinition,
 		return m.returnError
 	}
 	m.registeredConsumers[def.Subject] = handler
+	return nil
+}
+
+func (m *mockEventRegistry) RegisterEventConsumerWithOptions(def types.BaseEventDefinition, handler types.EventConsumerHandler, _ types.Module, opts types.EventConsumerOptions) error {
+	if m.returnError != nil {
+		return m.returnError
+	}
+	m.registeredConsumers[def.Subject] = handler
+	if m.registeredConsumerOptions == nil {
+		m.registeredConsumerOptions = make(map[string]types.EventConsumerOptions)
+	}
+	m.registeredConsumerOptions[def.Subject] = opts
 	return nil
 }
 

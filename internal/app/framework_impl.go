@@ -28,6 +28,7 @@ type frameworkApplication struct {
 	lifecycleManager           lifecycle.LifecycleManager
 	state                      types.MonoFrameworkState
 	queueGroupOptimisticWindow time.Duration
+	defaultServiceConcurrency  int
 }
 
 // NewFrameworkAppInstance creates a new framework instance with the given logger.
@@ -42,11 +43,16 @@ type frameworkApplication struct {
 //
 // Modules can be registered before or after framework initialization,
 // but must be registered before calling Start().
-func NewFrameworkAppInstance(logger types.Logger, queueGroupOptimisticWindow time.Duration, natsOptions ...nats.NATSOption) (types.MonoFramework, error) {
+//
+// defaultServiceConcurrency is the MaxConcurrency applied to request-reply,
+// queue group and event consumer subscriptions whose options leave it at 0;
+// 0 selects the built-in default (types.DefaultMaxConcurrency).
+func NewFrameworkAppInstance(logger types.Logger, queueGroupOptimisticWindow time.Duration, defaultServiceConcurrency int, natsOptions ...nats.NATSOption) (types.MonoFramework, error) {
 	fwApp := &frameworkApplication{
 		logger:                     logger,
 		state:                      types.StateCreated,
 		queueGroupOptimisticWindow: queueGroupOptimisticWindow,
+		defaultServiceConcurrency:  defaultServiceConcurrency,
 	}
 
 	// Step 1: Initialize NATS manager
@@ -89,6 +95,7 @@ func NewFrameworkAppInstance(logger types.Logger, queueGroupOptimisticWindow tim
 		fwApp.logger,
 		fwApp.queueGroupOptimisticWindow,
 	)
+	fwApp.lifecycleManager.SetDefaultServiceConcurrency(fwApp.defaultServiceConcurrency)
 
 	// Step 6: Set runtime context on event bus for graceful shutdown
 	runtimeCtx := fwApp.lifecycleManager.GetRuntimeContext()

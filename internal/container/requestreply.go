@@ -18,8 +18,13 @@ import (
 // Parameters:
 //   - name: Service name (must be kebab-case)
 //   - handler: Function to process requests and return responses
+//   - opts: Optional bounds for the worker pool that runs the handler on this
+//     instance (types.WithMaxConcurrency, types.WithMaxPending). Without
+//     options the framework defaults apply; see types.ServiceOptions.
 //
 // The service subject is computed as: services.<module>.<service>
+//
+// Returns an error if an option is negative.
 //
 // Example:
 //
@@ -27,11 +32,16 @@ import (
 //	    // Process request
 //	    return []byte("response"), nil
 //	}
-//	err := container.RegisterRequestReplyService("check-stock", handler)
-func (c *serviceContainer) RegisterRequestReplyService(name string, handler types.RequestReplyHandler) error {
+//	err := container.RegisterRequestReplyService("check-stock", handler, types.WithMaxConcurrency(32))
+func (c *serviceContainer) RegisterRequestReplyService(name string, handler types.RequestReplyHandler, opts ...types.ServiceOption) error {
 	// Validate handler
 	if handler == nil {
 		return fmt.Errorf("handler cannot be nil for service '%s'", name)
+	}
+
+	options := types.ApplyServiceOptions(opts...)
+	if err := options.Validate(); err != nil {
+		return fmt.Errorf("invalid options for service '%s': %w", name, err)
 	}
 
 	// Compute subject
@@ -43,6 +53,7 @@ func (c *serviceContainer) RegisterRequestReplyService(name string, handler type
 	entry := &types.ServiceEntry{
 		Type:           types.ServiceTypeRequestReply,
 		RequestHandler: handler,
+		Options:        options,
 		Subject:        subject,
 		// Use service name as queue group for "at most one" delivery semantics.
 		// This ensures only one instance handles each request when multiple instances are running.
@@ -270,5 +281,24 @@ func (c *requestReplyClient) checkForErrorResponse(response *types.Msg) error {
 		errorType = typeValues[0]
 	}
 
+	if err := frameworkErrorResponse(c.serviceName, c.moduleName, types.ServiceTypeRequestReply, errorType); err != nil {
+		return err
+	}
+
 	return monoerrors.WrapRemoteError(c.serviceName, c.moduleName, message, errorType)
+}
+
+// frameworkErrorResponse maps the error types the framework itself puts in an
+// error response (as opposed to a handler error) to their sentinel errors.
+// It returns nil for any other error type.
+func frameworkErrorResponse(serviceName, moduleName string, serviceType types.ServiceType, errorType string) error {
+	switch errorType {
+	case types.ErrorTypeOverloaded:
+		return monoerrors.WrapServiceOverloaded(serviceName, moduleName, serviceType)
+	case types.ErrorTypeShuttingDown:
+		return monoerrors.WrapServiceUnavailable(serviceName, moduleName, serviceType,
+			fmt.Errorf("the handling instance is shutting down"))
+	default:
+		return nil
+	}
 }
