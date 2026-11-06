@@ -3,7 +3,9 @@ package eventbus
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -321,6 +323,97 @@ func TestRequestTimeout(t *testing.T) {
 }
 
 // TestQueueSubscribe tests queue group subscription
+// TestSubscribe_HandlerPanicRecovered checks that a panic in a Subscribe or
+// QueueSubscribe handler is recovered, logged, and does not stop the
+// subscription from delivering the next message.
+func TestSubscribe_HandlerPanicRecovered(t *testing.T) {
+	conn := setupTestNATS(t)
+	defer conn.Close()
+
+	logs := &recordingLogger{}
+	eb, _ := NewEventBus(conn, logs)
+
+	for _, tc := range []struct {
+		name      string
+		subscribe func(subject string, handler types.MsgHandler) (types.Subscription, error)
+	}{
+		{"Subscribe", eb.Subscribe},
+		{"QueueSubscribe", func(subject string, handler types.MsgHandler) (types.Subscription, error) {
+			return eb.QueueSubscribe(subject, "workers", handler)
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			subject := "test.panic." + strings.ToLower(tc.name)
+			received := make(chan string, 2)
+			sub, err := tc.subscribe(subject, func(_ context.Context, msg *types.Msg) {
+				if string(msg.Data) == "panic" {
+					panic("handler bug")
+				}
+				received <- string(msg.Data)
+			})
+			if err != nil {
+				t.Fatalf("subscribe failed: %v", err)
+			}
+			defer func() { _ = sub.Unsubscribe() }()
+			time.Sleep(50 * time.Millisecond)
+
+			if err := eb.Publish(subject, []byte("panic")); err != nil {
+				t.Fatalf("publish: %v", err)
+			}
+			if err := eb.Publish(subject, []byte("ok")); err != nil {
+				t.Fatalf("publish: %v", err)
+			}
+
+			select {
+			case got := <-received:
+				if got != "ok" {
+					t.Fatalf("received %q, want ok", got)
+				}
+			case <-time.After(2 * time.Second):
+				t.Fatal("the message after the panic was not delivered; the subscription died")
+			}
+			deadline := time.Now().Add(2 * time.Second)
+			for !logs.hasErrorContaining("Panic in subscription handler") && time.Now().Before(deadline) {
+				time.Sleep(10 * time.Millisecond)
+			}
+			if !logs.hasErrorContaining("Panic in subscription handler") || !logs.hasErrorContaining(subject) {
+				t.Fatal("expected the panic to be logged with the subject")
+			}
+		})
+	}
+}
+
+// recordingLogger keeps log lines so tests can assert on them.
+type recordingLogger struct {
+	mu      sync.Mutex
+	entries []string
+}
+
+func (l *recordingLogger) record(level, msg string, args ...any) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.entries = append(l.entries, fmt.Sprintf("%s: %s %v", level, msg, args))
+}
+
+func (l *recordingLogger) hasErrorContaining(substr string) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	for _, e := range l.entries {
+		if strings.HasPrefix(e, "ERROR:") && strings.Contains(e, substr) {
+			return true
+		}
+	}
+	return false
+}
+
+func (l *recordingLogger) Debug(msg string, args ...any)    { l.record("DEBUG", msg, args...) }
+func (l *recordingLogger) Info(msg string, args ...any)     { l.record("INFO", msg, args...) }
+func (l *recordingLogger) Warn(msg string, args ...any)     { l.record("WARN", msg, args...) }
+func (l *recordingLogger) Error(msg string, args ...any)    { l.record("ERROR", msg, args...) }
+func (l *recordingLogger) With(_ ...any) types.Logger       { return l }
+func (l *recordingLogger) WithModule(_ string) types.Logger { return l }
+func (l *recordingLogger) WithError(_ error) types.Logger   { return l }
+
 func TestQueueSubscribe(t *testing.T) {
 	conn := setupTestNATS(t)
 	defer conn.Close()
