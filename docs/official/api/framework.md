@@ -515,7 +515,7 @@ mono.WithCustomLogger(customLogger)
 func WithShutdownTimeout(timeout time.Duration) MonoFrameworkOption
 ```
 
-Sets the maximum time to wait for graceful shutdown. It bounds the lifecycle part of `Stop` (drain, in-flight handlers, module and plugin `Stop`) when the context passed to `Stop` has no deadline of its own; a context with a deadline is used as is. The final NATS connection drain (capped at 5s) and server shutdown run after that bound. The drain keeps 5s of the remaining time (or half of it, whichever is larger) for module `Stop`. Default is 30 seconds. Must be at least 1 second and at least `WithShutdownDrainTimeout`.
+Sets the maximum time to wait for graceful shutdown. It bounds the lifecycle part of `Stop` (drain, in-flight handlers, module and plugin `Stop`) when the context passed to `Stop` has no deadline of its own; a context with a deadline is used as is. The final NATS connection drain (capped at 5s) and server shutdown run after that bound. The drain keeps a reserve of the remaining time (5s, or a quarter of it when that is smaller) for module `Stop`. Default is 30 seconds. Must be at least 1 second and at least `WithShutdownDrainTimeout`.
 
 | Property | Value |
 |----------|-------|

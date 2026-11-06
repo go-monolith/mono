@@ -918,21 +918,24 @@ func (lm *lifecycleManager) stopMiddlewareModule(ctx context.Context, mw types.M
 	return nil
 }
 
-// moduleStopReserve is the part of the Stop context's remaining time that the
-// drain leaves for module, middleware and plugin Stop. When the context has a
-// deadline, the drain budget is capped at the remaining time minus this
-// reserve (but never below half of the remaining time), so a stuck handler
-// cannot hand modules an already expired context.
+// moduleStopReserve is the most of the Stop context's remaining time that the
+// drain leaves for module, middleware and plugin Stop. The reserve is the
+// smaller of this and a quarter of the remaining time, so a short shutdown
+// timeout keeps most of its drain while a long one still leaves modules a
+// live context after a stuck handler used the whole drain budget.
 const moduleStopReserve = 5 * time.Second
 
 // drainDeadline returns the drain budget for a Stop with the given context:
-// the configured drain timeout, capped so that moduleStopReserve of the
-// context's remaining time is kept for stopping modules.
+// the configured drain timeout, capped at the context's remaining time minus
+// the module Stop reserve (min(moduleStopReserve, remaining/4)).
 func (lm *lifecycleManager) drainDeadline(ctx context.Context) time.Duration {
 	budget := lm.drainBudget()
 	if deadline, ok := ctx.Deadline(); ok {
 		remaining := time.Until(deadline)
-		capped := max(remaining-moduleStopReserve, remaining/2)
+		if remaining < 0 {
+			remaining = 0
+		}
+		capped := remaining - min(moduleStopReserve, remaining/4)
 		if capped < budget {
 			budget = capped
 		}
@@ -944,17 +947,18 @@ func (lm *lifecycleManager) drainDeadline(ctx context.Context) time.Duration {
 // waits for the work already accepted to finish.
 //
 // It cancels the fetch context (stream, event stream and cron loops stop
-// fetching), then drains the subscriptions module by module in
-// reverse dependency order: a module's subscriptions are drained and its
-// worker pools emptied before the modules it depends on are touched, so a
-// handler that calls another module's service while finishing still finds a
-// responder. Each module's subscriptions are drained concurrently and waited
-// for until they are invalid (nats.go's Drain returns before the buffered
-// messages have been delivered), then its pools run their in-flight and
-// queued handlers. Finally the fetch loop handlers still in flight are
-// awaited. One drain budget (drainDeadline) covers all of it, and the runtime
-// context is not cancelled here, so handlers finish with a live context. What
-// has not finished when the budget runs out is counted and logged.
+// fetching) and waits for the fetch loop handlers still in flight while every
+// responder is still subscribed, then drains the subscriptions module by
+// module in reverse dependency order: a module's subscriptions are drained
+// and its worker pools emptied before the modules it depends on are touched,
+// so a handler that calls another module's service while finishing still
+// finds a responder. Each module's subscriptions are drained concurrently and
+// waited for until they are invalid (nats.go's Drain returns before the
+// buffered messages have been delivered), then its pools run their in-flight
+// and queued handlers. One drain budget (drainDeadline) covers all of it, and
+// the runtime context is not cancelled here, so handlers finish with a live
+// context. What has not finished when the budget runs out is counted and
+// logged.
 func (lm *lifecycleManager) teardownNATSSubscriptions(ctx context.Context) error {
 	lm.logger.Debug("Tearing down NATS subscriptions")
 
@@ -989,6 +993,14 @@ func (lm *lifecycleManager) teardownNATSSubscriptions(ctx context.Context) error
 		cancel()
 	}
 
+	// Wait for the handlers the fetch loops are still running, before any
+	// subscription is drained: those handlers may call other modules'
+	// services and must still find a responder. No new one can be admitted
+	// (see beginHandler). The loop goroutines themselves are not waited for:
+	// a Fetch blocked on the server returns after at most the fetch timeout
+	// and the loop then exits without handling what it fetched.
+	loopsRunning := lm.waitInFlightHandlers(drainCtx)
+
 	// Drain module by module, dependents first; modules unknown to the
 	// registry (plugins) come last, in name order for determinism.
 	var subsTotal, notDrained, poolsBusy int
@@ -998,12 +1010,6 @@ func (lm *lifecycleManager) teardownNATSSubscriptions(ctx context.Context) error
 		notDrained += drainSubscriptions(drainCtx, lm.logger, module, subs)
 		poolsBusy += closeWorkerPools(drainCtx, pools[module])
 	}
-
-	// Wait for the handlers the fetch loops are still running. The loop
-	// goroutines themselves are not waited for: a Fetch blocked on the server
-	// returns after at most the fetch timeout and the loop then exits without
-	// handling what it fetched (see beginHandler).
-	loopsRunning := lm.waitInFlightHandlers(drainCtx)
 
 	switch {
 	case notDrained > 0 || poolsBusy > 0 || loopsRunning > 0:

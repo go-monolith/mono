@@ -252,3 +252,137 @@ func TestGracefulShutdown_StreamConsumerBatchFinishes(t *testing.T) {
 		t.Fatal("module Stop ran while the batch handler was still running")
 	}
 }
+
+// =============================================================================
+// Fetch-loop handler calling a dependency during the drain
+// =============================================================================
+
+// ledgerModule provides the request-reply service a billing stream handler
+// calls while finishing.
+type ledgerModule struct {
+	container mono.ServiceContainer
+	calls     atomic.Int32
+}
+
+func (m *ledgerModule) Name() string                  { return "ledger" }
+func (m *ledgerModule) Start(_ context.Context) error { return nil }
+func (m *ledgerModule) Stop(_ context.Context) error  { return nil }
+func (m *ledgerModule) RegisterServices(container mono.ServiceContainer) error {
+	m.container = container
+	return container.RegisterRequestReplyService("record", func(_ context.Context, req *mono.Msg) ([]byte, error) {
+		m.calls.Add(1)
+		return append([]byte("recorded:"), req.Data...), nil
+	})
+}
+
+// billingModule depends on ledger and owns a stream consumer whose handler
+// waits until Stop has begun, then calls ledger.record.
+type billingModule struct {
+	container     mono.ServiceContainer
+	ledger        mono.ServiceContainer
+	started       chan struct{}
+	stopBegan     chan struct{}
+	callErr       atomic.Value // error from the nested call, or "" when it succeeded
+	handlerDone   atomic.Bool
+	stoppedAfter  atomic.Bool
+	ackedMessages atomic.Int32
+}
+
+func (m *billingModule) Name() string                  { return "billing" }
+func (m *billingModule) Dependencies() []string        { return []string{"ledger"} }
+func (m *billingModule) Start(_ context.Context) error { return nil }
+func (m *billingModule) Stop(_ context.Context) error {
+	m.stoppedAfter.Store(m.handlerDone.Load())
+	return nil
+}
+func (m *billingModule) SetDependencyServiceContainer(name string, container mono.ServiceContainer) {
+	if name == "ledger" {
+		m.ledger = container
+	}
+}
+func (m *billingModule) RegisterServices(container mono.ServiceContainer) error {
+	m.container = container
+	return container.RegisterStreamConsumerService("invoices", mono.StreamConsumerConfig{
+		Stream:   mono.StreamConfig{Name: "BILLING_SHUTDOWN_STREAM", Subjects: []string{"billing-shutdown.>"}},
+		Consumer: mono.ConsumerConfig{AckWait: 30 * time.Second, MaxDeliver: 3},
+		Fetch:    mono.FetchConfig{BatchSize: 1, Timeout: 300 * time.Millisecond},
+	}, func(ctx context.Context, msgs []*mono.Msg) error {
+		m.started <- struct{}{}
+		<-m.stopBegan
+		time.Sleep(200 * time.Millisecond) // let Stop get past "stop taking new work"
+
+		client, err := m.ledger.GetRequestReplyService("record")
+		if err != nil {
+			m.callErr.Store(err.Error())
+			return err
+		}
+		callCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		defer cancel()
+		if _, err := client.Call(callCtx, []byte("inv-1")); err != nil {
+			m.callErr.Store(err.Error())
+			return err
+		}
+		m.callErr.Store("")
+		for _, msg := range msgs {
+			if err := msg.Ack(); err != nil {
+				return err
+			}
+			m.ackedMessages.Add(1)
+		}
+		m.handlerDone.Store(true)
+		return nil
+	})
+}
+
+// TestGracefulShutdown_StreamHandlerCanCallDependencyDuringDrain checks that a
+// stream consumer handler in flight at Stop can still call a dependency's
+// request-reply service: in-flight fetch-loop handlers are awaited before any
+// subscription is drained, and dependents are drained before their
+// dependencies.
+func TestGracefulShutdown_StreamHandlerCanCallDependencyDuringDrain(t *testing.T) {
+	fw := newWorkerPoolApp(t, mono.WithJetStreamStorageDir(t.TempDir()))
+
+	ledger := &ledgerModule{}
+	billing := &billingModule{started: make(chan struct{}, 4), stopBegan: make(chan struct{})}
+	for _, m := range []mono.Module{ledger, billing} {
+		if err := fw.Register(m); err != nil {
+			t.Fatalf("Failed to register %s: %v", m.Name(), err)
+		}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := fw.Start(ctx); err != nil {
+		t.Fatalf("Failed to start application: %v", err)
+	}
+
+	client, err := billing.container.GetStreamConsumerService("invoices")
+	if err != nil {
+		t.Fatalf("Failed to get client: %v", err)
+	}
+	if _, err := client.Publish(ctx, []byte("inv-1")); err != nil {
+		t.Fatalf("publish: %v", err)
+	}
+	select {
+	case <-billing.started:
+	case <-time.After(10 * time.Second):
+		t.Fatal("stream handler did not start")
+	}
+
+	close(billing.stopBegan)
+	if err := fw.Stop(ctx); err != nil {
+		t.Fatalf("Stop failed: %v", err)
+	}
+
+	if got, _ := billing.callErr.Load().(string); got != "" {
+		t.Fatalf("nested request-reply call during the drain failed: %s", got)
+	}
+	if ledger.calls.Load() != 1 {
+		t.Fatalf("ledger.record calls = %d, want 1", ledger.calls.Load())
+	}
+	if billing.ackedMessages.Load() != 1 {
+		t.Fatalf("acked = %d, want 1", billing.ackedMessages.Load())
+	}
+	if !billing.stoppedAfter.Load() {
+		t.Fatal("billing Stop ran while its stream handler was still running")
+	}
+}

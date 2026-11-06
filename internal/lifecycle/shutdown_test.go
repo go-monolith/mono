@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/go-monolith/mono/internal/registry"
+	"github.com/go-monolith/mono/internal/workerpool"
 	"github.com/go-monolith/mono/pkg/types"
 	"github.com/nats-io/nats.go/jetstream"
 )
@@ -197,6 +198,76 @@ func TestStop_IncompleteDrainIsCountedAndLogged(t *testing.T) {
 	}
 	if !f.logger.hasWarnContaining("drain_timeout 150ms") {
 		t.Error("expected the drain timeout in the warning")
+	}
+}
+
+func TestDrainDeadline(t *testing.T) {
+	lm := &lifecycleManager{}
+	lm.SetDrainTimeout(30 * time.Second)
+
+	t.Run("no deadline uses the configured drain timeout", func(t *testing.T) {
+		if got := lm.drainDeadline(context.Background()); got != 30*time.Second {
+			t.Fatalf("got %s, want 30s", got)
+		}
+	})
+
+	within := func(got, want, tolerance time.Duration) bool { return (got - want).Abs() <= tolerance }
+	cases := []struct {
+		name      string
+		drain     time.Duration
+		remaining time.Duration
+		want      time.Duration
+	}{
+		{"short timeout keeps three quarters", 30 * time.Second, 5 * time.Second, 3750 * time.Millisecond},
+		{"long timeout keeps the 5s reserve", 30 * time.Second, 30 * time.Second, 25 * time.Second},
+		{"explicit drain equal to the timeout is reduced by the reserve", 10 * time.Second, 10 * time.Second, 7500 * time.Millisecond},
+		{"small drain below the cap is kept", time.Second, 30 * time.Second, time.Second},
+		{"expired context yields no budget", 30 * time.Second, -time.Second, 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			lm.SetDrainTimeout(tc.drain)
+			ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(tc.remaining))
+			defer cancel()
+			got := lm.drainDeadline(ctx)
+			if !within(got, tc.want, 50*time.Millisecond) {
+				t.Fatalf("drainDeadline = %s, want %s", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestDrainOrder(t *testing.T) {
+	logger := &mockLogger{}
+	reg := registry.NewModuleRegistry(logger)
+	// b depends on a: start order a, b; drain order b, a.
+	a := &mockModule{name: "a"}
+	b := &mockModule{name: "b", dependencies: []string{"a"}}
+	if err := reg.Register(a); err != nil {
+		t.Fatal(err)
+	}
+	if err := reg.Register(b); err != nil {
+		t.Fatal(err)
+	}
+	lm := &lifecycleManager{registry: reg}
+
+	subs := map[string][]types.Subscription{"a": nil, "b": nil, "zeta-plugin": nil}
+	pools := map[string][]*workerpool.Pool{"alpha-plugin": nil, "a": nil}
+	got := lm.drainOrder(subs, pools)
+	want := []string{"b", "a", "alpha-plugin", "zeta-plugin"}
+	if len(got) != len(want) {
+		t.Fatalf("drainOrder = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("drainOrder = %v, want %v", got, want)
+		}
+	}
+	// Without a registry every owner is drained in name order.
+	noReg := &lifecycleManager{}
+	got = noReg.drainOrder(subs, nil)
+	if len(got) != 3 || got[0] != "a" || got[1] != "b" || got[2] != "zeta-plugin" {
+		t.Fatalf("drainOrder without registry = %v", got)
 	}
 }
 
