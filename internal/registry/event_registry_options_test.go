@@ -77,6 +77,19 @@ func TestRegisterEventConsumerWithOptions(t *testing.T) {
 		}
 	})
 
+	t.Run("RegisterEventConsumer with several queue groups and a nil module", func(t *testing.T) {
+		logger := &mockLogger{}
+		registry := NewEventRegistry(logger)
+		// The extra queue groups are warned about (with an empty module name)
+		// before the nil module is rejected.
+		if err := registry.RegisterEventConsumer(eventDef, handler, nil, "", "second"); err == nil {
+			t.Fatal("expected error for nil module")
+		}
+		if len(registry.Entries()) != 0 {
+			t.Fatal("invalid registration must not be stored")
+		}
+	})
+
 	t.Run("RegisterEventConsumer leaves options at zero", func(t *testing.T) {
 		registry := NewEventRegistry(&mockLogger{})
 		if err := registry.RegisterEventConsumer(eventDef, handler, module, "custom", "ignored"); err != nil {

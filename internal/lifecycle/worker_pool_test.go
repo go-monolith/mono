@@ -168,6 +168,41 @@ func TestWorkerPool_RequestReplyOverloadReply(t *testing.T) {
 	}
 }
 
+// TestWorkerPool_ErrorReplyPublishFailuresAreLogged covers the paths where the
+// framework's own error response (overloaded, shutting-down) cannot be
+// published: the failure is logged and nothing else breaks.
+func TestWorkerPool_ErrorReplyPublishFailuresAreLogged(t *testing.T) {
+	t.Run("overloaded reply", func(t *testing.T) {
+		f := newBlockingRequestReplyFixture(t, types.ServiceOptions{MaxConcurrency: 1, MaxPending: 1}, 0)
+		defer func() { _ = f.lm.Stop(context.Background()) }()
+		defer close(f.release)
+
+		f.send("reply-1")
+		f.waitStarted(t)
+		f.send("reply-2")
+		f.eventBus.setPublishError(errors.New("connection closed"))
+		f.send("reply-3")
+
+		if !f.logger.hasErrorContaining("Failed to publish overloaded response") {
+			t.Error("expected the failed overloaded reply to be logged")
+		}
+	})
+
+	t.Run("shutting-down reply", func(t *testing.T) {
+		f := newBlockingRequestReplyFixture(t, types.ServiceOptions{}, 0)
+		close(f.release)
+		if err := f.lm.Stop(context.Background()); err != nil {
+			t.Fatalf("Stop failed: %v", err)
+		}
+		f.eventBus.setPublishError(errors.New("connection closed"))
+		f.send("late-reply")
+
+		if !f.logger.hasErrorContaining("Failed to publish shutting-down response") {
+			t.Error("expected the failed shutting-down reply to be logged")
+		}
+	})
+}
+
 // TestWorkerPool_RequestReplyAfterShutdownGetsShuttingDownReply checks that a
 // request delivered after the pools are closed is answered with a
 // shutting-down error rather than being silently dropped.
