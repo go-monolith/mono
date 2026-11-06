@@ -6,7 +6,7 @@ package integration_test
 import (
 	"context"
 	"errors"
-	"math/rand"
+	"net"
 	"testing"
 	"time"
 
@@ -14,10 +14,17 @@ import (
 	monoerrors "github.com/go-monolith/mono/pkg/errors"
 )
 
-// randomPort returns a random port in the valid NATS port range (1024-65535).
-// Using high ports (49152-65535) to avoid conflicts with well-known services.
+// randomPort returns a TCP port that is free right now: it binds port 0 on the
+// loopback address, reads the port the kernel chose and releases it. Picking a
+// number in the ephemeral range at random, as this helper used to, could
+// collide with a port the runner was using and made the TCP tests flaky.
 func randomPort() int {
-	return 49152 + rand.Intn(65535-49152)
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		panic("randomPort: " + err.Error())
+	}
+	defer l.Close()
+	return l.Addr().(*net.TCPAddr).Port
 }
 
 // TestRequestReplyService_HandlerErrorPropagation tests that handler errors

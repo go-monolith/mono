@@ -404,3 +404,21 @@ func TestMsg_InProgress(t *testing.T) {
 		})
 	}
 }
+
+func TestHeader_GetSet(t *testing.T) {
+	var nilHeader types.Header
+	if got := nilHeader.Get("X"); got != "" {
+		t.Fatalf("Get on nil header = %q, want empty", got)
+	}
+	h := types.Header{"Multi": {"first", "second"}}
+	if got := h.Get("Multi"); got != "first" {
+		t.Fatalf("Get = %q, want first", got)
+	}
+	if got := h.Get("Missing"); got != "" {
+		t.Fatalf("Get missing = %q, want empty", got)
+	}
+	h.Set("Multi", "only")
+	if len(h["Multi"]) != 1 || h["Multi"][0] != "only" {
+		t.Fatalf("Set did not replace the values: %v", h["Multi"])
+	}
+}

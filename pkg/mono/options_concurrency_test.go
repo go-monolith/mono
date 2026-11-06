@@ -62,6 +62,25 @@ func TestWithShutdownDrainTimeout(t *testing.T) {
 	})
 }
 
+func TestWithDeadlineSkewAllowance(t *testing.T) {
+	if got := mono.DefaultConfig().DeadlineSkewAllowance; got != 0 {
+		t.Fatalf("DefaultConfig().DeadlineSkewAllowance = %s, want 0 (= default %s at runtime)", got, types.DefaultDeadlineSkewAllowance)
+	}
+	cfg := mono.DefaultConfig()
+	if err := mono.WithDeadlineSkewAllowance(time.Second)(cfg); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.DeadlineSkewAllowance != time.Second {
+		t.Fatalf("DeadlineSkewAllowance = %s, want 1s", cfg.DeadlineSkewAllowance)
+	}
+	if err := mono.WithDeadlineSkewAllowance(0)(cfg); err != nil {
+		t.Fatalf("zero must be accepted (selects the default): %v", err)
+	}
+	if err := mono.WithDeadlineSkewAllowance(-time.Millisecond)(cfg); !errors.Is(err, monoerrors.ErrInvalidConfiguration) {
+		t.Fatalf("negative allowance: got %v, want ErrInvalidConfiguration", err)
+	}
+}
+
 func TestWithDefaultServiceConcurrency(t *testing.T) {
 	t.Run("default is zero (built-in GOMAXPROCS*4)", func(t *testing.T) {
 		if got := mono.DefaultConfig().DefaultServiceConcurrency; got != 0 {

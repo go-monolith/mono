@@ -144,6 +144,8 @@ container.RegisterRequestReplyService("apply-ledger-entry", m.handleLedger,
     mono.WithMaxConcurrency(1))
 ```
 
+**Deadline propagation:** the handler's `ctx.Deadline()` is the caller's deadline (sent in the `Mono-Deadline` / `Mono-Timeout` headers), and `ctx` is cancelled when the handler returns. Pass `ctx` to downstream calls so they stop when the caller gives up; use `context.WithoutCancel(ctx)` for work that must outlive the request. A request whose deadline passed by more than the clock-skew allowance (`mono.WithDeadlineSkewAllowance`, 250ms default) while it waited for a worker is dropped without running the handler or replying. See [Wire Protocol Headers](eventbus.md#wire-protocol-headers).
+
 **Typed Handler (helper):**
 
 For type-safe handlers, use the `TypedRequestReplyHandler`:

@@ -42,6 +42,7 @@ type lifecycleManager struct {
 	cancelFetch                context.CancelFunc            // cancels fetchCtx
 	inFlightHandlers           atomic.Int32                  // handlers of fetch loops (stream, event stream, cron) currently running
 	drainTimeout               time.Duration                 // Stop's budget for draining and in-flight handlers (0 = default)
+	deadlineSkew               time.Duration                 // clock skew tolerated on request deadlines (0 = default)
 	streamConsumers            map[string]context.CancelFunc // cancel funcs for stream consumer fetch loops
 	queueGroupOptimisticWindow time.Duration                 // Optimistic publish window for queue groups
 	defaultServiceConcurrency  int                           // MaxConcurrency for subscriptions that leave it at 0 (0 = built-in default)
@@ -101,6 +102,25 @@ func (lm *lifecycleManager) SetDrainTimeout(d time.Duration) {
 	lm.mu.Lock()
 	defer lm.mu.Unlock()
 	lm.drainTimeout = d
+}
+
+// SetDeadlineSkewAllowance sets the clock skew tolerated when a request-reply
+// handler decides that the caller's deadline has passed. Values <= 0 select
+// types.DefaultDeadlineSkewAllowance.
+func (lm *lifecycleManager) SetDeadlineSkewAllowance(d time.Duration) {
+	lm.mu.Lock()
+	defer lm.mu.Unlock()
+	lm.deadlineSkew = d
+}
+
+// deadlineSkewAllowance returns the configured skew allowance, or the default.
+func (lm *lifecycleManager) deadlineSkewAllowance() time.Duration {
+	lm.mu.RLock()
+	defer lm.mu.RUnlock()
+	if lm.deadlineSkew > 0 {
+		return lm.deadlineSkew
+	}
+	return types.DefaultDeadlineSkewAllowance
 }
 
 // drainBudget returns the configured drain timeout, or the default.
@@ -204,6 +224,10 @@ type overloadReporter struct {
 	fields   []any
 	lastLog  atomic.Int64 // unix nanoseconds of the last line written
 	rejected atomic.Int64 // rejected or dropped since the last line
+
+	lastExpiredLog atomic.Int64 // unix nanoseconds of the last expired-requests line
+	expired        atomic.Int64 // expired requests dropped since that line
+	lastSkewLog    atomic.Int64 // unix nanoseconds of the last clock-skew warning
 }
 
 func newOverloadReporter(logger types.Logger, fields ...any) *overloadReporter {
@@ -228,6 +252,43 @@ func (r *overloadReporter) reject(pool *workerpool.Pool) {
 // closed, and writes the warning when due.
 func (r *overloadReporter) drop(pool *workerpool.Pool) {
 	r.report("Messages dropped: still buffered when the worker pool closed during shutdown", pool, "dropped")
+}
+
+// clockSkew warns, at most once per overloadLogInterval per subscription,
+// that a request's Mono-Deadline and Mono-Timeout headers disagreed by more
+// than the skew allowance: the caller's clock and this instance's are out of
+// step, and the clock-independent Mono-Timeout was used instead.
+func (r *overloadReporter) clockSkew(applied time.Time, msg *types.Msg) {
+	now := time.Now().UnixNano()
+	last := r.lastSkewLog.Load()
+	if now-last < int64(overloadLogInterval) || !r.lastSkewLog.CompareAndSwap(last, now) {
+		return
+	}
+	r.logger.Warn("Request deadline headers disagree: clock skew between caller and this instance suspected; using Mono-Timeout", r.withFields(
+		"mono_deadline", msg.Header.Get(types.HeaderDeadline),
+		"mono_timeout", msg.Header.Get(types.HeaderTimeout),
+		"applied_deadline", applied.UnixMilli())...)
+}
+
+// expire records one request skipped because the caller's deadline had
+// already passed when a worker picked it up, and writes the log line when
+// due. Expired requests are expected under load, so they are logged at Debug
+// level with the count; the sender has already given up, so no reply is sent.
+func (r *overloadReporter) expire(pool *workerpool.Pool) {
+	n := r.expired.Add(1)
+	now := time.Now().UnixNano()
+	last := r.lastExpiredLog.Load()
+	if now-last < int64(overloadLogInterval) || !r.lastExpiredLog.CompareAndSwap(last, now) {
+		return
+	}
+	r.expired.Add(-n)
+	active, pending := pool.Stats()
+	r.logger.Debug("Expired requests dropped: the caller's deadline passed while they waited", r.withFields(
+		"expired", n,
+		"max_concurrency", pool.MaxWorkers(),
+		"max_pending", pool.MaxPending(),
+		"active", active,
+		"pending", pending)...)
 }
 
 // report counts one affected message and writes msg at most once per interval,
@@ -561,12 +622,32 @@ func (lm *lifecycleManager) setupNATSSubscriptions(ctx context.Context) error {
 				// otherwise delay every later call to this service.
 				pool := lm.newPool(entry.Options, true, logger, modName, "request_reply", serviceName, queueGroup)
 				reporter := newOverloadReporter(logger, "service", serviceName, "module", modName)
+				skew := lm.deadlineSkewAllowance()
 
-				handleRequest := func(reqCtx context.Context, msg *types.Msg) {
+				// handleRequest runs on a pool worker. arrival is when the
+				// subscription callback received the message, so the queue
+				// wait counts against the caller's deadline.
+				handleRequest := func(reqCtx context.Context, msg *types.Msg, arrival time.Time) {
+					// Run the handler under the caller's deadline (Mono-Deadline /
+					// Mono-Timeout headers). A request whose deadline passed while
+					// it waited in the queue is dropped: the caller has given up,
+					// so no reply is sent and the handler does not run. The
+					// derived context is cancelled when the handler returns.
+					decision := requestContext(reqCtx, msg, arrival, time.Now(), skew)
+					defer decision.cancel()
+					if decision.skewSuspected {
+						reporter.clockSkew(decision.deadline, msg)
+					}
+					if decision.expired {
+						reporter.expire(pool)
+						return
+					}
+					ctx := decision.ctx
+
 					// A panic in the handler is recovered into an error, so one bad
 					// request cannot take the process down; the caller gets an error
 					// reply instead of a timeout.
-					response, err := invokeRequestReplyHandler(reqCtx, handler, msg)
+					response, err := invokeRequestReplyHandler(ctx, handler, msg)
 					if err != nil {
 						logger.Error("RequestReply handler error",
 							append([]any{"service", serviceName, "module", modName, "subject", msg.Subject}, handlerErrorFields(err)...)...)
@@ -610,7 +691,8 @@ func (lm *lifecycleManager) setupNATSSubscriptions(ctx context.Context) error {
 
 				// Create NATS request-reply subscription with queue group for "at most one" delivery
 				sub, err := eventBus.QueueSubscribe(entry.Subject, queueGroup, func(reqCtx context.Context, msg *types.Msg) {
-					submitToPool(pool, eventBus, logger, reporter, msg, func() { handleRequest(reqCtx, msg) })
+					arrival := time.Now()
+					submitToPool(pool, eventBus, logger, reporter, msg, func() { handleRequest(reqCtx, msg, arrival) })
 				})
 				if err != nil {
 					return fmt.Errorf("failed to subscribe to %s: %w", entry.Subject, err)

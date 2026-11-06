@@ -35,6 +35,14 @@ type MonoFrameworkConfig struct {
 	// defaults to 30s) so module Stop still gets to run.
 	ShutdownDrainTimeout time.Duration
 
+	// DeadlineSkewAllowance is the clock skew tolerated when a request-reply
+	// handler decides whether the caller's deadline (Mono-Deadline header) has
+	// already passed: a request is dropped only when the deadline passed by
+	// more than the allowance, and the Mono-Deadline and Mono-Timeout headers
+	// are considered to disagree (clock skew) when they differ by more than it.
+	// Zero selects DefaultDeadlineSkewAllowance.
+	DeadlineSkewAllowance time.Duration
+
 	// QueueGroupOptimisticWindow configures the optimistic publish window for queue group services.
 	// When > 0, after a successful ACK, subsequent sends within this window use fire-and-forget publish.
 	// When 0 (default), always use ACK mode (disabled).
@@ -52,6 +60,9 @@ type MonoFrameworkConfig struct {
 // DefaultShutdownDrainTimeout is the default ShutdownDrainTimeout, the same as
 // nats.go's DefaultDrainTimeout.
 const DefaultShutdownDrainTimeout = 30 * time.Second
+
+// DefaultDeadlineSkewAllowance is the default DeadlineSkewAllowance: 250ms.
+const DefaultDeadlineSkewAllowance = 250 * time.Millisecond
 
 // NATSOptions holds NATS server configuration.
 type NATSOptions struct {

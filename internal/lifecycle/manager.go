@@ -59,6 +59,11 @@ type LifecycleManager interface {
 	// stopping modules. Values <= 0 select types.DefaultShutdownDrainTimeout.
 	// Must be called before Stop.
 	SetDrainTimeout(d time.Duration)
+
+	// SetDeadlineSkewAllowance sets the clock skew tolerated when a request-reply
+	// handler decides that the caller's deadline has passed. Values <= 0 select
+	// types.DefaultDeadlineSkewAllowance. Must be called before Start.
+	SetDeadlineSkewAllowance(d time.Duration)
 }
 
 // LifecycleEvent represents a module lifecycle event.
