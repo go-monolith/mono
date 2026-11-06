@@ -73,7 +73,7 @@ func TestMiddleware_AuditModuleLifecycleEvents(t *testing.T) {
 	}
 
 	// Create framework
-	fw, err := app.NewFrameworkAppInstance(logger, 0, 0)
+	fw, err := app.NewFrameworkAppInstance(logger, app.Settings{})
 	if err != nil {
 		t.Fatalf("Failed to create framework: %v", err)
 	}
@@ -162,7 +162,7 @@ func TestMiddleware_AuditServiceRegistration(t *testing.T) {
 	}
 
 	// Create framework
-	fw, err := app.NewFrameworkAppInstance(logger, 0, 0)
+	fw, err := app.NewFrameworkAppInstance(logger, app.Settings{})
 	if err != nil {
 		t.Fatalf("Failed to create framework: %v", err)
 	}
@@ -240,7 +240,7 @@ func TestMiddleware_EventPassThrough(t *testing.T) {
 	}
 
 	// Create framework
-	fw, err := app.NewFrameworkAppInstance(logger, 0, 0)
+	fw, err := app.NewFrameworkAppInstance(logger, app.Settings{})
 	if err != nil {
 		t.Fatalf("Failed to create framework: %v", err)
 	}
@@ -297,7 +297,7 @@ func TestMiddleware_HashChaining(t *testing.T) {
 	}
 
 	// Create framework
-	fw, err := app.NewFrameworkAppInstance(logger, 0, 0)
+	fw, err := app.NewFrameworkAppInstance(logger, app.Settings{})
 	if err != nil {
 		t.Fatalf("Failed to create framework: %v", err)
 	}
@@ -381,7 +381,7 @@ func TestMiddleware_MultipleModules(t *testing.T) {
 	}
 
 	// Create framework
-	fw, err := app.NewFrameworkAppInstance(logger, 0, 0)
+	fw, err := app.NewFrameworkAppInstance(logger, app.Settings{})
 	if err != nil {
 		t.Fatalf("Failed to create framework: %v", err)
 	}
@@ -460,7 +460,7 @@ func TestMiddleware_AuditTimestamps(t *testing.T) {
 	}
 
 	// Create framework
-	fw, err := app.NewFrameworkAppInstance(logger, 0, 0)
+	fw, err := app.NewFrameworkAppInstance(logger, app.Settings{})
 	if err != nil {
 		t.Fatalf("Failed to create framework: %v", err)
 	}
@@ -523,7 +523,7 @@ func TestMiddleware_NoAuditModule(t *testing.T) {
 	logger := &mockLogger{}
 
 	// Create framework without audit middleware
-	fw, err := app.NewFrameworkAppInstance(logger, 0, 0)
+	fw, err := app.NewFrameworkAppInstance(logger, app.Settings{})
 	if err != nil {
 		t.Fatalf("Failed to create framework: %v", err)
 	}

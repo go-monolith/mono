@@ -57,7 +57,7 @@ Initializes and starts the framework, NATS server, and all registered modules in
 func (app MonoApplication) Stop(ctx context.Context) error
 ```
 
-Gracefully shuts down all modules in reverse dependency order, then stops NATS. Respects the configured shutdown timeout.
+Gracefully shuts down the application: drains subscriptions and waits for in-flight handlers (up to the shutdown drain timeout, with a live context), cancels the runtime context, stops all modules in reverse dependency order, then stops NATS. The configured shutdown timeout bounds the whole operation when `ctx` has no deadline.
 
 **Parameters:**
 - `ctx` - Context for the shutdown operation
@@ -515,17 +515,41 @@ mono.WithCustomLogger(customLogger)
 func WithShutdownTimeout(timeout time.Duration) MonoFrameworkOption
 ```
 
-Sets the maximum time to wait for graceful shutdown. Default is 30 seconds. Must be at least 1 second.
+Sets the maximum time to wait for graceful shutdown. It bounds the lifecycle part of `Stop` (drain, in-flight handlers, module and plugin `Stop`) when the context passed to `Stop` has no deadline of its own; a context with a deadline is used as is. The final NATS connection drain (capped at 5s) and server shutdown run after that bound. The drain keeps a reserve of the remaining time (5s, or a quarter of it when that is smaller) for module `Stop`. Default is 30 seconds. Must be at least 1 second and at least `WithShutdownDrainTimeout`.
 
 | Property | Value |
 |----------|-------|
 | Type | `time.Duration` |
 | Default | `30 * time.Second` |
-| Constraints | ≥ 1 second |
+| Constraints | ≥ 1 second, ≥ shutdown drain timeout |
 
 **Example:**
 ```go
 mono.WithShutdownTimeout(60 * time.Second)
+```
+
+#### WithShutdownDrainTimeout
+
+```go
+func WithShutdownDrainTimeout(timeout time.Duration) MonoFrameworkOption
+```
+
+Sets how long `Stop` waits, after it has stopped taking new messages, for subscriptions to finish draining and for in-flight handlers (worker pools and stream/cron fetch loops) to complete, before it cancels the runtime context and stops modules. Handlers keep a live context during this wait, so a request that started just before `Stop` completes normally. Whatever has not finished when the budget runs out is counted in a warning (`subscriptions_not_drained`, `pools_still_busy`, `fetch_loop_handlers_still_running`) and shutdown proceeds.
+
+Keep it below the orchestrator's termination grace period (Kubernetes defaults to 30s), with room for module `Stop`.
+
+| Property | Value |
+|----------|-------|
+| Type | `time.Duration` |
+| Default | `30 * time.Second` (nats.go `DefaultDrainTimeout`), capped at the shutdown timeout |
+| Constraints | > 0, ≤ shutdown timeout when set explicitly (checked in `NewMonoApplication`) |
+
+**Example:**
+```go
+mono.NewMonoApplication(
+    mono.WithShutdownDrainTimeout(10 * time.Second),
+    mono.WithShutdownTimeout(20 * time.Second),
+)
 ```
 
 #### WithQueueGroupOptimisticWindow
@@ -590,6 +614,7 @@ Returns a configuration with all default values. Useful for testing.
 | Log Output | `os.Stdout` |
 | Log Source | `false` |
 | Shutdown Timeout | `30 * time.Second` |
+| Shutdown Drain Timeout | `min(30 * time.Second, ShutdownTimeout)` |
 | Queue Group Optimistic Window | `0` (disabled) |
 | Default Service Concurrency | `0` (= `runtime.GOMAXPROCS(0) * 4`) |
 

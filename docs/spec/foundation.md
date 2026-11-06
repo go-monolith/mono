@@ -99,7 +99,7 @@ Four distinct patterns for inter-module communication:
 - **Defaults differ by kind.** Request-reply services are **pooled by default**: each request is independent, so a zero `MaxConcurrency` means the framework default. Queue group services and event consumers are **serial by default**: a zero `MaxConcurrency` means 1, so a handler keeps seeing its messages one at a time in arrival order, exactly as before worker pools existed (downstream consumers that count, sum or apply state transitions in order are not affected). Opt in per registration by setting `MaxConcurrency` above 1. `WithDefaultServiceConcurrency` therefore applies to request-reply only; `WithDefaultServiceConcurrency(1)` restores the fully serial behaviour of earlier versions.
 - **Overload**: when the pool and its queue are both full, a message that carries a reply subject (a request-reply call, or a queue group send awaiting its ACK) is answered immediately with `Mono-Error: true`, `Mono-Error-Type: overloaded`; the client maps it to a `ServiceError` wrapping `errors.ErrServiceOverloaded`, so the caller fails fast and can retry (with several instances the retry usually lands elsewhere). A message without a reply subject (an event, or a queue group send in optimistic publish mode) cannot be answered, so it is **not rejected**: the subscription callback blocks until a queue slot frees, which applies back-pressure through the NATS client's pending buffer (should that buffer's own limits ever be reached, nats.go reports a slow consumer). Rejections are logged at most once per second per subscription, with the count.
 - **Queue group ACK** is sent after the pool accepted the message, so an ACK means "accepted for processing" and a rejection is distinguishable from it. The worker waits for the ACK outcome before running the handler: if the ACK publish itself fails, the handler is skipped, because the sender will time out and re-send and the message must not be handled twice (the behaviour of earlier versions, which ACKed before calling the handler and returned on failure).
-- **Shutdown**: `Stop` calls `Drain()` on every subscription and then waits until each one is no longer valid (nats.go's `Drain` returns before the buffered messages have been delivered), so buffered messages still reach the pools. It then closes every pool and waits for in-flight and queued handlers to finish. One deadline, the stop context bounded by the drain timeout (5s), covers both waits, after which modules are stopped. A request delivered after the pools closed is answered with `Mono-Error-Type: shutting-down` (mapped to `ErrServiceUnavailable`); an event still buffered at that point is dropped with a rate-limited warning. The runtime context is still cancelled before the drain (issue #21 covers reordering that and making the timeout configurable).
+- **Shutdown**: see "Graceful Shutdown" below. A request delivered after the pools closed is answered with `Mono-Error-Type: shutting-down` (mapped to `ErrServiceUnavailable`); an event still buffered at that point is dropped with a rate-limited warning.
 - **Out of scope**: stream consumer, event stream consumer and cron services are pull-based loops and are not pooled.
 
 ### Handler Panic Recovery
@@ -148,7 +148,7 @@ Modules are first-class citizens with a well-defined lifecycle. The initializati
 5. Start (module performs initialization)
 6. NATS subscriptions setup (framework creates subscriptions for registered services)
 
-Shutdown occurs in reverse order with subscription draining before module stopping. Failed module initialization triggers rollback of previously started modules.
+Shutdown drains subscriptions and waits for in-flight handlers (with a live runtime context) before the runtime context is cancelled and modules are stopped in reverse order. Failed module initialization triggers rollback of previously started modules.
 
 ### Subject Naming Conventions
 
@@ -207,14 +207,16 @@ The core framework provides modular monolith architecture with embedded NATS for
 
 **Configuration Validation**: Each option validates immediately during application. First error stops processing. Cross-field validation occurs after all options applied. Error messages include context ("option N failed: specific error").
 
-**Graceful Shutdown Sequence**:
-1. Stop accepting new work
-2. Drain in-flight operations (with timeout)
-3. Unsubscribe from all NATS subscriptions
-4. Close the worker pools and wait for in-flight handlers (within the same timeout)
-5. Stop all modules in reverse dependency order
-6. Close NATS connection and stop embedded NATS server
-7. Force shutdown if timeout exceeded
+**Graceful Shutdown Sequence** (`Stop`):
+1. Stop taking new work: cancel the fetch context (stream, event stream and cron loops stop fetching) and `Drain()` every subscription, module by module in reverse dependency order.
+2. Wait, within the drain budget, until each subscription is no longer valid (nats.go's `Drain` returns before buffered messages are delivered, so the framework polls `IsValid`), the worker pools have run their in-flight and queued handlers, and the fetch loop handlers in flight have returned. Handlers keep a **live runtime context** throughout, so a request that started just before `Stop` completes and its reply is delivered. The drain budget is the `Stop` context bounded by `ShutdownDrainTimeout` (`WithShutdownDrainTimeout`; when not set, 30s = nats.go `DefaultDrainTimeout`, capped at `ShutdownTimeout`). What has not finished is counted and logged (`subscriptions_not_drained`, `pools_still_busy`, `fetch_loop_handlers_still_running`).
+3. Cancel the runtime context: anything still running after the budget is told to stop; channel routers exit.
+4. Stop all modules in reverse dependency order, then middleware, then plugins.
+5. Drain and close the NATS client connection (so a reply published during step 2 still reaches an in-process requester), then stop the embedded NATS server.
+
+`ShutdownTimeout` (`WithShutdownTimeout`, default 30s) bounds steps 1–4 of `Stop` when the caller's context has no deadline; a caller deadline is used as is. Step 5 runs outside that bound and takes at most 5s for the connection drain plus the server shutdown. The drain budget is further capped so that a reserve of the context's remaining time (5s, or a quarter of it when that is smaller) is kept for module `Stop`, so a stuck handler cannot hand modules an already expired context; with `WithShutdownTimeout(5*time.Second)` the drain gets 3.75s. Fetch loop handlers in flight are awaited before any subscription is drained, so their nested calls also still find a responder. Subscriptions are drained module by module in reverse dependency order, so a handler that calls another module's service while finishing still finds a responder. An explicit `ShutdownDrainTimeout` must not exceed `ShutdownTimeout` (checked after all options are applied); when it is not set it follows a shorter `ShutdownTimeout`, so existing configurations such as `WithShutdownTimeout(5*time.Second)` stay valid. Because the drain may use its whole budget before modules stop, set `ShutdownDrainTimeout` below `ShutdownTimeout`, and both below the orchestrator's termination grace period (Kubernetes defaults to 30s), so module `Stop` still runs before the process is killed.
+
+**Fetch loop and handler contexts**: fetch loops (stream consumer, event stream consumer, cron) run under a fetch context that is cancelled at step 1; the handlers they call receive the runtime context, cancelled at step 3. A batch in flight at `Stop` therefore finishes with a live context and can acknowledge normally. `Stop` waits for those handlers, not for the loop goroutines: a `Fetch` blocked on the server returns on its own after at most `Fetch.Timeout` (5s by default), and a batch it brings back after shutdown began is not handled but left unacknowledged for redelivery (a cron occurrence is Nak'd), so shutdown is not delayed by the fetch timeout. (`jetstream.FetchContext` is deliberately not used: it leaves the server-side pull request open for its default 30s expiry, so messages delivered after the context ends are lost until `AckWait`.)
 
 ### Performance Targets
 

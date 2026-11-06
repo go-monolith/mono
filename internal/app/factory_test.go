@@ -22,7 +22,7 @@ func TestCreateFrameworkAppInstance_WithNilLogger(t *testing.T) {
 		Format: types.LogFormatText,
 	}
 
-	fw, err := CreateFrameworkAppInstance(nil, loggerOpts, natsOpts, 0, 0)
+	fw, err := CreateFrameworkAppInstance(nil, loggerOpts, natsOpts, Settings{})
 	if err != nil {
 		t.Fatalf("Expected no error, got: %v", err)
 	}
@@ -46,7 +46,7 @@ func TestCreateFrameworkAppInstance_WithCustomLogger(t *testing.T) {
 	}
 	loggerOpts := types.LoggerOptions{} // Should be ignored since logger is provided
 
-	fw, err := CreateFrameworkAppInstance(customLogger, loggerOpts, natsOpts, 0, 0)
+	fw, err := CreateFrameworkAppInstance(customLogger, loggerOpts, natsOpts, Settings{})
 	if err != nil {
 		t.Fatalf("Expected no error, got: %v", err)
 	}
@@ -495,7 +495,7 @@ func TestCreateFrameworkAppInstance_QueueGroupOptimisticWindow(t *testing.T) {
 			}
 			loggerOpts := types.LoggerOptions{}
 
-			fw, err := CreateFrameworkAppInstance(customLogger, loggerOpts, natsOpts, 0, 0)
+			fw, err := CreateFrameworkAppInstance(customLogger, loggerOpts, natsOpts, Settings{})
 			if err != nil {
 				t.Fatalf("Expected no error, got: %v", err)
 			}
@@ -536,7 +536,7 @@ func TestCreateFrameworkAppInstance_FrameworkError(t *testing.T) {
 	}
 	loggerOpts := types.LoggerOptions{}
 
-	_, err := CreateFrameworkAppInstance(customLogger, loggerOpts, natsOpts, 0, 0)
+	_, err := CreateFrameworkAppInstance(customLogger, loggerOpts, natsOpts, Settings{})
 	// We expect an error due to invalid configuration
 	// Note: The actual NATS library may or may not error on invalid port during setup
 	// but this test ensures the error path exists and wraps properly
@@ -599,7 +599,7 @@ func TestCreateFrameworkAppInstance_Combinations(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			fw, err := CreateFrameworkAppInstance(tt.logger, tt.loggerOpts, tt.natsOpts, 0, 0)
+			fw, err := CreateFrameworkAppInstance(tt.logger, tt.loggerOpts, tt.natsOpts, Settings{})
 			if (err != nil) != tt.wantErr {
 				t.Errorf("CreateFrameworkAppInstance() error = %v, wantErr %v", err, tt.wantErr)
 				return

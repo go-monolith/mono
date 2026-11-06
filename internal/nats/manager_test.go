@@ -250,6 +250,141 @@ func TestNATSManager_StartTwice(t *testing.T) {
 	}
 }
 
+// TestNATSManager_Stop_DrainsConnection checks that a message delivered to a
+// subscription on the framework connection just before Stop is still handed
+// to its handler: Stop drains the connection instead of closing it outright.
+// TestNATSManager_Stop_NothingToDrain checks that Stop copes with a
+// connection that was closed before it (nothing to drain) and still stops the
+// server.
+func TestNATSManager_Stop_NothingToDrain(t *testing.T) {
+	logger := newMockLogger()
+	port, err := findAvailablePort()
+	if err != nil {
+		t.Fatalf("failed to find available port: %v", err)
+	}
+	mgr := &natsManager{
+		config: &NATSConfig{Host: "127.0.0.1", Port: port, MaxPayload: 1024 * 1024, StartupReadyTimeout: 10 * time.Second},
+		logger: logger,
+	}
+	if err := mgr.Start(context.Background()); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	conn, err := mgr.Connection()
+	if err != nil {
+		t.Fatalf("connection: %v", err)
+	}
+	conn.Close()
+
+	if err := mgr.Stop(context.Background()); err != nil {
+		t.Fatalf("stop: %v", err)
+	}
+	if mgr.server != nil {
+		t.Fatal("server should be stopped")
+	}
+	// A second Stop reports the server as not started.
+	if err := mgr.Stop(context.Background()); err == nil {
+		t.Fatal("second Stop should fail: server not started")
+	}
+}
+
+// TestNATSManager_DrainConnection_InterruptedByContext checks the fallback to
+// Close when the context given to Stop is already done.
+func TestNATSManager_DrainConnection_InterruptedByContext(t *testing.T) {
+	logger := newMockLogger()
+	port, err := findAvailablePort()
+	if err != nil {
+		t.Fatalf("failed to find available port: %v", err)
+	}
+	mgr := &natsManager{
+		config: &NATSConfig{Host: "127.0.0.1", Port: port, MaxPayload: 1024 * 1024, StartupReadyTimeout: 10 * time.Second},
+		logger: logger,
+	}
+	if err := mgr.Start(context.Background()); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	conn, err := mgr.Connection()
+	if err != nil {
+		t.Fatalf("connection: %v", err)
+	}
+	// Keep the connection busy draining: a subscription whose handler blocks
+	// until we release it, with a message in flight.
+	release := make(chan struct{})
+	if _, err := conn.Subscribe("drain.block", func(*nats.Msg) { <-release }); err != nil {
+		t.Fatalf("subscribe: %v", err)
+	}
+	if err := conn.Publish("drain.block", []byte("x")); err != nil {
+		t.Fatalf("publish: %v", err)
+	}
+	if err := conn.Flush(); err != nil {
+		t.Fatalf("flush: %v", err)
+	}
+	time.Sleep(50 * time.Millisecond)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	start := time.Now()
+	mgr.drainConnection(ctx, conn)
+	if time.Since(start) > 2*time.Second {
+		t.Fatal("drainConnection should give up at once when the context is done")
+	}
+	if !conn.IsClosed() {
+		t.Fatal("connection should have been closed outright")
+	}
+	close(release)
+	_ = mgr.Stop(context.Background())
+}
+
+func TestNATSManager_Stop_DrainsConnection(t *testing.T) {
+	logger := newMockLogger()
+	port, err := findAvailablePort()
+	if err != nil {
+		t.Fatalf("failed to find available port: %v", err)
+	}
+	mgr := &natsManager{
+		config: &NATSConfig{
+			Host: "127.0.0.1", Port: port, MaxPayload: 1024 * 1024, StartupReadyTimeout: 10 * time.Second,
+		},
+		logger: logger,
+	}
+	ctx := context.Background()
+	if err := mgr.Start(ctx); err != nil {
+		t.Fatalf("failed to start NATS server: %v", err)
+	}
+	conn, err := mgr.Connection()
+	if err != nil {
+		t.Fatalf("connection: %v", err)
+	}
+
+	received := make(chan string, 1)
+	if _, err := conn.Subscribe("drain.test", func(msg *nats.Msg) {
+		received <- string(msg.Data)
+	}); err != nil {
+		t.Fatalf("subscribe: %v", err)
+	}
+	if err := conn.Flush(); err != nil {
+		t.Fatalf("flush: %v", err)
+	}
+	// Publish and stop immediately: with a plain Close the message, already
+	// routed back by the server, could be dropped before the handler ran.
+	if err := conn.Publish("drain.test", []byte("last words")); err != nil {
+		t.Fatalf("publish: %v", err)
+	}
+	if err := mgr.Stop(ctx); err != nil {
+		t.Fatalf("stop: %v", err)
+	}
+	if !conn.IsClosed() {
+		t.Fatal("connection should be closed after Stop")
+	}
+	select {
+	case got := <-received:
+		if got != "last words" {
+			t.Fatalf("got %q", got)
+		}
+	default:
+		t.Fatal("message published before Stop was not delivered to the subscription")
+	}
+}
+
 func TestNATSManager_StopWithoutStart(t *testing.T) {
 	logger := newMockLogger()
 

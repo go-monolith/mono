@@ -6,6 +6,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/go-monolith/mono/internal/nats"
 	"github.com/go-monolith/mono/pkg/types"
@@ -97,8 +98,7 @@ func newTestFramework(t *testing.T) types.MonoFramework {
 	// Use in-process NATS mode to avoid TCP binding and timeouts in test environment
 	fw, err := NewFrameworkAppInstance(
 		logger,
-		0,                        // No queue group optimistic window
-		0,                        // Default service concurrency
+		Settings{},
 		nats.WithDontListen(),    // Don't bind TCP port
 		nats.WithInProcessConn(), // Use in-process connections only
 	)
@@ -932,8 +932,7 @@ func TestNewFrameworkAppInstance_InvalidNATSOptions(t *testing.T) {
 	// Try to create framework with invalid NATS options (port out of range)
 	_, err := NewFrameworkAppInstance(
 		logger,
-		0,
-		0,
+		Settings{},
 		nats.WithPort(70000), // Invalid port > 65535
 	)
 
@@ -956,8 +955,7 @@ func TestNewFrameworkAppInstance_NATSManagerCreationFailure(t *testing.T) {
 	// DontListen requires UseInProcessConn to be true
 	_, err := NewFrameworkAppInstance(
 		logger,
-		0,
-		0,
+		Settings{},
 		nats.WithDontListen(), // DontListen without InProcessConn should fail validation
 	)
 
@@ -1008,10 +1006,11 @@ func (m *mockNATSManager) ServerInfo() nats.ServerInfo {
 
 // mockLifecycleManager implements lifecycle.LifecycleManager for testing
 type mockLifecycleManager struct {
-	startErr   error
-	stopErr    error
-	ctx        context.Context
-	cancelFunc context.CancelFunc
+	startErr        error
+	stopErr         error
+	ctx             context.Context
+	cancelFunc      context.CancelFunc
+	stopHadDeadline bool // whether the context passed to Stop carried a deadline
 }
 
 func newMockLifecycleManager() *mockLifecycleManager {
@@ -1026,7 +1025,8 @@ func (m *mockLifecycleManager) Start(_ context.Context) error {
 	return m.startErr
 }
 
-func (m *mockLifecycleManager) Stop(_ context.Context) error {
+func (m *mockLifecycleManager) Stop(ctx context.Context) error {
+	_, m.stopHadDeadline = ctx.Deadline()
 	return m.stopErr
 }
 
@@ -1056,6 +1056,56 @@ func (m *mockLifecycleManager) GetPluginContainer(_ string) types.ServiceContain
 }
 
 func (m *mockLifecycleManager) SetDefaultServiceConcurrency(_ int) {}
+
+func (m *mockLifecycleManager) SetDrainTimeout(_ time.Duration) {}
+
+// TestStop_AppliesShutdownTimeoutWhenContextHasNoDeadline checks that Stop
+// bounds itself with the configured ShutdownTimeout when the caller passes a
+// context without a deadline, and leaves a caller-supplied deadline alone.
+func TestStop_AppliesShutdownTimeoutWhenContextHasNoDeadline(t *testing.T) {
+	newApp := func(timeout time.Duration) (*frameworkApplication, *mockLifecycleManager) {
+		mockLM := newMockLifecycleManager()
+		return &frameworkApplication{
+			logger:           &mockLogger{},
+			natsManager:      &mockNATSManager{},
+			lifecycleManager: mockLM,
+			state:            types.StateRunning,
+			settings:         Settings{ShutdownTimeout: timeout},
+		}, mockLM
+	}
+
+	t.Run("background context gets the shutdown timeout", func(t *testing.T) {
+		fw, mockLM := newApp(5 * time.Second)
+		if err := fw.Stop(context.Background()); err != nil {
+			t.Fatalf("Stop failed: %v", err)
+		}
+		if !mockLM.stopHadDeadline {
+			t.Fatal("lifecycle Stop should have received a context bounded by ShutdownTimeout")
+		}
+	})
+
+	t.Run("no shutdown timeout configured leaves the context unbounded", func(t *testing.T) {
+		fw, mockLM := newApp(0)
+		if err := fw.Stop(context.Background()); err != nil {
+			t.Fatalf("Stop failed: %v", err)
+		}
+		if mockLM.stopHadDeadline {
+			t.Fatal("no deadline expected when ShutdownTimeout is 0")
+		}
+	})
+
+	t.Run("caller deadline is kept", func(t *testing.T) {
+		fw, mockLM := newApp(5 * time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+		defer cancel()
+		if err := fw.Stop(ctx); err != nil {
+			t.Fatalf("Stop failed: %v", err)
+		}
+		if !mockLM.stopHadDeadline {
+			t.Fatal("caller deadline should be passed through")
+		}
+	})
+}
 
 // TestFramework_Stop_NATSManagerError tests Stop() when NATS manager fails
 func TestFramework_Stop_NATSManagerError(t *testing.T) {

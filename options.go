@@ -48,6 +48,7 @@ func defaultConfig() *types.MonoFrameworkConfig {
 		},
 		Logger:                     nil, // Will use default logger if not set
 		ShutdownTimeout:            30 * time.Second,
+		ShutdownDrainTimeout:       0, // derived: DefaultShutdownDrainTimeout capped at ShutdownTimeout
 		QueueGroupOptimisticWindow: 0, // Disabled by default
 	}
 }
@@ -204,8 +205,12 @@ func WithNATSAutoTLS(autoTLS types.AutoTLSConfig) MonoFrameworkOption {
 	}
 }
 
-// WithShutdownTimeout sets the graceful shutdown timeout.
-// The timeout must be at least 1 second to allow proper cleanup.
+// WithShutdownTimeout sets the graceful shutdown timeout. It bounds the
+// lifecycle part of Stop (drain, in-flight handlers, module and plugin Stop)
+// when the context passed to Stop has no deadline of its own; a context with a
+// deadline is used as is. The drain keeps a reserve of the remaining time (5s,
+// or a quarter of it when that is smaller) for module Stop. The timeout must be at least 1 second to allow proper cleanup, and at
+// least WithShutdownDrainTimeout.
 //
 // Example:
 //
@@ -506,6 +511,37 @@ func WithQueueGroupOptimisticWindow(window time.Duration) MonoFrameworkOption {
 				"window must be 0 (disabled) or at least 100ms")
 		}
 		cfg.QueueGroupOptimisticWindow = window
+		return nil
+	}
+}
+
+// WithShutdownDrainTimeout sets how long Stop waits for subscriptions to drain
+// and for in-flight handlers to finish before it cancels the runtime context
+// and stops modules. When not set, the drain timeout is
+// types.DefaultShutdownDrainTimeout (30s, the nats.go drain default) capped
+// at the shutdown timeout. At Stop the budget is further reduced by the module
+// Stop reserve (5s, or a quarter of the remaining time when that is smaller),
+// so WithShutdownTimeout(5*time.Second) alone yields a 3.75s drain. An
+// explicit value must be positive and must not exceed WithShutdownTimeout,
+// which is checked once all options are applied.
+//
+// Keep it below the orchestrator's termination grace period (Kubernetes
+// defaults to 30s), with room for module Stop, so a stuck handler cannot
+// cause the process to be killed before modules have stopped cleanly.
+//
+// Example:
+//
+//	mono.NewMonoApplication(
+//	    mono.WithShutdownDrainTimeout(10*time.Second),
+//	    mono.WithShutdownTimeout(20*time.Second),
+//	)
+func WithShutdownDrainTimeout(timeout time.Duration) MonoFrameworkOption {
+	return func(cfg *types.MonoFrameworkConfig) error {
+		if timeout <= 0 {
+			return errors.WrapInvalidConfiguration(0, "WithShutdownDrainTimeout", timeout,
+				"drain timeout must be positive")
+		}
+		cfg.ShutdownDrainTimeout = timeout
 		return nil
 	}
 }
