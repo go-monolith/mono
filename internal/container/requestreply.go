@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
 	"time"
 
 	monoerrors "github.com/go-monolith/mono/pkg/errors"
@@ -133,6 +134,40 @@ func (c *requestReplyClient) ensureContextDeadline(ctx context.Context) (context
 	}
 }
 
+// setDeadlineHeaders copies the context deadline into the Mono-Deadline
+// (absolute Unix milliseconds) and Mono-Timeout (remaining milliseconds)
+// headers, so the handling instance can run the handler under the caller's
+// deadline and skip the request if it has already passed. It runs before the
+// outgoing middleware chain, which may read or overwrite the headers; a
+// middleware that removes Mono-Deadline and Mono-Timeout opts the request out
+// of server-side expiry.
+func setDeadlineHeaders(ctx context.Context, msg *types.Msg) {
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		return
+	}
+	if msg.Header == nil {
+		msg.Header = make(types.Header)
+	}
+	msg.Header.Set(types.HeaderDeadline, strconv.FormatInt(deadline.UnixMilli(), 10))
+	remaining := time.Until(deadline).Milliseconds()
+	if remaining < 0 {
+		remaining = 0
+	}
+	msg.Header.Set(types.HeaderTimeout, strconv.FormatInt(remaining, 10))
+}
+
+// cloneHeader returns a copy of h with its own map and value slices, never
+// nil, so neither the headers the client adds nor middleware edits leak into
+// the caller's message.
+func cloneHeader(h types.Header) types.Header {
+	out := make(types.Header, len(h)+2)
+	for k, v := range h {
+		out[k] = append([]string(nil), v...)
+	}
+	return out
+}
+
 // runMiddleware runs the message through the middleware chain, allowing header injection.
 // Returns the potentially modified message.
 func (c *requestReplyClient) runMiddleware(ctx context.Context, msg *types.Msg) *types.Msg {
@@ -179,7 +214,9 @@ func (c *requestReplyClient) Call(ctx context.Context, data []byte) (*types.Msg,
 		Header:  make(types.Header),
 	}
 
-	// Run through middleware chain to allow header injection
+	// Propagate the caller's deadline, then run through middleware chain to
+	// allow header injection
+	setDeadlineHeaders(ctx, msg)
 	msg = c.runMiddleware(ctx, msg)
 
 	// Make request using EventBus with context and headers
@@ -223,19 +260,17 @@ func (c *requestReplyClient) CallMsg(ctx context.Context, msg *types.Msg) (*type
 		defer cancel()
 	}
 
-	// Build full message with service subject and input headers
+	// Build full message with service subject and a copy of the input headers
+	// (the deadline headers are added to the copy, not to the caller's map)
 	fullMsg := &types.Msg{
 		Subject: c.subject, // Always use service subject
 		Data:    msg.Data,
-		Header:  msg.Header, // Copy headers from input
+		Header:  cloneHeader(msg.Header),
 	}
 
-	// Ensure Header is not nil
-	if fullMsg.Header == nil {
-		fullMsg.Header = make(types.Header)
-	}
-
-	// Run through middleware chain to allow header injection
+	// Propagate the caller's deadline, then run through middleware chain to
+	// allow header injection
+	setDeadlineHeaders(ctx, fullMsg)
 	fullMsg = c.runMiddleware(ctx, fullMsg)
 
 	// Make request using EventBus with context and headers

@@ -1059,6 +1059,8 @@ func (m *mockLifecycleManager) SetDefaultServiceConcurrency(_ int) {}
 
 func (m *mockLifecycleManager) SetDrainTimeout(_ time.Duration) {}
 
+func (m *mockLifecycleManager) SetDeadlineSkewAllowance(_ time.Duration) {}
+
 // TestStop_AppliesShutdownTimeoutWhenContextHasNoDeadline checks that Stop
 // bounds itself with the configured ShutdownTimeout when the caller passes a
 // context without a deadline, and leaves a caller-supplied deadline alone.

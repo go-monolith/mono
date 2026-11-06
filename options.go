@@ -546,6 +546,34 @@ func WithShutdownDrainTimeout(timeout time.Duration) MonoFrameworkOption {
 	}
 }
 
+// WithDeadlineSkewAllowance sets the clock skew tolerated when a request-reply
+// handler decides whether the caller's deadline has already passed.
+//
+// Request-reply clients send the caller's deadline in the Mono-Deadline header
+// (absolute Unix milliseconds) and the remaining time in Mono-Timeout. On the
+// handling instance a request whose deadline passed by more than the allowance
+// while it waited in the queue is dropped without running the handler (the
+// caller has given up); otherwise the handler runs with a context that expires
+// at the caller's deadline. When the two headers disagree by more than the
+// allowance (the clocks are out of step) the clock-independent Mono-Timeout is
+// used and a warning is logged. Default: types.DefaultDeadlineSkewAllowance
+// (250ms). Set it to the largest clock difference you expect between callers
+// and this instance.
+//
+// Example:
+//
+//	mono.NewMonoApplication(mono.WithDeadlineSkewAllowance(time.Second))
+func WithDeadlineSkewAllowance(d time.Duration) MonoFrameworkOption {
+	return func(cfg *types.MonoFrameworkConfig) error {
+		if d < 0 {
+			return errors.WrapInvalidConfiguration(0, "WithDeadlineSkewAllowance", d,
+				"skew allowance must not be negative")
+		}
+		cfg.DeadlineSkewAllowance = d
+		return nil
+	}
+}
+
 // WithDefaultServiceConcurrency sets the number of handlers that may run at
 // once for each request-reply service whose own options leave MaxConcurrency
 // at 0.

@@ -571,6 +571,25 @@ Enables optimistic publish mode for queue group services. When set, the first se
 mono.WithQueueGroupOptimisticWindow(1 * time.Second)
 ```
 
+#### WithDeadlineSkewAllowance
+
+```go
+func WithDeadlineSkewAllowance(d time.Duration) MonoFrameworkOption
+```
+
+Sets the clock skew tolerated when a request-reply handler decides whether the caller's deadline (sent in `Mono-Deadline`) has already passed, and when the two deadline headers are considered to disagree. A request whose deadline passed by more than the allowance while it waited in the queue is dropped without running the handler (the caller has given up); otherwise the handler runs with a context that expires at the caller's deadline. When `Mono-Deadline` and `Mono-Timeout` disagree by more than the allowance, the clock-independent `Mono-Timeout` is used and a warning is logged. Set it to the largest clock difference you expect between callers and this instance.
+
+| Property | Value |
+|----------|-------|
+| Type | `time.Duration` |
+| Default | `250 * time.Millisecond` |
+| Constraints | ≥ 0 (0 selects the default) |
+
+**Example:**
+```go
+mono.WithDeadlineSkewAllowance(time.Second)
+```
+
 #### WithDefaultServiceConcurrency
 
 ```go
@@ -615,6 +634,7 @@ Returns a configuration with all default values. Useful for testing.
 | Log Source | `false` |
 | Shutdown Timeout | `30 * time.Second` |
 | Shutdown Drain Timeout | `min(30 * time.Second, ShutdownTimeout)` |
+| Deadline Skew Allowance | `250 * time.Millisecond` |
 | Queue Group Optimistic Window | `0` (disabled) |
 | Default Service Concurrency | `0` (= `runtime.GOMAXPROCS(0) * 4`) |
 

@@ -188,6 +188,22 @@ func (c *queueGroupClient) sendInternal(ctx context.Context, data []byte) error 
 		lastACK > 0 &&
 		now-lastACK < c.optimisticWindow.Nanoseconds()
 
+	// In ACK mode the send waits for the ACK under the client's default
+	// timeout when the caller's context has none; apply it before building the
+	// message so the deadline headers carry it. In optimistic publish mode no
+	// default is applied and the headers reflect only a caller-supplied deadline.
+	if !usePublish {
+		var cancel context.CancelFunc
+		var err error
+		ctx, cancel, err = c.ensureContextDeadline(ctx)
+		if err != nil {
+			return err
+		}
+		if cancel != nil {
+			defer cancel()
+		}
+	}
+
 	// Build message with headers
 	msg := &types.Msg{
 		Subject: c.subject,
@@ -195,7 +211,11 @@ func (c *queueGroupClient) sendInternal(ctx context.Context, data []byte) error 
 		Header:  make(types.Header),
 	}
 
-	// Run through middleware chain to allow header injection
+	// Propagate the caller's deadline (when the context has one; in optimistic
+	// publish mode no default is applied), then run through middleware chain
+	// to allow header injection. Queue group handlers are not skipped on an
+	// expired deadline: the ACK promised processing.
+	setDeadlineHeaders(ctx, msg)
 	msg = c.runMiddleware(ctx, msg)
 
 	if usePublish {
@@ -209,15 +229,7 @@ func (c *queueGroupClient) sendInternal(ctx context.Context, data []byte) error 
 		return nil
 	}
 
-	// Slow path: request with ACK
-	ctx, cancel, err := c.ensureContextDeadline(ctx)
-	if err != nil {
-		return err
-	}
-	if cancel != nil {
-		defer cancel()
-	}
-
+	// Slow path: request with ACK (the deadline was applied above)
 	// Use request-reply to wait for ACK with headers
 	ack, err := c.eventBus.RequestMsgWithContext(ctx, msg)
 	if err != nil {
@@ -280,19 +292,32 @@ func (c *queueGroupClient) sendInternalMsg(ctx context.Context, msg *types.Msg) 
 		lastACK > 0 &&
 		now-lastACK < c.optimisticWindow.Nanoseconds()
 
-	// Build full message with service subject
+	// In ACK mode the send waits for the ACK under the client's default
+	// timeout when the caller's context has none; apply it before building the
+	// message so the deadline headers carry it. In optimistic publish mode no
+	// default is applied and the headers reflect only a caller-supplied deadline.
+	if !usePublish {
+		var cancel context.CancelFunc
+		var err error
+		ctx, cancel, err = c.ensureContextDeadline(ctx)
+		if err != nil {
+			return err
+		}
+		if cancel != nil {
+			defer cancel()
+		}
+	}
+
+	// Build full message with service subject and a copy of the input headers
 	fullMsg := &types.Msg{
 		Subject: c.subject,
 		Data:    msg.Data,
-		Header:  msg.Header,
+		Header:  cloneHeader(msg.Header),
 	}
 
-	// Ensure Header is not nil
-	if fullMsg.Header == nil {
-		fullMsg.Header = make(types.Header)
-	}
-
-	// Run through middleware chain to allow header injection
+	// Propagate the caller's deadline, then run through middleware chain to
+	// allow header injection
+	setDeadlineHeaders(ctx, fullMsg)
 	fullMsg = c.runMiddleware(ctx, fullMsg)
 
 	if usePublish {
@@ -305,15 +330,7 @@ func (c *queueGroupClient) sendInternalMsg(ctx context.Context, msg *types.Msg) 
 		return nil
 	}
 
-	// Slow path: request with ACK
-	ctx, cancel, err := c.ensureContextDeadline(ctx)
-	if err != nil {
-		return err
-	}
-	if cancel != nil {
-		defer cancel()
-	}
-
+	// Slow path: request with ACK (the deadline was applied above)
 	// Use request-reply to wait for ACK with headers
 	ack, err := c.eventBus.RequestMsgWithContext(ctx, fullMsg)
 	if err != nil {

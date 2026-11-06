@@ -45,6 +45,9 @@ type Settings struct {
 	// ShutdownDrainTimeout bounds the drain and in-flight handler wait during
 	// Stop (0 = types.DefaultShutdownDrainTimeout).
 	ShutdownDrainTimeout time.Duration
+	// DeadlineSkewAllowance is the clock skew tolerated when deciding that a
+	// request's deadline has passed (0 = types.DefaultDeadlineSkewAllowance).
+	DeadlineSkewAllowance time.Duration
 }
 
 // NewFrameworkAppInstance creates a new framework instance with the given logger.
@@ -108,6 +111,7 @@ func NewFrameworkAppInstance(logger types.Logger, settings Settings, natsOptions
 	)
 	fwApp.lifecycleManager.SetDefaultServiceConcurrency(fwApp.settings.DefaultServiceConcurrency)
 	fwApp.lifecycleManager.SetDrainTimeout(fwApp.settings.ShutdownDrainTimeout)
+	fwApp.lifecycleManager.SetDeadlineSkewAllowance(fwApp.settings.DeadlineSkewAllowance)
 
 	// Step 6: Set runtime context on event bus for graceful shutdown
 	runtimeCtx := fwApp.lifecycleManager.GetRuntimeContext()

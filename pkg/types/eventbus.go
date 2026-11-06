@@ -33,6 +33,20 @@ const (
 	// Go error type name (lower-cased, "Error" suffix removed) can produce it.
 	ErrorTypeHandlerPanic = "handler-panic"
 
+	// HeaderDeadline carries the caller's absolute deadline as Unix time in
+	// milliseconds. Request-reply and queue group clients set it from the
+	// context deadline so the handling instance can run the handler with the
+	// same deadline and skip a request the caller has already given up on.
+	// Exact across instances when clocks are in sync; see HeaderTimeout.
+	HeaderDeadline = "Mono-Deadline"
+
+	// HeaderTimeout carries the time the caller had left when it sent the
+	// request, in milliseconds (like gRPC's grpc-timeout). It is the fallback
+	// when HeaderDeadline is absent or unparseable and is applied relative to
+	// the message's arrival on the handling instance, so it survives clock
+	// differences but not queue wait before arrival.
+	HeaderTimeout = "Mono-Timeout"
+
 	// ErrorTypeShuttingDown is the HeaderErrorType value of the error response
 	// the framework sends to a request that arrives while the instance is
 	// shutting down and no longer accepts work. Clients map it to
@@ -361,3 +375,22 @@ type MsgPubAck interface {
 //	}
 //	eventBus.PublishMsg(msg)
 type Header map[string][]string
+
+// Get returns the first value of the header key, or "" when the key is absent.
+// It is safe on a nil Header.
+func (h Header) Get(key string) string {
+	if h == nil {
+		return ""
+	}
+	if v := h[key]; len(v) > 0 {
+		return v[0]
+	}
+	return ""
+}
+
+// Set replaces the values of key with value. It panics on a nil Header, like
+// assigning to a nil map; callers that may hold a nil Header should make one
+// first.
+func (h Header) Set(key, value string) {
+	h[key] = []string{value}
+}

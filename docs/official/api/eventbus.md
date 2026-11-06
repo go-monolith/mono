@@ -275,6 +275,20 @@ type EventStreamConsumerHandler func(ctx context.Context, msgs []*Msg) error
 
 Raw stream consumer handler for use with `EventRegistry.RegisterEventStreamConsumer()`.
 
+## Wire Protocol Headers
+
+The framework uses a few `Mono-*` headers on the NATS wire. Clients in other languages that talk to a mono application should send and read them the same way; all values are strings.
+
+| Header | Direction | Value |
+|--------|-----------|-------|
+| `Mono-Deadline` | request → handler | The caller's absolute deadline, Unix time in **milliseconds**. The handler runs with this deadline, and the request is dropped unanswered if it passed by more than the clock-skew allowance (250ms by default) when a worker picks it up. Values more than 24h from arrival (wrong unit) are ignored. |
+| `Mono-Timeout` | request → handler | The time the caller had left when it sent the request, in **milliseconds** (`0` = none). Applied relative to the message's arrival, so it does not depend on either clock. Used when `Mono-Deadline` is absent, invalid, or disagrees with it by more than the allowance (clock skew; logged). Clamped to 24h. |
+| `Mono-Error` | reply → caller | `"true"` when the reply is an error instead of a response payload. |
+| `Mono-Error-Message` | reply → caller | Human-readable error message. |
+| `Mono-Error-Type` | reply → caller | Error classification. Framework values: `overloaded` (pool and queue full, retry elsewhere), `handler-panic` (handler crashed on this request), `shutting-down` (instance stopping). Other values are the handler error's type name, lower-cased with the `Error` suffix removed. |
+
+Header names are matched case-sensitively as NATS delivers them; send them exactly as spelled here. A request without `Mono-Deadline`/`Mono-Timeout` is handled with no deadline, as older clients did. Queue group sends carry the deadline headers too, but a queue group handler is never skipped because of them: the ACK promised processing.
+
 ## Request-Reply Methods
 
 ### Request
