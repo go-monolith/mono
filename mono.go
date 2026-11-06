@@ -56,6 +56,7 @@ func NewMonoApplication(opts ...MonoFrameworkOption) (MonoApplication, error) {
 		ShutdownTimeout:            cfg.ShutdownTimeout,
 		ShutdownDrainTimeout:       cfg.ShutdownDrainTimeout,
 		DeadlineSkewAllowance:      cfg.DeadlineSkewAllowance,
+		StatsLogInterval:           cfg.SubscriptionStatsLogInterval,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to create framework: %w", err)

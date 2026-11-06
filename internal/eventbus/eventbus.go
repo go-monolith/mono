@@ -345,6 +345,28 @@ func (s *monoSubscription) Queue() string {
 	return s.natsSub.Queue
 }
 
+// SetPendingLimits bounds the NATS client buffer of this subscription. It
+// implements types.PendingLimiter.
+func (s *monoSubscription) SetPendingLimits(msgs, bytes int) error {
+	return s.natsSub.SetPendingLimits(msgs, bytes)
+}
+
+// Pending returns the messages and bytes buffered by the client for this
+// subscription. It implements types.SubscriptionStatsReader.
+func (s *monoSubscription) Pending() (msgs, bytes int, err error) {
+	return s.natsSub.Pending()
+}
+
+// Dropped returns the number of messages dropped as a slow consumer.
+func (s *monoSubscription) Dropped() (int, error) {
+	return s.natsSub.Dropped()
+}
+
+// Delivered returns the number of messages dispatched to the callback.
+func (s *monoSubscription) Delivered() (int64, error) {
+	return s.natsSub.Delivered()
+}
+
 // NextMsg fetches the next message (for sync subscriptions).
 func (s *monoSubscription) NextMsg(timeout time.Duration) (*types.Msg, error) {
 	natsMsg, err := s.natsSub.NextMsg(timeout)

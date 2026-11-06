@@ -48,6 +48,9 @@ type Settings struct {
 	// DeadlineSkewAllowance is the clock skew tolerated when deciding that a
 	// request's deadline has passed (0 = types.DefaultDeadlineSkewAllowance).
 	DeadlineSkewAllowance time.Duration
+	// StatsLogInterval is the period of the Debug subscription stats log
+	// (0 = off).
+	StatsLogInterval time.Duration
 }
 
 // NewFrameworkAppInstance creates a new framework instance with the given logger.
@@ -112,6 +115,7 @@ func NewFrameworkAppInstance(logger types.Logger, settings Settings, natsOptions
 	fwApp.lifecycleManager.SetDefaultServiceConcurrency(fwApp.settings.DefaultServiceConcurrency)
 	fwApp.lifecycleManager.SetDrainTimeout(fwApp.settings.ShutdownDrainTimeout)
 	fwApp.lifecycleManager.SetDeadlineSkewAllowance(fwApp.settings.DeadlineSkewAllowance)
+	fwApp.lifecycleManager.SetStatsLogInterval(fwApp.settings.StatsLogInterval)
 
 	// Step 6: Set runtime context on event bus for graceful shutdown
 	runtimeCtx := fwApp.lifecycleManager.GetRuntimeContext()
@@ -305,6 +309,19 @@ func (fw *frameworkApplication) Modules() []string {
 		names = append(names, name)
 	}
 	return names
+}
+
+// SubscriptionStats returns a snapshot of every framework-managed NATS
+// subscription with its worker pool. It returns nil unless the application
+// is running.
+func (fw *frameworkApplication) SubscriptionStats() []types.SubscriptionStats {
+	fw.mu.RLock()
+	running := fw.state == types.StateRunning
+	fw.mu.RUnlock()
+	if !running {
+		return nil
+	}
+	return fw.lifecycleManager.SubscriptionStats()
 }
 
 // Health aggregates health status from all framework components and modules.

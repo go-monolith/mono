@@ -161,7 +161,10 @@ Returns the `EventBus` for a specific module.
 
 ```go
 func (app MonoApplication) Health(ctx context.Context) FrameworkHealth
+func (app MonoApplication) SubscriptionStats() []SubscriptionStats
 ```
+
+`SubscriptionStats` returns one snapshot per framework-managed NATS subscription (request-reply service, queue group, event consumer; JetStream-based stream, event stream and cron consumers are not included): identity (`Kind`, `Module`, `Name`, `Subject`, `QueueGroup`), the NATS client buffer (`PendingMsgs`, `PendingBytes`, `Dropped`, `Delivered`), the worker pool (`PoolActive`, `PoolQueued`, `MaxConcurrency`, `MaxPending`) and the framework's counters (`Rejected`, `Expired`, `DroppedAtShutdown`). It returns nil unless the application is running. Export it as metrics, or enable `WithSubscriptionStatsLogInterval` for a periodic Debug log.
 
 Returns the aggregated health status of the framework and all modules.
 
@@ -329,6 +332,36 @@ mono.WithNATSClustering("production", "127.0.0.1", 6222, nil)
 ```go
 mono.WithNATSClustering("production", "127.0.0.1", 6223,
     []string{"nats://127.0.0.1:6222"})
+```
+
+#### WithNATSClientName
+
+```go
+func WithNATSClientName(name string) MonoFrameworkOption
+```
+
+Sets the name the framework's client connection reports to the server (`nats.Name`), shown in `/connz` and server logs.
+
+| Property | Value |
+|----------|-------|
+| Type | `string` |
+| Default | `"mono"` |
+| Constraints | Non-empty |
+
+#### WithNATSClientOptions
+
+```go
+func WithNATSClientOptions(opts ...nats.Option) MonoFrameworkOption
+```
+
+Adds nats.go options to the framework's client connection. The framework applies its defaults first (connection name; an error handler that logs slow consumers and other client errors with subject and queue group; disconnect, reconnect and closed handlers; a drain timeout), then these, so they can add to or override the defaults.
+
+**Example:**
+```go
+mono.WithNATSClientOptions(
+    nats.ReconnectWait(2*time.Second),
+    nats.PingInterval(20*time.Second),
+)
 ```
 
 #### WithNATSConfigFile
@@ -571,6 +604,20 @@ Enables optimistic publish mode for queue group services. When set, the first se
 mono.WithQueueGroupOptimisticWindow(1 * time.Second)
 ```
 
+#### WithSubscriptionStatsLogInterval
+
+```go
+func WithSubscriptionStatsLogInterval(d time.Duration) MonoFrameworkOption
+```
+
+Logs `SubscriptionStats` for every pooled subscription at Debug level every `d`. Off by default.
+
+| Property | Value |
+|----------|-------|
+| Type | `time.Duration` |
+| Default | `0` (disabled) |
+| Constraints | ≥ 0 |
+
 #### WithDeadlineSkewAllowance
 
 ```go
@@ -635,6 +682,8 @@ Returns a configuration with all default values. Useful for testing.
 | Shutdown Timeout | `30 * time.Second` |
 | Shutdown Drain Timeout | `min(30 * time.Second, ShutdownTimeout)` |
 | Deadline Skew Allowance | `250 * time.Millisecond` |
+| NATS Client Name | `"mono"` |
+| Subscription Stats Log Interval | `0` (disabled) |
 | Queue Group Optimistic Window | `0` (disabled) |
 | Default Service Concurrency | `0` (= `runtime.GOMAXPROCS(0) * 4`) |
 

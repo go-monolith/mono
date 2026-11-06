@@ -7,6 +7,7 @@ import (
 
 	"github.com/go-monolith/mono/pkg/errors"
 	"github.com/go-monolith/mono/pkg/types"
+	"github.com/nats-io/nats.go"
 )
 
 // MonoFrameworkOption is a functional option for configuring the framework.
@@ -201,6 +202,71 @@ func WithNATSAutoTLS(autoTLS types.AutoTLSConfig) MonoFrameworkOption {
 			return errors.WrapInvalidConfiguration(0, "WithNATSAutoTLS", autoTLS.Domains, err.Error())
 		}
 		cfg.NATSOptions.AutoTLS = autoTLS.Clone()
+		return nil
+	}
+}
+
+// WithSubscriptionStatsLogInterval enables a periodic Debug log of
+// MonoFramework.SubscriptionStats: for every request-reply, queue group and
+// event consumer subscription, the NATS client buffer (pending, dropped,
+// delivered) and the worker pool behind it (active, queued, rejected,
+// expired). Zero (the default) disables it. Applications that export metrics
+// should call SubscriptionStats themselves instead.
+//
+// Example:
+//
+//	mono.NewMonoApplication(mono.WithSubscriptionStatsLogInterval(30*time.Second))
+func WithSubscriptionStatsLogInterval(d time.Duration) MonoFrameworkOption {
+	return func(cfg *types.MonoFrameworkConfig) error {
+		if d < 0 {
+			return errors.WrapInvalidConfiguration(0, "WithSubscriptionStatsLogInterval", d, "interval must not be negative")
+		}
+		cfg.SubscriptionStatsLogInterval = d
+		return nil
+	}
+}
+
+// WithNATSClientName sets the name the framework's NATS client connection
+// reports to the server (nats.Name). It shows up in the server's /connz
+// monitoring endpoint and logs, so connections can be attributed to an
+// application. Default: "mono".
+//
+// Example:
+//
+//	mono.NewMonoApplication(mono.WithNATSClientName("orders-api"))
+func WithNATSClientName(name string) MonoFrameworkOption {
+	return func(cfg *types.MonoFrameworkConfig) error {
+		if name == "" {
+			return errors.WrapInvalidConfiguration(0, "WithNATSClientName", name, "client name cannot be empty")
+		}
+		cfg.NATSOptions.ClientName = name
+		return nil
+	}
+}
+
+// WithNATSClientOptions adds nats.go options to the framework's client
+// connection (reconnect wait, ping interval, a custom error handler, ...).
+//
+// The framework always applies its own defaults first: the connection name,
+// an error handler that routes slow-consumer and other client errors to the
+// framework logger, disconnect/reconnect/closed handlers that log connection
+// events, and a drain timeout. Options given here are applied after them, so
+// they can add to or override those defaults.
+//
+// Example:
+//
+//	mono.NewMonoApplication(mono.WithNATSClientOptions(
+//	    nats.ReconnectWait(2*time.Second),
+//	    nats.PingInterval(20*time.Second),
+//	))
+func WithNATSClientOptions(opts ...nats.Option) MonoFrameworkOption {
+	return func(cfg *types.MonoFrameworkConfig) error {
+		for i, opt := range opts {
+			if opt == nil {
+				return errors.WrapInvalidConfiguration(0, "WithNATSClientOptions", i, "client option cannot be nil")
+			}
+		}
+		cfg.NATSOptions.ClientOptions = append(cfg.NATSOptions.ClientOptions, opts...)
 		return nil
 	}
 }

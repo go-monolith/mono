@@ -47,6 +47,21 @@ type lifecycleManager struct {
 	queueGroupOptimisticWindow time.Duration                 // Optimistic publish window for queue groups
 	defaultServiceConcurrency  int                           // MaxConcurrency for subscriptions that leave it at 0 (0 = built-in default)
 	pools                      map[string][]*workerpool.Pool // worker pools of request-reply, queue group and event consumer subscriptions, by module
+	subRecords                 []*subscriptionRecord         // every pooled subscription with its pool and counters, for SubscriptionStats
+	statsLogInterval           time.Duration                 // period of the Debug stats log (0 = off)
+}
+
+// subscriptionRecord ties a framework-managed subscription to the worker pool
+// and the counters behind it, so SubscriptionStats can report both sides.
+type subscriptionRecord struct {
+	kind       string
+	module     string
+	name       string
+	subject    string
+	queueGroup string
+	sub        types.Subscription
+	pool       *workerpool.Pool
+	reporter   *overloadReporter
 }
 
 // NewLifecycleManager creates a new lifecycle manager
@@ -211,6 +226,119 @@ func (lm *lifecycleManager) newPool(opts types.ServiceOptions, pooledByDefault b
 	return pool
 }
 
+// applyPendingLimits bounds the NATS client buffer of a freshly created
+// subscription from its ServiceOptions (see ServiceOptions.PendingLimits).
+// Subscriptions that cannot be bounded (test doubles) are left alone.
+func applyPendingLimits(sub types.Subscription, opts types.ServiceOptions, requestReply bool) error {
+	msgs, bytes, apply := opts.PendingLimits(requestReply)
+	if !apply {
+		return nil
+	}
+	limiter, ok := sub.(types.PendingLimiter)
+	if !ok {
+		return nil
+	}
+	return limiter.SetPendingLimits(msgs, bytes)
+}
+
+// resetSubscriptionState clears everything a run of setupNATSSubscriptions
+// created, after teardownNATSSubscriptions has drained it, so that a retried
+// Start begins from a clean slate: a fresh fetch context (the old one was
+// cancelled by the teardown and would leave every new fetch loop dead), no
+// stale subscriptions to drain twice, no closed pools, no duplicate stats
+// records, and the in-flight counter at zero.
+func (lm *lifecycleManager) resetSubscriptionState() {
+	lm.mu.Lock()
+	defer lm.mu.Unlock()
+	if lm.cancelFetch != nil {
+		lm.cancelFetch()
+	}
+	lm.fetchCtx, lm.cancelFetch = context.WithCancel(context.Background()) //nolint:gosec // G118: cancelFetch is stored and called in shutdown
+	lm.subscriptions = make(map[string][]types.Subscription)
+	lm.pools = make(map[string][]*workerpool.Pool)
+	lm.subRecords = nil
+	lm.streamConsumers = make(map[string]context.CancelFunc)
+	lm.inFlightHandlers.Store(0)
+}
+
+// SetStatsLogInterval sets the period of the Debug log line that reports
+// SubscriptionStats while the application runs. 0 disables it. Must be called
+// before Start.
+func (lm *lifecycleManager) SetStatsLogInterval(d time.Duration) {
+	lm.mu.Lock()
+	defer lm.mu.Unlock()
+	lm.statsLogInterval = d
+}
+
+// startStatsLog starts the periodic stats log goroutine when an interval is
+// configured. It runs until the fetch context is cancelled at Stop.
+func (lm *lifecycleManager) startStatsLog() {
+	lm.mu.RLock()
+	interval := lm.statsLogInterval
+	ctx := lm.fetchCtx
+	lm.mu.RUnlock()
+	if interval <= 0 || ctx == nil {
+		return
+	}
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				for _, s := range lm.SubscriptionStats() {
+					lm.logger.Debug("Subscription stats",
+						"kind", s.Kind, "module", s.Module, "name", s.Name, "subject", s.Subject, "queue_group", s.QueueGroup,
+						"pending_msgs", s.PendingMsgs, "pending_bytes", s.PendingBytes, "dropped", s.Dropped, "delivered", s.Delivered,
+						"pool_active", s.PoolActive, "pool_queued", s.PoolQueued, "max_concurrency", s.MaxConcurrency, "max_pending", s.MaxPending,
+						"rejected", s.Rejected, "expired", s.Expired, "dropped_at_shutdown", s.DroppedAtShutdown)
+				}
+			}
+		}
+	}()
+}
+
+// SubscriptionStats returns a snapshot of every pooled subscription: the NATS
+// client buffer counters (when the subscription exposes them) and the worker
+// pool behind it. The order is the registration order.
+func (lm *lifecycleManager) SubscriptionStats() []types.SubscriptionStats {
+	lm.mu.RLock()
+	records := make([]*subscriptionRecord, len(lm.subRecords))
+	copy(records, lm.subRecords)
+	lm.mu.RUnlock()
+
+	out := make([]types.SubscriptionStats, 0, len(records))
+	for _, r := range records {
+		s := types.SubscriptionStats{
+			Kind: r.kind, Module: r.module, Name: r.name, Subject: r.subject, QueueGroup: r.queueGroup,
+		}
+		if reader, ok := r.sub.(types.SubscriptionStatsReader); ok {
+			if msgs, bytes, err := reader.Pending(); err == nil {
+				s.PendingMsgs, s.PendingBytes = msgs, bytes
+			}
+			if dropped, err := reader.Dropped(); err == nil {
+				s.Dropped = dropped
+			}
+			if delivered, err := reader.Delivered(); err == nil {
+				s.Delivered = delivered
+			}
+		}
+		if r.pool != nil {
+			s.PoolActive, s.PoolQueued = r.pool.Stats()
+			s.MaxConcurrency, s.MaxPending = r.pool.MaxWorkers(), r.pool.MaxPending()
+		}
+		if r.reporter != nil {
+			s.Rejected = r.reporter.rejectedTotal.Load()
+			s.Expired = r.reporter.expiredTotal.Load()
+			s.DroppedAtShutdown = r.reporter.droppedTotal.Load()
+		}
+		out = append(out, s)
+	}
+	return out
+}
+
 // overloadLogInterval rate-limits the warning logged when a subscription
 // rejects or drops messages: under sustained overload one line per interval
 // per subscription, instead of one per message.
@@ -228,6 +356,11 @@ type overloadReporter struct {
 	lastExpiredLog atomic.Int64 // unix nanoseconds of the last expired-requests line
 	expired        atomic.Int64 // expired requests dropped since that line
 	lastSkewLog    atomic.Int64 // unix nanoseconds of the last clock-skew warning
+	// Monotonic totals for SubscriptionStats (the counters above are reset
+	// at every log line).
+	rejectedTotal atomic.Int64
+	droppedTotal  atomic.Int64
+	expiredTotal  atomic.Int64
 }
 
 func newOverloadReporter(logger types.Logger, fields ...any) *overloadReporter {
@@ -245,12 +378,14 @@ func (r *overloadReporter) withFields(extra ...any) []any {
 
 // reject records one rejected message and writes the warning when due.
 func (r *overloadReporter) reject(pool *workerpool.Pool) {
+	r.rejectedTotal.Add(1)
 	r.report("Messages rejected: worker pool and pending queue are full", pool, "rejected")
 }
 
 // drop records one message dropped because it was delivered after the pool
 // closed, and writes the warning when due.
 func (r *overloadReporter) drop(pool *workerpool.Pool) {
+	r.droppedTotal.Add(1)
 	r.report("Messages dropped: still buffered when the worker pool closed during shutdown", pool, "dropped")
 }
 
@@ -264,7 +399,7 @@ func (r *overloadReporter) clockSkew(applied time.Time, msg *types.Msg) {
 	if now-last < int64(overloadLogInterval) || !r.lastSkewLog.CompareAndSwap(last, now) {
 		return
 	}
-	r.logger.Warn("Request deadline headers disagree: clock skew between caller and this instance suspected; using Mono-Timeout", r.withFields(
+	r.logger.Warn("Request deadline headers disagree by more than the skew allowance (clock skew, or send-to-arrival delay above the allowance); using Mono-Timeout", r.withFields(
 		"mono_deadline", msg.Header.Get(types.HeaderDeadline),
 		"mono_timeout", msg.Header.Get(types.HeaderTimeout),
 		"applied_deadline", applied.UnixMilli())...)
@@ -275,6 +410,7 @@ func (r *overloadReporter) clockSkew(applied time.Time, msg *types.Msg) {
 // due. Expired requests are expected under load, so they are logged at Debug
 // level with the count; the sender has already given up, so no reply is sent.
 func (r *overloadReporter) expire(pool *workerpool.Pool) {
+	r.expiredTotal.Add(1)
 	n := r.expired.Add(1)
 	now := time.Now().UnixNano()
 	last := r.lastExpiredLog.Load()
@@ -469,10 +605,20 @@ func (lm *lifecycleManager) Start(ctx context.Context) error {
 		}
 	}
 
-	// Step 5: Setup NATS subscriptions for all modules
+	// Step 5: Setup NATS subscriptions for all modules. On failure, tear down
+	// the subscriptions, pools and fetch loops created so far, so no handler
+	// keeps running against the modules the rollback is about to stop and a
+	// retried Start does not subscribe twice.
 	if err := lm.setupNATSSubscriptions(ctx); err != nil {
+		if terr := lm.teardownNATSSubscriptions(ctx); terr != nil {
+			lm.logger.Error("Error tearing down NATS subscriptions after failed setup", "error", terr)
+		}
+		lm.resetSubscriptionState()
 		return lm.rollback(ctx, started, err)
 	}
+
+	// Step 6: periodic subscription stats log, when enabled
+	lm.startStatsLog()
 
 	lm.logger.Info("All modules started successfully")
 	return nil
@@ -697,9 +843,19 @@ func (lm *lifecycleManager) setupNATSSubscriptions(ctx context.Context) error {
 				if err != nil {
 					return fmt.Errorf("failed to subscribe to %s: %w", entry.Subject, err)
 				}
+				if err := applyPendingLimits(sub, entry.Options, true); err != nil {
+					if uerr := sub.Unsubscribe(); uerr != nil {
+						logger.Warn("Failed to unsubscribe after pending limit error", "subject", entry.Subject, "error", uerr)
+					}
+					return fmt.Errorf("failed to set pending limits on %s: %w", entry.Subject, err)
+				}
 
 				lm.mu.Lock()
 				lm.subscriptions[moduleName] = append(lm.subscriptions[moduleName], sub)
+				lm.subRecords = append(lm.subRecords, &subscriptionRecord{
+					kind: "request_reply", module: modName, name: serviceName,
+					subject: entry.Subject, queueGroup: queueGroup, sub: sub, pool: pool, reporter: reporter,
+				})
 				lm.mu.Unlock()
 
 			case types.ServiceTypeQueueGroup:
@@ -763,9 +919,19 @@ func (lm *lifecycleManager) setupNATSSubscriptions(ctx context.Context) error {
 					if err != nil {
 						return fmt.Errorf("failed to queue subscribe to %s (queue: %s): %w", entry.Subject, queueGroup, err)
 					}
+					if err := applyPendingLimits(sub, pair.Options, false); err != nil {
+						if uerr := sub.Unsubscribe(); uerr != nil {
+							logger.Warn("Failed to unsubscribe after pending limit error", "subject", entry.Subject, "queueGroup", queueGroup, "error", uerr)
+						}
+						return fmt.Errorf("failed to set pending limits on %s (queue: %s): %w", entry.Subject, queueGroup, err)
+					}
 
 					lm.mu.Lock()
 					lm.subscriptions[moduleName] = append(lm.subscriptions[moduleName], sub)
+					lm.subRecords = append(lm.subRecords, &subscriptionRecord{
+						kind: "queue_group", module: modName, name: serviceName,
+						subject: entry.Subject, queueGroup: queueGroup, sub: sub, pool: pool, reporter: reporter,
+					})
 					lm.mu.Unlock()
 				}
 
@@ -832,9 +998,20 @@ func (lm *lifecycleManager) setupNATSSubscriptions(ctx context.Context) error {
 				return fmt.Errorf("failed to subscribe to event %s.%s: %w",
 					consumer.EventDef.ModuleName, consumer.EventDef.Name, err)
 			}
+			if err := applyPendingLimits(sub, consumer.Options, false); err != nil {
+				if uerr := sub.Unsubscribe(); uerr != nil {
+					logger.Warn("Failed to unsubscribe after pending limit error", "subject", consumer.EventDef.Subject, "error", uerr)
+				}
+				return fmt.Errorf("failed to set pending limits on event %s.%s: %w",
+					consumer.EventDef.ModuleName, consumer.EventDef.Name, err)
+			}
 
 			lm.mu.Lock()
 			lm.subscriptions[consumer.Module.Name()] = append(lm.subscriptions[consumer.Module.Name()], sub)
+			lm.subRecords = append(lm.subRecords, &subscriptionRecord{
+				kind: "event_consumer", module: consumerModule, name: consumer.EventDef.ModuleName + "." + eventName,
+				subject: consumer.EventDef.Subject, queueGroup: queueGroup, sub: sub, pool: pool, reporter: reporter,
+			})
 			lm.mu.Unlock()
 		}
 

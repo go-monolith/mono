@@ -47,6 +47,14 @@ type MonoFramework interface {
 	// Modules returns list of registered module names
 	Modules() []string
 
+	// SubscriptionStats returns a snapshot of every framework-managed NATS
+	// subscription (request-reply services, queue groups, event consumers):
+	// the NATS client buffer counters (pending, dropped, delivered) together
+	// with the worker pool behind it (active, queued, rejected, expired).
+	// Use it to export metrics or to find where a slow service's messages
+	// wait. It returns nil before Start and after Stop.
+	SubscriptionStats() []SubscriptionStats
+
 	// Health returns the aggregated health status of the framework and all modules
 	Health(ctx context.Context) FrameworkHealth
 

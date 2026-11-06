@@ -4,6 +4,8 @@ import (
 	"crypto/x509"
 	"io"
 	"time"
+
+	"github.com/nats-io/nats.go"
 )
 
 // MonoFrameworkConfig holds framework configuration.
@@ -42,6 +44,10 @@ type MonoFrameworkConfig struct {
 	// are considered to disagree (clock skew) when they differ by more than it.
 	// Zero selects DefaultDeadlineSkewAllowance.
 	DeadlineSkewAllowance time.Duration
+	// SubscriptionStatsLogInterval is how often the framework logs, at Debug
+	// level, the SubscriptionStats of every pooled subscription while the
+	// application runs. Zero (the default) disables the log.
+	SubscriptionStatsLogInterval time.Duration
 
 	// QueueGroupOptimisticWindow configures the optimistic publish window for queue group services.
 	// When > 0, after a successful ACK, subsequent sends within this window use fire-and-forget publish.
@@ -92,6 +98,15 @@ type NATSOptions struct {
 	// AutoTLS enables automatic ACME (Let's Encrypt) certificate management
 	// for the NATS client listener. Nil means disabled.
 	AutoTLS *AutoTLSConfig
+
+	// ClientName is the name the framework's client connection reports to the
+	// server (nats.Name), visible in /connz and server logs. Empty means "mono".
+	ClientName string
+
+	// ClientOptions are extra nats.go options for the framework's client
+	// connection, applied after the framework defaults so they can override
+	// them. See WithNATSClientOptions.
+	ClientOptions []nats.Option
 }
 
 // AutoTLSConfig configures automatic TLS certificate provisioning for the

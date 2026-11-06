@@ -201,6 +201,74 @@ type Subscription interface {
 	NextMsgWithContext(ctx context.Context) (*Msg, error)
 }
 
+// PendingLimiter is implemented by subscriptions whose NATS client buffer can
+// be bounded. The framework applies ServiceOptions.PendingMsgs/PendingBytes
+// through it right after subscribing, with both dimensions resolved to
+// positive values or -1 (unlimited); nats.go rejects 0.
+type PendingLimiter interface {
+	SetPendingLimits(msgs, bytes int) error
+}
+
+// SubscriptionStatsReader is implemented by subscriptions that expose the
+// nats.go client buffer counters. The framework reads them for
+// MonoFramework.SubscriptionStats.
+type SubscriptionStatsReader interface {
+	// Pending returns the messages and bytes buffered by the client for this
+	// subscription, waiting to be dispatched to the callback.
+	Pending() (msgs, bytes int, err error)
+	// Dropped returns the number of messages the client dropped for this
+	// subscription because its pending limits were exceeded (slow consumer).
+	Dropped() (int, error)
+	// Delivered returns the number of messages dispatched to the callback.
+	Delivered() (int64, error)
+}
+
+// SubscriptionStats is a snapshot of one framework-managed NATS subscription:
+// a request-reply service, one queue group of a queue group service, or an
+// event consumer. Stream consumers, event stream consumers and cron services
+// pull from JetStream and are not included. It combines the nats.go client
+// buffer counters with the worker pool behind the subscription, so an
+// operator can see where a slow service's messages are waiting.
+type SubscriptionStats struct {
+	// Kind is "request_reply", "queue_group" or "event_consumer".
+	Kind string `json:"kind"`
+	// Module is the module that owns the subscription (for event consumers,
+	// the consuming module).
+	Module string `json:"module"`
+	// Name is the service name, or "<event-module>.<event>" for an event consumer.
+	Name string `json:"name"`
+	// Subject and QueueGroup identify the NATS subscription.
+	Subject    string `json:"subject"`
+	QueueGroup string `json:"queue_group"`
+
+	// PendingMsgs and PendingBytes are buffered by the NATS client, not yet
+	// handed to the worker pool.
+	PendingMsgs  int `json:"pending_msgs"`
+	PendingBytes int `json:"pending_bytes"`
+	// Dropped is the number of messages the NATS client dropped as a slow
+	// consumer (pending limits exceeded) since the subscription was created.
+	Dropped int `json:"dropped"`
+	// Delivered is the number of messages the NATS client dispatched to the
+	// framework's callback since the subscription was created.
+	Delivered int64 `json:"delivered"`
+
+	// PoolActive and PoolQueued are the handlers running and the messages
+	// waiting for a worker in the subscription's worker pool right now.
+	PoolActive int `json:"pool_active"`
+	PoolQueued int `json:"pool_queued"`
+	// MaxConcurrency and MaxPending are the pool's bounds.
+	MaxConcurrency int `json:"max_concurrency"`
+	MaxPending     int `json:"max_pending"`
+
+	// Rejected counts messages answered with "overloaded" because the pool and
+	// its queue were full; Expired counts request-reply messages skipped
+	// because the caller's deadline had passed; DroppedAtShutdown counts
+	// messages without a reply subject that arrived after the pool closed.
+	Rejected          int64 `json:"rejected"`
+	Expired           int64 `json:"expired"`
+	DroppedAtShutdown int64 `json:"dropped_at_shutdown"`
+}
+
 // EventStream provides Stream operations for durable, persistent messaging (via JetStream).
 //
 // JetStream adds persistence, replay, and at-least-once delivery semantics

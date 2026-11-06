@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/go-monolith/mono/pkg/types"
+	natsgo "github.com/nats-io/nats.go"
 )
 
 // NATSOption is a functional option for NATS configuration.
@@ -57,7 +58,19 @@ type NATSConfig struct {
 	// listener. Nil means AutoTLS is disabled; the pointer itself is the
 	// "explicitly set" marker, so no companion AutoTLSSet flag is needed.
 	AutoTLS *types.AutoTLSConfig
+
+	// ClientName is the connection name reported to the server (nats.Name),
+	// visible in /connz and server logs. Empty selects DefaultClientName.
+	ClientName string
+
+	// ClientOptions are extra nats.go options for the framework's client
+	// connection, applied after the framework defaults so they can override
+	// them (reconnect wait, ping interval, a custom error handler, ...).
+	ClientOptions []natsgo.Option
 }
+
+// DefaultClientName is the connection name used when none is configured.
+const DefaultClientName = "mono"
 
 // DefaultNATSConfig returns a NATSConfig with sensible defaults.
 func DefaultNATSConfig() *NATSConfig {
@@ -235,6 +248,34 @@ func WithConfigFile(path string) NATSOption {
 			return fmt.Errorf("config file path cannot be empty")
 		}
 		cfg.ConfigFile = path
+		return nil
+	}
+}
+
+// WithClientName sets the name the framework's client connection reports to the
+// server, so /connz and server logs can tell which application it belongs to.
+func WithClientName(name string) NATSOption {
+	return func(cfg *NATSConfig) error {
+		if name == "" {
+			return fmt.Errorf("client name cannot be empty")
+		}
+		cfg.ClientName = name
+		return nil
+	}
+}
+
+// WithClientOptions appends nats.go options for the framework's client
+// connection. They are applied after the framework defaults (connection name,
+// error and connection event handlers, drain timeout), so they can add to or
+// override them.
+func WithClientOptions(opts ...natsgo.Option) NATSOption {
+	return func(cfg *NATSConfig) error {
+		for i, opt := range opts {
+			if opt == nil {
+				return fmt.Errorf("client option %d cannot be nil", i)
+			}
+		}
+		cfg.ClientOptions = append(cfg.ClientOptions, opts...)
 		return nil
 	}
 }

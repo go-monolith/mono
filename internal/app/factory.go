@@ -121,6 +121,14 @@ func buildNATSOptions(cfg types.NATSOptions) []nats.NATSOption {
 		opts = append(opts, nats.WithAutoTLS(cfg.AutoTLS))
 	}
 
+	// Client connection name and extra client options
+	if cfg.ClientName != "" {
+		opts = append(opts, nats.WithClientName(cfg.ClientName))
+	}
+	if len(cfg.ClientOptions) > 0 {
+		opts = append(opts, nats.WithClientOptions(cfg.ClientOptions...))
+	}
+
 	// Add JetStream configuration if enabled
 	if cfg.JetStreamEnabled {
 		// Use configured directory or empty string for default
