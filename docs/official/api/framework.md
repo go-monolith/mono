@@ -610,7 +610,7 @@ mono.WithQueueGroupOptimisticWindow(1 * time.Second)
 func WithServiceDiscovery(cfg ...ServiceDiscoveryConfig) MonoFrameworkOption
 ```
 
-Exposes the application's request-reply services through the NATS services protocol, so `nats micro ls`, `nats micro info <module>` and `nats micro stats <module>` work against the application. One service is exposed per module that owns request-reply services, with one endpoint per service. Stats carry the standard per-endpoint fields and, in `data`, mono's queue wait time (`queue_wait_time`, `average_queue_wait_time`, `max_queue_wait_time`), `expired`, `expired_queue_wait_max`, `rejected`, `pending_msgs`, `pool_active` and `pool_queued`. Off by default (it adds subscriptions).
+Exposes the application's request-reply services through the NATS services protocol, so `nats micro ls`, `nats micro info <module>` and `nats micro stats <module>` work against the application. One service is exposed per module that owns request-reply services, with one endpoint per service. Stats carry the standard per-endpoint fields and, in `data`, mono's queue wait time (`queue_wait_time`, `average_queue_wait_time`, `max_queue_wait_time`), `expired`, `expired_queue_wait_max`, `rejected`, `pending_msgs`, `pool_active` and `pool_queued`. Any client that can reach the server can read these responses (including `last_error` text and `Metadata`); restrict `$SRV.>` with server permissions when the NATS port is exposed beyond the application. Off by default (it adds subscriptions).
 
 ```go
 type ServiceDiscoveryConfig struct {
