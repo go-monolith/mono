@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"time"
@@ -165,6 +166,9 @@ func parseServiceSubject(subject string) (moduleName, serviceName string, ok boo
 }
 
 // Subscribe creates an asynchronous subscription with a message handler.
+// A panic in the handler is recovered and logged (with the subject and the
+// stack trace) so that it cannot take the process down; the subscription
+// keeps delivering later messages.
 func (eb *natsEventBus) Subscribe(subject string, handler types.MsgHandler) (types.Subscription, error) {
 	natsSub, err := eb.conn.Subscribe(subject, func(natsMsg *nats.Msg) {
 		msg := &types.Msg{
@@ -175,7 +179,7 @@ func (eb *natsEventBus) Subscribe(subject string, handler types.MsgHandler) (typ
 		}
 		// Call handler with runtime context for graceful shutdown support
 		ctx := eb.getRuntimeCtx()
-		handler(ctx, msg)
+		eb.callHandler(ctx, handler, msg, "")
 	})
 
 	if err != nil {
@@ -196,6 +200,7 @@ func (eb *natsEventBus) SubscribeSync(subject string) (types.Subscription, error
 }
 
 // QueueSubscribe creates a queue group subscription for load balancing.
+// A panic in the handler is recovered and logged, as for Subscribe.
 func (eb *natsEventBus) QueueSubscribe(subject, queue string, handler types.MsgHandler) (types.Subscription, error) {
 	natsSub, err := eb.conn.QueueSubscribe(subject, queue, func(natsMsg *nats.Msg) {
 		msg := &types.Msg{
@@ -206,7 +211,7 @@ func (eb *natsEventBus) QueueSubscribe(subject, queue string, handler types.MsgH
 		}
 		// Call handler with runtime context for graceful shutdown support
 		ctx := eb.getRuntimeCtx()
-		handler(ctx, msg)
+		eb.callHandler(ctx, handler, msg, queue)
 	})
 
 	if err != nil {
@@ -214,6 +219,23 @@ func (eb *natsEventBus) QueueSubscribe(subject, queue string, handler types.MsgH
 	}
 
 	return wrapSubscription(natsSub), nil
+}
+
+// callHandler invokes a subscription handler, recovering a panic so that a bug
+// in one handler cannot crash the process. The panic is logged with the
+// subject, the queue group (if any) and the stack trace; the message is lost
+// (core NATS has no redelivery) and the subscription stays alive.
+func (eb *natsEventBus) callHandler(ctx context.Context, handler types.MsgHandler, msg *types.Msg, queue string) {
+	defer func() {
+		if r := recover(); r != nil {
+			eb.logger.Error("Panic in subscription handler",
+				"subject", msg.Subject,
+				"queue_group", queue,
+				"panic", r,
+				"stack", string(debug.Stack()))
+		}
+	}()
+	handler(ctx, msg)
 }
 
 // QueueSubscribeSync creates a synchronous queue group subscription.

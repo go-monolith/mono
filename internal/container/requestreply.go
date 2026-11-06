@@ -289,8 +289,9 @@ func (c *requestReplyClient) checkForErrorResponse(response *types.Msg) error {
 }
 
 // frameworkErrorResponse maps the error types the framework itself puts in an
-// error response (as opposed to a handler error) to their sentinel errors.
-// It returns nil for any other error type.
+// error response (overloaded, shutting down, a recovered handler panic) to
+// their sentinel errors. It returns nil for any other error type, which then
+// becomes a RemoteError carrying the handler's own message.
 func frameworkErrorResponse(serviceName, moduleName string, serviceType types.ServiceType, errorType string) error {
 	switch errorType {
 	case types.ErrorTypeOverloaded:
@@ -298,6 +299,8 @@ func frameworkErrorResponse(serviceName, moduleName string, serviceType types.Se
 	case types.ErrorTypeShuttingDown:
 		return monoerrors.WrapServiceUnavailable(serviceName, moduleName, serviceType,
 			fmt.Errorf("the handling instance is shutting down"))
+	case types.ErrorTypeHandlerPanic:
+		return monoerrors.WrapHandlerPanic(serviceName, moduleName, serviceType)
 	default:
 		return nil
 	}

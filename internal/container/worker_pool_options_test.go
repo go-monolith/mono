@@ -225,6 +225,16 @@ func TestFrameworkErrorResponse(t *testing.T) {
 		}
 	})
 
+	t.Run("panic maps to ErrHandlerPanic", func(t *testing.T) {
+		err := frameworkErrorResponse("svc", "mod", types.ServiceTypeRequestReply, types.ErrorTypeHandlerPanic)
+		if !errors.Is(err, monoerrors.ErrHandlerPanic) {
+			t.Fatalf("got %v, want ErrHandlerPanic", err)
+		}
+		if monoerrors.IsRemoteError(err) {
+			t.Fatal("a recovered panic is a framework error, not a RemoteError")
+		}
+	})
+
 	t.Run("other types are not framework errors", func(t *testing.T) {
 		for _, errorType := range []string{"", "service", "timeout", "validation"} {
 			if err := frameworkErrorResponse("svc", "mod", types.ServiceTypeRequestReply, errorType); err != nil {

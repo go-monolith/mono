@@ -105,6 +105,13 @@ func (lm *lifecycleManager) newPool(opts types.ServiceOptions, pooledByDefault b
 		resolved = opts.ResolveSerial()
 	}
 	pool := workerpool.New(resolved.MaxConcurrency, resolved.MaxPending)
+	// Handler panics are recovered where the handler is invoked; this is the
+	// last resort for a panic in the framework's own job code, so a worker
+	// never dies with the pool's accounting out of step.
+	pool.PanicHandler = func(recovered any, stack []byte) {
+		logger.Error("Panic in worker pool job", "kind", kind, "name", name, "queue_group", queue,
+			"panic", recovered, "stack", string(stack))
+	}
 
 	lm.mu.Lock()
 	lm.pools = append(lm.pools, pool)
@@ -491,9 +498,13 @@ func (lm *lifecycleManager) setupNATSSubscriptions(ctx context.Context) error {
 				reporter := newOverloadReporter(logger, "service", serviceName, "module", modName)
 
 				handleRequest := func(reqCtx context.Context, msg *types.Msg) {
-					response, err := handler(reqCtx, msg)
+					// A panic in the handler is recovered into an error, so one bad
+					// request cannot take the process down; the caller gets an error
+					// reply instead of a timeout.
+					response, err := invokeRequestReplyHandler(reqCtx, handler, msg)
 					if err != nil {
-						logger.Error("RequestReply handler error", "service", serviceName, "module", modName, "error", err)
+						logger.Error("RequestReply handler error",
+							append([]any{"service", serviceName, "module", modName, "subject", msg.Subject}, handlerErrorFields(err)...)...)
 
 						// Send error response instead of leaving the client hanging
 						if msg.Reply != "" {
@@ -506,9 +517,12 @@ func (lm *lifecycleManager) setupNATSSubscriptions(ctx context.Context) error {
 								Data: nil,
 							}
 
-							// Add error type classification if available (optional header).
-							// Uses reflection to extract the error type name.
-							if errorType := getErrorTypeName(err); errorType != "" {
+							// Add error type classification (optional header). A recovered
+							// panic gets the framework's own type so clients can map it to
+							// ErrHandlerPanic; other errors use the reflected type name.
+							if _, isPanic := panicStack(err); isPanic {
+								errorMsg.Header[types.HeaderErrorType] = []string{types.ErrorTypeHandlerPanic}
+							} else if errorType := getErrorTypeName(err); errorType != "" {
 								errorMsg.Header[types.HeaderErrorType] = []string{errorType}
 							}
 
@@ -548,6 +562,7 @@ func (lm *lifecycleManager) setupNATSSubscriptions(ctx context.Context) error {
 					queueGroup := pair.QueueGroup
 					handler := pair.Handler
 					serviceName := entry.Name
+					modName := moduleName
 					eventBus := lm.eventBus
 					logger := lm.logger
 
@@ -575,11 +590,9 @@ func (lm *lifecycleManager) setupNATSSubscriptions(ctx context.Context) error {
 							if skip.Load() {
 								return
 							}
-							if err := handler(reqCtx, msg); err != nil {
+							if err := invokeMsgHandler(reqCtx, handler, msg); err != nil {
 								logger.Error("QueueGroup handler error",
-									"service", serviceName,
-									"queueGroup", queueGroup,
-									"error", err)
+									append([]any{"service", serviceName, "module", modName, "queueGroup", queueGroup, "subject", msg.Subject}, handlerErrorFields(err)...)...)
 							}
 						})
 						if !accepted {
@@ -662,11 +675,9 @@ func (lm *lifecycleManager) setupNATSSubscriptions(ctx context.Context) error {
 
 			sub, err := eventBus.QueueSubscribe(consumer.EventDef.Subject, queueGroup, func(ctx context.Context, msg *types.Msg) {
 				submitToPool(pool, eventBus, logger, reporter, msg, func() {
-					if err := handler(ctx, msg); err != nil {
+					if err := invokeMsgHandler(ctx, handler, msg); err != nil {
 						logger.Error("Event consumer handler error",
-							"consumer_module", consumerModule,
-							"event", eventName,
-							"error", err)
+							append([]any{"consumer_module", consumerModule, "event", eventName, "subject", msg.Subject}, handlerErrorFields(err)...)...)
 					}
 				})
 			})
@@ -1465,7 +1476,8 @@ func (lm *lifecycleManager) runCronConsumerLoop(ctx context.Context, consumer je
 // the handler's behalf: Ack on nil, Nak on error (including a recovered panic).
 func (lm *lifecycleManager) dispatchCronTick(ctx context.Context, entry *types.ServiceEntry, msg *types.Msg) {
 	if err := lm.invokeCronHandler(ctx, entry, msg); err != nil {
-		lm.logger.Error("Cron handler error", "service", entry.Name, "error", err)
+		lm.logger.Error("Cron handler error",
+			append([]any{"service", entry.Name, "module", entry.ModuleName, "subject", entry.Subject}, handlerErrorFields(err)...)...)
 		if nakErr := msg.Nak(); nakErr != nil {
 			lm.logger.Error("Cron Nak failed", "service", entry.Name, "error", nakErr)
 		}
@@ -1476,14 +1488,10 @@ func (lm *lifecycleManager) dispatchCronTick(ctx context.Context, entry *types.S
 	}
 }
 
-// invokeCronHandler calls the handler, converting a panic into an error so the
-// loop survives and the occurrence is redelivered.
+// invokeCronHandler calls the handler, converting a panic into an error (with
+// its stack) so the loop survives and the occurrence is Nak'd and redelivered.
 func (lm *lifecycleManager) invokeCronHandler(ctx context.Context, entry *types.ServiceEntry, msg *types.Msg) (err error) {
-	defer func() {
-		if r := recover(); r != nil {
-			err = fmt.Errorf("cron handler panicked: %v", r)
-		}
-	}()
+	defer recoverHandlerPanic(&err)
 	return entry.CronHandler(ctx, msg)
 }
 
@@ -1617,6 +1625,10 @@ func (lm *lifecycleManager) runEventStreamConsumerLoop(
 ) {
 	cfg := entry.Config
 	eventName := entry.EventDef.ModuleName + "." + entry.EventDef.Name
+	consumerModule := ""
+	if entry.Module != nil {
+		consumerModule = entry.Module.Name()
+	}
 
 	for {
 		select {
@@ -1669,12 +1681,12 @@ func (lm *lifecycleManager) runEventStreamConsumerLoop(
 				continue
 			}
 
-			// Call handler with runtime context
-			if err := entry.Handler(ctx, batch); err != nil {
+			// Call handler with runtime context. A panic is recovered into an
+			// error; acknowledgement stays with the handler, so whatever it did
+			// not Ack is redelivered after AckWait, as for a returned error.
+			if err := invokeBatchHandler(ctx, entry.Handler, batch); err != nil {
 				lm.logger.Error("Event stream consumer handler error",
-					"event", eventName,
-					"error", err,
-					"batch_size", len(batch))
+					append([]any{"event", eventName, "consumer_module", consumerModule, "subject", entry.EventDef.Subject, "batch_size", len(batch)}, handlerErrorFields(err)...)...)
 			}
 		}
 	}
@@ -1740,12 +1752,12 @@ func (lm *lifecycleManager) runStreamConsumerLoop(
 				continue
 			}
 
-			// Call handler with runtime context
-			if err := entry.StreamConsumerHandler(ctx, batch); err != nil {
+			// Call handler with runtime context. A panic is recovered into an
+			// error; acknowledgement stays with the handler, so whatever it did
+			// not Ack is redelivered after AckWait, as for a returned error.
+			if err := invokeBatchHandler(ctx, entry.StreamConsumerHandler, batch); err != nil {
 				lm.logger.Error("Handler error",
-					"service", entry.Name,
-					"error", err,
-					"batch_size", len(batch))
+					append([]any{"service", entry.Name, "module", entry.ModuleName, "subject", entry.Subject, "batch_size", len(batch)}, handlerErrorFields(err)...)...)
 			}
 		}
 	}

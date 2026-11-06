@@ -504,6 +504,21 @@ func TestWrapServiceFunctions(t *testing.T) {
 		}
 	})
 
+	t.Run("WrapHandlerPanic", func(t *testing.T) {
+		err := pkgerrors.WrapHandlerPanic("crashy", "test-module", types.ServiceTypeRequestReply)
+		if !errors.Is(err, pkgerrors.ErrHandlerPanic) {
+			t.Error("expected error to wrap ErrHandlerPanic")
+		}
+		var svcErr *pkgerrors.ServiceError
+		if !errors.As(err, &svcErr) || svcErr.ServiceName != "crashy" {
+			t.Fatalf("expected a ServiceError for crashy, got %#v", err)
+		}
+		want := "service 'crashy' (request_reply) in module 'test-module': handler panic"
+		if err.Error() != want {
+			t.Errorf("Error() = %q, want %q", err.Error(), want)
+		}
+	})
+
 	t.Run("WrapServiceOverloaded", func(t *testing.T) {
 		err := pkgerrors.WrapServiceOverloaded("busy-service", "test-module", types.ServiceTypeQueueGroup)
 		if err == nil {

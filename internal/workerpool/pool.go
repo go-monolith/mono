@@ -12,6 +12,7 @@ package workerpool
 import (
 	"context"
 	"errors"
+	"runtime/debug"
 	"sync"
 )
 
@@ -43,6 +44,13 @@ type Pool struct {
 	pending    []Job // waiting jobs, oldest first
 	closed     bool
 	wg         sync.WaitGroup // tracks worker goroutines
+
+	// PanicHandler, when set, receives the value and stack of a panic that
+	// escapes a job, and the worker carries on. When nil, the panic is
+	// re-raised and crashes the process, as an unrecovered panic in any
+	// goroutine does. Set it before the first Submit; it is read without
+	// synchronisation.
+	PanicHandler func(recovered any, stack []byte)
 }
 
 // New creates a pool that runs at most maxWorkers jobs at once and queues at
@@ -100,7 +108,7 @@ func (p *Pool) Submit(job Job, wait bool) error {
 func (p *Pool) worker(job Job) {
 	defer p.wg.Done()
 	for {
-		job()
+		p.run(job)
 
 		p.mu.Lock()
 		if len(p.pending) == 0 {
@@ -117,6 +125,21 @@ func (p *Pool) worker(job Job) {
 		p.cond.Signal() // a queue slot freed up
 		p.mu.Unlock()
 	}
+}
+
+// run executes one job. A panic that escapes the job is handed to
+// PanicHandler so the worker, and the pool's accounting, survive it; without a
+// handler it propagates.
+func (p *Pool) run(job Job) {
+	defer func() {
+		if r := recover(); r != nil {
+			if p.PanicHandler == nil {
+				panic(r)
+			}
+			p.PanicHandler(r, debug.Stack())
+		}
+	}()
+	job()
 }
 
 // Stats reports the number of running workers and of queued jobs.

@@ -35,6 +35,12 @@ var (
 	// ErrServiceUnavailable is returned when a service is temporarily unavailable
 	ErrServiceUnavailable = errors.New("service unavailable")
 
+	// ErrHandlerPanic is returned when a service or event handler panicked. The
+	// framework recovers the panic, logs it with its stack trace and keeps the
+	// subscription alive; a request-reply caller receives this error instead of
+	// a timeout.
+	ErrHandlerPanic = errors.New("handler panic")
+
 	// ErrServiceOverloaded is returned when the instance that received a request
 	// has every worker of the service busy and its pending queue full
 	// (see types.ServiceOptions). The request was not handled; the caller may
@@ -394,6 +400,18 @@ func WrapServiceOverloaded(serviceName, moduleName string, serviceType types.Ser
 		ModuleName:  moduleName,
 		ServiceType: serviceType,
 		Err:         ErrServiceOverloaded,
+	}
+}
+
+// WrapHandlerPanic wraps ErrHandlerPanic with service context. It is returned
+// by request-reply clients when the handling instance reported that the
+// handler panicked while processing the request.
+func WrapHandlerPanic(serviceName, moduleName string, serviceType types.ServiceType) error {
+	return &ServiceError{
+		ServiceName: serviceName,
+		ModuleName:  moduleName,
+		ServiceType: serviceType,
+		Err:         ErrHandlerPanic,
 	}
 }
 
