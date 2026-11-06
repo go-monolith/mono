@@ -241,6 +241,26 @@ func applyPendingLimits(sub types.Subscription, opts types.ServiceOptions, reque
 	return limiter.SetPendingLimits(msgs, bytes)
 }
 
+// resetSubscriptionState clears everything a run of setupNATSSubscriptions
+// created, after teardownNATSSubscriptions has drained it, so that a retried
+// Start begins from a clean slate: a fresh fetch context (the old one was
+// cancelled by the teardown and would leave every new fetch loop dead), no
+// stale subscriptions to drain twice, no closed pools, no duplicate stats
+// records, and the in-flight counter at zero.
+func (lm *lifecycleManager) resetSubscriptionState() {
+	lm.mu.Lock()
+	defer lm.mu.Unlock()
+	if lm.cancelFetch != nil {
+		lm.cancelFetch()
+	}
+	lm.fetchCtx, lm.cancelFetch = context.WithCancel(context.Background()) //nolint:gosec // G118: cancelFetch is stored and called in shutdown
+	lm.subscriptions = make(map[string][]types.Subscription)
+	lm.pools = make(map[string][]*workerpool.Pool)
+	lm.subRecords = nil
+	lm.streamConsumers = make(map[string]context.CancelFunc)
+	lm.inFlightHandlers.Store(0)
+}
+
 // SetStatsLogInterval sets the period of the Debug log line that reports
 // SubscriptionStats while the application runs. 0 disables it. Must be called
 // before Start.
@@ -593,6 +613,7 @@ func (lm *lifecycleManager) Start(ctx context.Context) error {
 		if terr := lm.teardownNATSSubscriptions(ctx); terr != nil {
 			lm.logger.Error("Error tearing down NATS subscriptions after failed setup", "error", terr)
 		}
+		lm.resetSubscriptionState()
 		return lm.rollback(ctx, started, err)
 	}
 

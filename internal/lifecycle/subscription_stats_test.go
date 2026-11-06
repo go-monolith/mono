@@ -3,6 +3,7 @@ package lifecycle
 import (
 	"context"
 	"errors"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -208,6 +209,83 @@ func TestStatsLog_PeriodicDebugLine(t *testing.T) {
 	if after != before {
 		t.Fatalf("stats log kept running after Stop (%d new lines)", after-before)
 	}
+}
+
+// TestStart_RetryAfterFailedSubscriptionSetup checks that a Start that fails
+// while setting up subscriptions tears everything down and that a retried
+// Start works: live fetch context, exactly one subscription and one stats
+// record per service, and handlers that run.
+func TestStart_RetryAfterFailedSubscriptionSetup(t *testing.T) {
+	logger := &mockLogger{}
+	reg := registry.NewModuleRegistry(logger)
+	pluginReg := registry.NewPluginRegistry(logger)
+	eventBus := newMockEventBus()
+	lm := NewLifecycleManager(reg, pluginReg, eventBus, registry.NewEventRegistry(logger), logger, 0)
+	impl := lm.(*lifecycleManager)
+
+	var handled atomic.Int32
+	module := &mockModuleWithServices{
+		mockModule: mockModule{name: "service-module"},
+		serviceEntries: []*types.ServiceEntry{
+			{
+				Name: "first", Type: types.ServiceTypeRequestReply,
+				Subject: "services.service-module.first", QueueGroup: "first",
+				RequestHandler: func(_ context.Context, msg *types.Msg) ([]byte, error) { handled.Add(1); return msg.Data, nil },
+			},
+			{
+				Name: "second", Type: types.ServiceTypeRequestReply,
+				Subject: "services.service-module.second", QueueGroup: "second",
+				RequestHandler: func(_ context.Context, msg *types.Msg) ([]byte, error) { return msg.Data, nil },
+			},
+		},
+	}
+	if err := reg.Register(module); err != nil {
+		t.Fatal(err)
+	}
+
+	// First attempt: the second subscription fails, after the first was created.
+	eventBus.queueSubscribeErr = errors.New("subscribe failed")
+	eventBus.queueSubscribeErrFor = "services.service-module.second"
+	if err := lm.Start(context.Background()); err == nil {
+		t.Fatal("first Start should fail")
+	}
+	impl.mu.RLock()
+	fetchErr := impl.fetchCtx.Err()
+	leftover := len(impl.subscriptions) + len(impl.pools) + len(impl.subRecords)
+	impl.mu.RUnlock()
+	if fetchErr != nil {
+		t.Fatal("fetch context must be fresh after a failed Start, or every retried fetch loop is dead")
+	}
+	if leftover != 0 {
+		t.Fatalf("subscription state not reset after failed Start: %d leftovers", leftover)
+	}
+	if n := len(lm.SubscriptionStats()); n != 0 {
+		t.Fatalf("no stats expected after a failed Start, got %d", n)
+	}
+
+	// Retry succeeds.
+	eventBus.queueSubscribeErr = nil
+	eventBus.queueSubscribeErrFor = ""
+	if err := lm.Start(context.Background()); err != nil {
+		t.Fatalf("retried Start failed: %v", err)
+	}
+	defer func() { _ = lm.Stop(context.Background()) }()
+
+	stats := lm.SubscriptionStats()
+	if len(stats) != 2 {
+		t.Fatalf("got %d stats after retry, want exactly 2 (no stale duplicates): %+v", len(stats), stats)
+	}
+	if _, ok := impl.beginHandler(); !ok {
+		t.Fatal("fetch loops must be able to admit handlers after a retried Start")
+	}
+	impl.endHandler()
+
+	handlers := eventBus.getHandlers("services.service-module.first")
+	if len(handlers) != 2 { // one dead handler from the failed attempt stays registered on the mock bus, one live
+		t.Logf("mock bus holds %d handlers for first (failed attempt + retry)", len(handlers))
+	}
+	handlers[len(handlers)-1](context.Background(), &types.Msg{Subject: "services.service-module.first", Reply: "r", Data: []byte("x")})
+	eventually(t, func() bool { return handled.Load() == 1 }, "handler should run after the retried Start")
 }
 
 func TestStatsLog_DisabledByDefault(t *testing.T) {
