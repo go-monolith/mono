@@ -1062,6 +1062,8 @@ func (m *mockLifecycleManager) SetDrainTimeout(_ time.Duration) {}
 func (m *mockLifecycleManager) SetDeadlineSkewAllowance(_ time.Duration) {}
 func (m *mockLifecycleManager) SetStatsLogInterval(_ time.Duration)      {}
 
+func (m *mockLifecycleManager) SetServiceDiscovery(_ *types.ServiceDiscoveryConfig) {}
+
 func (m *mockLifecycleManager) SubscriptionStats() []types.SubscriptionStats { return nil }
 
 // TestStop_AppliesShutdownTimeoutWhenContextHasNoDeadline checks that Stop

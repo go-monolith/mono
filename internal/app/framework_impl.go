@@ -51,6 +51,8 @@ type Settings struct {
 	// StatsLogInterval is the period of the Debug subscription stats log
 	// (0 = off).
 	StatsLogInterval time.Duration
+	// ServiceDiscovery enables the NATS services protocol responders (nil = off).
+	ServiceDiscovery *types.ServiceDiscoveryConfig
 }
 
 // NewFrameworkAppInstance creates a new framework instance with the given logger.
@@ -116,6 +118,7 @@ func NewFrameworkAppInstance(logger types.Logger, settings Settings, natsOptions
 	fwApp.lifecycleManager.SetDrainTimeout(fwApp.settings.ShutdownDrainTimeout)
 	fwApp.lifecycleManager.SetDeadlineSkewAllowance(fwApp.settings.DeadlineSkewAllowance)
 	fwApp.lifecycleManager.SetStatsLogInterval(fwApp.settings.StatsLogInterval)
+	fwApp.lifecycleManager.SetServiceDiscovery(fwApp.settings.ServiceDiscovery)
 
 	// Step 6: Set runtime context on event bus for graceful shutdown
 	runtimeCtx := fwApp.lifecycleManager.GetRuntimeContext()

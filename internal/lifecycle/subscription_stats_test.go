@@ -280,9 +280,12 @@ func TestStart_RetryAfterFailedSubscriptionSetup(t *testing.T) {
 	}
 	impl.endHandler()
 
+	// The mock bus may also keep the callback of the failed attempt (entries
+	// are set up in map order, so "first" may or may not have been subscribed
+	// before "second" failed); the live one is the last registered.
 	handlers := eventBus.getHandlers("services.service-module.first")
-	if len(handlers) != 2 { // one dead handler from the failed attempt stays registered on the mock bus, one live
-		t.Logf("mock bus holds %d handlers for first (failed attempt + retry)", len(handlers))
+	if len(handlers) < 1 {
+		t.Fatal("expected a live handler for first after the retried Start")
 	}
 	handlers[len(handlers)-1](context.Background(), &types.Msg{Subject: "services.service-module.first", Reply: "r", Data: []byte("x")})
 	eventually(t, func() bool { return handled.Load() == 1 }, "handler should run after the retried Start")

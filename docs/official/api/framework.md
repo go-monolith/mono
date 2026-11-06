@@ -604,6 +604,35 @@ Enables optimistic publish mode for queue group services. When set, the first se
 mono.WithQueueGroupOptimisticWindow(1 * time.Second)
 ```
 
+#### WithServiceDiscovery
+
+```go
+func WithServiceDiscovery(cfg ...ServiceDiscoveryConfig) MonoFrameworkOption
+```
+
+Exposes the application's request-reply services through the NATS services protocol, so `nats micro ls`, `nats micro info <module>` and `nats micro stats <module>` work against the application. One service is exposed per module that owns request-reply services, with one endpoint per service. Stats carry the standard per-endpoint fields and, in `data`, mono's queue wait time (`queue_wait_time`, `average_queue_wait_time`, `max_queue_wait_time`), `expired`, `expired_queue_wait_max`, `rejected`, `pending_msgs`, `pool_active` and `pool_queued`. Off by default (it adds subscriptions).
+
+```go
+type ServiceDiscoveryConfig struct {
+    Version     string            // semantic version reported for every service; "" = "0.0.0"
+    Description string            // reported by INFO
+    Metadata    map[string]string // reported with the service identity
+}
+```
+
+**Example:**
+```go
+mono.WithServiceDiscovery(mono.ServiceDiscoveryConfig{Version: "1.4.2", Description: "orders API"})
+```
+
+Then, with the NATS CLI connected to the embedded server:
+
+```
+nats micro ls
+nats micro info orders
+nats micro stats orders
+```
+
 #### WithSubscriptionStatsLogInterval
 
 ```go
@@ -684,6 +713,7 @@ Returns a configuration with all default values. Useful for testing.
 | Deadline Skew Allowance | `250 * time.Millisecond` |
 | NATS Client Name | `"mono"` |
 | Subscription Stats Log Interval | `0` (disabled) |
+| Service Discovery | disabled |
 | Queue Group Optimistic Window | `0` (disabled) |
 | Default Service Concurrency | `0` (= `runtime.GOMAXPROCS(0) * 4`) |
 

@@ -3,6 +3,8 @@ package mono
 import (
 	"fmt"
 	"io"
+	"maps"
+	"regexp"
 	"time"
 
 	"github.com/go-monolith/mono/pkg/errors"
@@ -205,6 +207,46 @@ func WithNATSAutoTLS(autoTLS types.AutoTLSConfig) MonoFrameworkOption {
 		return nil
 	}
 }
+
+// WithServiceDiscovery exposes the application's request-reply services
+// through the NATS services protocol (the protocol behind nats.go/micro), so
+// `nats micro ls`, `nats micro info <module>` and `nats micro stats <module>`
+// work against the application with no extra code. One service is exposed
+// per module that owns request-reply services, with one endpoint per service.
+// Stats include the standard per-endpoint fields and, in the data field,
+// mono's queue wait time, expired and rejected counts and pool state.
+//
+// Discovery is opt-in because it adds subscriptions. The framework answers
+// the control subjects itself and keeps its own subscriptions, worker pools
+// and Mono-Error headers for the traffic; it does not route requests through
+// nats.go/micro.
+//
+// Example:
+//
+//	mono.NewMonoApplication(mono.WithServiceDiscovery(mono.ServiceDiscoveryConfig{
+//	    Version:     "1.4.2",
+//	    Description: "orders API",
+//	}))
+func WithServiceDiscovery(cfg ...types.ServiceDiscoveryConfig) MonoFrameworkOption {
+	return func(c *types.MonoFrameworkConfig) error {
+		var sd types.ServiceDiscoveryConfig
+		if len(cfg) > 0 {
+			sd = cfg[0]
+		}
+		if sd.Version != "" && !semVerRegexp.MatchString(sd.Version) {
+			return errors.WrapInvalidConfiguration(0, "WithServiceDiscovery", sd.Version,
+				"version must be semantic (for example 1.2.3); the NATS services protocol rejects other forms")
+		}
+		if sd.Metadata != nil {
+			sd.Metadata = maps.Clone(sd.Metadata)
+		}
+		c.ServiceDiscovery = &sd
+		return nil
+	}
+}
+
+// semVerRegexp is the version pattern the NATS services protocol accepts.
+var semVerRegexp = regexp.MustCompile(`^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-((?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*)(?:\.(?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*))*))?(?:\+([0-9a-zA-Z-]+(?:\.[0-9a-zA-Z-]+)*))?$`)
 
 // WithSubscriptionStatsLogInterval enables a periodic Debug log of
 // MonoFramework.SubscriptionStats: for every request-reply, queue group and

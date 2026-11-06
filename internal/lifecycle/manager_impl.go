@@ -49,6 +49,7 @@ type lifecycleManager struct {
 	pools                      map[string][]*workerpool.Pool // worker pools of request-reply, queue group and event consumer subscriptions, by module
 	subRecords                 []*subscriptionRecord         // every pooled subscription with its pool and counters, for SubscriptionStats
 	statsLogInterval           time.Duration                 // period of the Debug stats log (0 = off)
+	serviceDiscovery           *types.ServiceDiscoveryConfig // NATS services protocol responders (nil = off)
 }
 
 // subscriptionRecord ties a framework-managed subscription to the worker pool
@@ -62,6 +63,7 @@ type subscriptionRecord struct {
 	sub        types.Subscription
 	pool       *workerpool.Pool
 	reporter   *overloadReporter
+	metrics    *endpointMetrics // request-reply only: per-endpoint stats for the services protocol
 }
 
 // NewLifecycleManager creates a new lifecycle manager
@@ -245,8 +247,8 @@ func applyPendingLimits(sub types.Subscription, opts types.ServiceOptions, reque
 // created, after teardownNATSSubscriptions has drained it, so that a retried
 // Start begins from a clean slate: a fresh fetch context (the old one was
 // cancelled by the teardown and would leave every new fetch loop dead), no
-// stale subscriptions to drain twice, no closed pools, no duplicate stats
-// records, and the in-flight counter at zero.
+// stale subscriptions to drain twice, no closed pools and no duplicate stats
+// records. The in-flight counter is kept (see below).
 func (lm *lifecycleManager) resetSubscriptionState() {
 	lm.mu.Lock()
 	defer lm.mu.Unlock()
@@ -258,7 +260,67 @@ func (lm *lifecycleManager) resetSubscriptionState() {
 	lm.pools = make(map[string][]*workerpool.Pool)
 	lm.subRecords = nil
 	lm.streamConsumers = make(map[string]context.CancelFunc)
-	lm.inFlightHandlers.Store(0)
+	// inFlightHandlers is deliberately kept: a handler still running past the
+	// drain budget decrements it later, and resetting would let that
+	// decrement hide one real in-flight handler from the next Stop.
+	if n := lm.inFlightHandlers.Load(); n > 0 {
+		lm.logger.Warn("Fetch loop handlers still running after failed Start teardown", "count", n)
+	}
+}
+
+// SetServiceDiscovery enables the NATS services protocol responders for the
+// request-reply services; nil disables them. Must be called before Start.
+func (lm *lifecycleManager) SetServiceDiscovery(cfg *types.ServiceDiscoveryConfig) {
+	lm.mu.Lock()
+	defer lm.mu.Unlock()
+	lm.serviceDiscovery = cfg
+}
+
+// setupServiceDiscovery subscribes the protocol responders: one service per
+// module that owns request-reply services, named after the module. The
+// subscriptions are tracked like any other, so they are drained at Stop.
+func (lm *lifecycleManager) setupServiceDiscovery() error {
+	lm.mu.RLock()
+	cfg := lm.serviceDiscovery
+	records := make([]*subscriptionRecord, len(lm.subRecords))
+	copy(records, lm.subRecords)
+	lm.mu.RUnlock()
+	if cfg == nil {
+		return nil
+	}
+
+	byModule := make(map[string][]*discoveryEndpoint)
+	var modules []string
+	for _, r := range records {
+		if r.kind != "request_reply" {
+			continue
+		}
+		if _, seen := byModule[r.module]; !seen {
+			modules = append(modules, r.module)
+		}
+		byModule[r.module] = append(byModule[r.module], &discoveryEndpoint{
+			name: r.name, subject: r.subject, queueGroup: r.queueGroup, record: r,
+		})
+	}
+	sort.Strings(modules)
+
+	for _, module := range modules {
+		svc, err := newDiscoveryService(module, *cfg, byModule[module])
+		if err != nil {
+			return err
+		}
+		subs, err := subscribeDiscovery(lm.eventBus, lm.logger, svc)
+		if err != nil {
+			return err
+		}
+		lm.mu.Lock()
+		lm.subscriptions[module] = append(lm.subscriptions[module], subs...)
+		lm.mu.Unlock()
+		lm.logger.Info("Service discovery enabled",
+			"service", svc.identity.Name, "id", svc.identity.ID, "version", svc.identity.Version,
+			"endpoints", len(svc.endpoints))
+	}
+	return nil
 }
 
 // SetStatsLogInterval sets the period of the Debug log line that reports
@@ -769,6 +831,7 @@ func (lm *lifecycleManager) setupNATSSubscriptions(ctx context.Context) error {
 				pool := lm.newPool(entry.Options, true, logger, modName, "request_reply", serviceName, queueGroup)
 				reporter := newOverloadReporter(logger, "service", serviceName, "module", modName)
 				skew := lm.deadlineSkewAllowance()
+				metrics := &endpointMetrics{}
 
 				// handleRequest runs on a pool worker. arrival is when the
 				// subscription callback received the message, so the queue
@@ -786,14 +849,19 @@ func (lm *lifecycleManager) setupNATSSubscriptions(ctx context.Context) error {
 					}
 					if decision.expired {
 						reporter.expire(pool)
+						metrics.recordExpired(time.Since(arrival))
 						return
 					}
 					ctx := decision.ctx
 
 					// A panic in the handler is recovered into an error, so one bad
 					// request cannot take the process down; the caller gets an error
-					// reply instead of a timeout.
+					// reply instead of a timeout. Queue wait (arrival to start) and
+					// processing time (start to end) are recorded separately for the
+					// services protocol stats.
+					start := time.Now()
 					response, err := invokeRequestReplyHandler(ctx, handler, msg)
+					metrics.record(start.Sub(arrival), time.Since(start), err)
 					if err != nil {
 						logger.Error("RequestReply handler error",
 							append([]any{"service", serviceName, "module", modName, "subject", msg.Subject}, handlerErrorFields(err)...)...)
@@ -854,7 +922,7 @@ func (lm *lifecycleManager) setupNATSSubscriptions(ctx context.Context) error {
 				lm.subscriptions[moduleName] = append(lm.subscriptions[moduleName], sub)
 				lm.subRecords = append(lm.subRecords, &subscriptionRecord{
 					kind: "request_reply", module: modName, name: serviceName,
-					subject: entry.Subject, queueGroup: queueGroup, sub: sub, pool: pool, reporter: reporter,
+					subject: entry.Subject, queueGroup: queueGroup, sub: sub, pool: pool, reporter: reporter, metrics: metrics,
 				})
 				lm.mu.Unlock()
 
@@ -1035,6 +1103,12 @@ func (lm *lifecycleManager) setupNATSSubscriptions(ctx context.Context) error {
 			// each of these streams; later boots only report leftovers.
 			lm.markLegacyMigrationDone(ctx, streamConsumers, durables)
 		}
+	}
+
+	// Services protocol responders, after every request-reply subscription is
+	// recorded so stats are never requested for an unknown endpoint.
+	if err := lm.setupServiceDiscovery(); err != nil {
+		return fmt.Errorf("failed to set up service discovery: %w", err)
 	}
 
 	lm.logger.Debug("NATS subscriptions setup complete")
