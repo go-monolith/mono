@@ -2,6 +2,7 @@ package workerpool
 
 import (
 	"context"
+	"errors"
 	"runtime"
 	"testing"
 	"time"
@@ -36,7 +37,7 @@ func TestClose_IdlePoolWithDoneContextIsNotBusy(t *testing.T) {
 			t.Fatalf("Close of an idle pool with a done context returned %v, want nil", err)
 		}
 	}
-	if err := p.Submit(func() {}, false); err != ErrClosed {
+	if err := p.Submit(func() {}, false); !errors.Is(err, ErrClosed) {
 		t.Fatalf("Submit after Close = %v, want ErrClosed", err)
 	}
 }
