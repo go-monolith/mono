@@ -343,10 +343,30 @@ A violation fails the module start (`ErrModuleStartFailed` wrapping `ErrMissingD
 
 `MonoApplication.Services(name)` and `MonoApplication.EventBus(name)` hand the host program (`main.go`) a module's container and the event bus, for API handlers, CLI commands or tests. They are not for module code: a module that holds the application object bypasses every check above, and neither the framework nor tooling can detect it.
 
+### At runtime: boundary report and strict mode
+
+The `ServiceContainer` a module receives for a dependency is a read-only view that attributes every lookup to the module, and the `EventBus` it receives is scoped to its declared boundaries. Four kinds of crossing are detected:
+
+| Kind | What the module did |
+|------|---------------------|
+| `register-on-dependency` | Called `Register*`, `Unregister`, `BindModule`, `Set*`, `StartChannelRouters` or `RegisterContract` on a dependency's container |
+| `channel-consumer-mismatch` | Asked for a channel service under another module's name |
+| `undeclared-service-subject` | Published to or requested `services.<module>.<service>` of a module that is not itself, a declared dependency or a plugin — bypassing the port |
+| `foreign-service-subscription` | Subscribed to another module's service subject |
+
+By default a crossing is counted, warned once, and let through, so existing applications keep working. `MonoApplication.ModuleBoundaries()` returns, per module, the declared dependencies, the consumed contracts, the services actually looked up (with counts), the declared dependencies never used, and the crossings. The same summary is logged at `Stop`.
+
+```go
+for _, r := range app.ModuleBoundaries() {
+    fmt.Println(r.Module, "uses", r.Observed, "never used", r.UnusedDependencies, "violations", r.Violations)
+}
+```
+
+With `mono.WithStrictModuleBoundaries()` a crossing fails instead with `ErrModuleBoundaryViolation`. The intended path: run non-strict, read the report, fix the modules, then turn strict on, and keep it on in tests.
+
 ### Planned
 
-- **Runtime boundary enforcement**: dependency containers handed to a consumer become read-only views that attribute each lookup to the consumer, a module-scoped `EventBus` flags `services.<undeclared-module>.*` subjects, `WithStrictModuleBoundaries()` turns violations into errors, and `MonoApplication.ModuleBoundaries()` reports declared versus observed dependencies.
-- **`monotest` harness**: an in-memory event bus and container, a `Harness` that runs the documented lifecycle order without NATS, and `CheckModule(t, m)` conformance assertions.
+- **`monotest` harness**: an in-memory event bus and container, a `Harness` that runs the documented lifecycle order without NATS through the same views and scoped bus, and `CheckModule(t, m)` conformance assertions.
 
 ## Best Practices
 

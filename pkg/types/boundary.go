@@ -8,13 +8,16 @@ type BoundaryViolationKind string
 
 const (
 	// BoundaryViolationRegisterOnDependency: the module called a mutating
-	// method (Register*, Unregister, BindModule, Set*, StartChannelRouters)
-	// on a dependency's ServiceContainer. A consumer may only look services up.
+	// method (Register*, Unregister, BindModule, Set*, StartChannelRouters,
+	// RegisterContract) on a dependency's ServiceContainer. A consumer may
+	// only look services up.
 	BoundaryViolationRegisterOnDependency BoundaryViolationKind = "register-on-dependency"
 
 	// BoundaryViolationChannelConsumerMismatch: the module asked for a channel
-	// service with a consumerModule argument that is not its own name. The
-	// framework corrects the name and records the mismatch.
+	// service with a consumerModule argument that is not its own name, so the
+	// consumer channel is registered under a name that targeted replies
+	// (Msg.Reply set to the module name) do not reach. The name passed is
+	// reported in BoundaryViolation.Subject.
 	BoundaryViolationChannelConsumerMismatch BoundaryViolationKind = "channel-consumer-mismatch"
 
 	// BoundaryViolationUndeclaredServiceSubject: the module published to or
@@ -50,8 +53,9 @@ type BoundaryViolation struct {
 	Kind BoundaryViolationKind `json:"kind"`
 	// Dependency is the module whose boundary was crossed.
 	Dependency string `json:"dependency"`
-	// Subject is the NATS subject involved, when the violation was a bus
-	// operation; empty for container operations.
+	// Subject is the NATS subject involved when the violation was a bus
+	// operation, the consumerModule name passed for a channel-consumer
+	// mismatch, and empty for other container operations.
 	Subject string `json:"subject"`
 	// Count is how many times it happened.
 	Count int64 `json:"count"`

@@ -710,3 +710,29 @@ func WithDefaultServiceConcurrency(n int) MonoFrameworkOption {
 		return nil
 	}
 }
+
+// WithStrictModuleBoundaries makes module boundary violations fail instead of
+// being recorded. A violation is a call that crosses a boundary the module did
+// not declare: registering on, unregistering from or otherwise mutating a
+// dependency's ServiceContainer, asking for a channel service under another
+// module's name, or publishing to, requesting or subscribing to the
+// services.<module>.<service> subject of a module that is neither itself, one
+// of its Dependencies() nor a plugin (which bypasses the port, the dependency
+// container, altogether). With this option such a call returns
+// ErrModuleBoundaryViolation (void container methods become no-ops).
+//
+// Without it, the default, the call goes through, is warned once per module
+// and kind, and is reported by MonoApplication.ModuleBoundaries() and in the
+// Stop log, so an existing application keeps working while the report shows
+// where its modules step outside their declared boundaries. Turn the option on
+// once the report is clean, and in tests.
+//
+// Example:
+//
+//	mono.NewMonoApplication(mono.WithStrictModuleBoundaries())
+func WithStrictModuleBoundaries() MonoFrameworkOption {
+	return func(cfg *types.MonoFrameworkConfig) error {
+		cfg.StrictModuleBoundaries = true
+		return nil
+	}
+}

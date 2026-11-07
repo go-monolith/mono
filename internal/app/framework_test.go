@@ -1064,6 +1064,9 @@ func (m *mockLifecycleManager) SetDeadlineSkewAllowance(_ time.Duration) {}
 func (m *mockLifecycleManager) SetStatsLogInterval(_ time.Duration)      {}
 
 func (m *mockLifecycleManager) SetServiceDiscovery(_ *types.ServiceDiscoveryConfig) {}
+func (m *mockLifecycleManager) SetStrictModuleBoundaries(_ bool)                    {}
+func (m *mockLifecycleManager) ModuleBoundaries() []types.ModuleBoundaryReport      { return nil }
+func (m *mockLifecycleManager) ModuleEventBus(_ string) types.EventBus              { return nil }
 
 func (m *mockLifecycleManager) SubscriptionStats() []types.SubscriptionStats { return m.stats }
 

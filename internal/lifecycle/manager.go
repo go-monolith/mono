@@ -74,6 +74,18 @@ type LifecycleManager interface {
 	// SetServiceDiscovery enables the NATS services protocol responders for
 	// request-reply services; nil disables them. Must be called before Start.
 	SetServiceDiscovery(cfg *types.ServiceDiscoveryConfig)
+
+	// SetStrictModuleBoundaries makes boundary violations fail with
+	// ErrModuleBoundaryViolation instead of being recorded. Must be called
+	// before Start.
+	SetStrictModuleBoundaries(strict bool)
+
+	// ModuleBoundaries returns the boundary report of every started module.
+	ModuleBoundaries() []types.ModuleBoundaryReport
+
+	// ModuleEventBus returns the scoped event bus handed to a started module,
+	// or nil.
+	ModuleEventBus(moduleName string) types.EventBus
 }
 
 // LifecycleEvent represents a module lifecycle event.

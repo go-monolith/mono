@@ -53,6 +53,9 @@ type Settings struct {
 	StatsLogInterval time.Duration
 	// ServiceDiscovery enables the NATS services protocol responders (nil = off).
 	ServiceDiscovery *types.ServiceDiscoveryConfig
+	// StrictModuleBoundaries makes module boundary violations fail instead of
+	// being recorded (see types.ModuleBoundaryReport).
+	StrictModuleBoundaries bool
 }
 
 // NewFrameworkAppInstance creates a new framework instance with the given logger.
@@ -119,6 +122,7 @@ func NewFrameworkAppInstance(logger types.Logger, settings Settings, natsOptions
 	fwApp.lifecycleManager.SetDeadlineSkewAllowance(fwApp.settings.DeadlineSkewAllowance)
 	fwApp.lifecycleManager.SetStatsLogInterval(fwApp.settings.StatsLogInterval)
 	fwApp.lifecycleManager.SetServiceDiscovery(fwApp.settings.ServiceDiscovery)
+	fwApp.lifecycleManager.SetStrictModuleBoundaries(fwApp.settings.StrictModuleBoundaries)
 
 	// Step 6: Set runtime context on event bus for graceful shutdown
 	runtimeCtx := fwApp.lifecycleManager.GetRuntimeContext()
@@ -295,10 +299,29 @@ func (fw *frameworkApplication) Services(moduleName string) types.ServiceContain
 	return fw.lifecycleManager.GetServiceContainer(moduleName)
 }
 
-// EventBus returns the framework's EventBus for the specified module.
+// EventBus returns the EventBus of the specified module: the bus scoped to
+// that module's declared boundaries when the module has been started, and the
+// shared bus otherwise (unknown names, or before Start). This is a host-level
+// escape hatch for main.go, API handlers and tests, not for module code.
 func (fw *frameworkApplication) EventBus(moduleName string) types.EventBus {
-	// For now, all modules share the same EventBus
+	if moduleName != "" {
+		if bus := fw.lifecycleManager.ModuleEventBus(moduleName); bus != nil {
+			return bus
+		}
+	}
 	return fw.eventBus
+}
+
+// ModuleBoundaries returns the boundary report of every started module. It
+// returns nil unless the application is running.
+func (fw *frameworkApplication) ModuleBoundaries() []types.ModuleBoundaryReport {
+	fw.mu.RLock()
+	running := fw.state == types.StateRunning
+	fw.mu.RUnlock()
+	if !running {
+		return nil
+	}
+	return fw.lifecycleManager.ModuleBoundaries()
 }
 
 // Modules returns a list of all registered module names.
