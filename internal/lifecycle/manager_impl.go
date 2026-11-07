@@ -686,6 +686,98 @@ func (lm *lifecycleManager) Start(ctx context.Context) error {
 	return nil
 }
 
+// validateConsumedServices checks the contracts a ServiceConsumerModule
+// declares against what its dependencies actually registered, so that a
+// missing or mistyped service fails the module start instead of the first call
+// at runtime. For each contract: the providing module must be one of the
+// module's declared dependencies or a registered plugin (plugins are injected
+// into every UsePluginModule and are not part of the dependency graph), that
+// provider must have registered the service, and the registered service must
+// be of the contract's type. Dependencies and plugins start before the module,
+// so their registrations are complete here.
+func (lm *lifecycleManager) validateConsumedServices(module types.Module, contracts []types.BaseServiceDefinition) error {
+	if len(contracts) == 0 {
+		return nil
+	}
+	moduleName := module.Name()
+
+	declared := make(map[string]struct{})
+	if depMod, ok := module.(types.DependentModule); ok {
+		for _, dep := range depMod.Dependencies() {
+			declared[dep] = struct{}{}
+		}
+	}
+
+	// Snapshot the provider containers under the lock, then validate without it.
+	plugins := lm.pluginRegistry.All()
+	lm.mu.RLock()
+	containers := make(map[string]types.ServiceContainer, len(declared))
+	for dep := range declared {
+		if c, ok := lm.containers[dep]; ok {
+			containers[dep] = c
+		}
+	}
+	// Plugin containers are keyed by alias; index them by module name here.
+	pluginContainers := make(map[string]types.ServiceContainer, len(plugins))
+	for alias, plugin := range plugins {
+		if c, ok := lm.pluginContainers[alias]; ok {
+			pluginContainers[plugin.Name()] = c
+		}
+	}
+	lm.mu.RUnlock()
+
+	for _, def := range contracts {
+		if def.ModuleName == "" || def.Name == "" {
+			return fmt.Errorf("consumed service contract %s is incomplete (module and service name are required)", def)
+		}
+		if def.ModuleName == moduleName {
+			return fmt.Errorf("consumed service contract %s names the module itself", def)
+		}
+
+		provider, isPlugin := pluginContainers[def.ModuleName]
+		if !isPlugin {
+			if _, ok := declared[def.ModuleName]; !ok {
+				return fmt.Errorf("%w: consumed service contract %s requires module '%s' in Dependencies()",
+					monoerrors.ErrMissingDependency, def, def.ModuleName)
+			}
+			var exists bool
+			provider, exists = containers[def.ModuleName]
+			if !exists {
+				return fmt.Errorf("%w: consumed service contract %s: dependency '%s' has no container",
+					monoerrors.ErrMissingDependency, def, def.ModuleName)
+			}
+		}
+
+		entry := findServiceEntry(provider, def.Name)
+		if entry == nil {
+			return fmt.Errorf("consumed service contract %s: %w", def, &monoerrors.ServiceError{
+				ServiceName: def.Name, ModuleName: def.ModuleName, ServiceType: def.Type,
+				Err: monoerrors.ErrServiceNotFound,
+			})
+		}
+		if entry.Type != def.Type {
+			return monoerrors.WrapServiceContractMismatch(def, def.ModuleName, entry.Type)
+		}
+		lm.logger.Debug("Consumed service contract validated",
+			"module", moduleName, "provider", def.ModuleName, "service", def.Name,
+			"type", types.FormatServiceType(def.Type), "contract_backed", entry.Contract != nil)
+	}
+	return nil
+}
+
+// findServiceEntry returns the entry of the named service in container, or nil.
+func findServiceEntry(container types.ServiceContainer, name string) *types.ServiceEntry {
+	if container == nil {
+		return nil
+	}
+	for _, entry := range container.Entries() {
+		if entry.Name == name {
+			return entry
+		}
+	}
+	return nil
+}
+
 // startModule executes the initialization sequence for a single module
 func (lm *lifecycleManager) startModule(ctx context.Context, module types.Module) (err error) {
 	moduleName := module.Name()
@@ -751,6 +843,13 @@ func (lm *lifecycleManager) startModule(ctx context.Context, module types.Module
 			depMod.SetDependencyServiceContainer(depName, depContainer)
 		}
 		lm.mu.RUnlock()
+	}
+
+	// Step 1.5: Validate declared service contracts (fail fast)
+	if consumer, ok := module.(types.ServiceConsumerModule); ok {
+		if err := lm.validateConsumedServices(module, consumer.ConsumeServices()); err != nil {
+			return monoerrors.WrapModuleStartFailed(moduleName, err)
+		}
 	}
 
 	// Step 2: Set EventBus if NATS-aware

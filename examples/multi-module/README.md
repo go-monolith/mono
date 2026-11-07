@@ -18,10 +18,11 @@ This example implements an e-commerce order processing system with four modules:
 3. **QueueGroup Services**: Asynchronous fire-and-forget messaging with load balancing
 4. **Event Publishing**: Broadcasting events to multiple subscribers
 5. **Event Subscription**: Listening to events from other modules
-6. **Service Container Access**: How modules access services from their dependencies
-7. **Error Handling**: Managing failures gracefully across module boundaries
-8. **Request ID Middleware**: Automatic request ID generation and propagation for distributed tracing
-9. **Access Logging Middleware**: Automatic logging of all service calls with timing, status, and request IDs
+6. **Typed Service Contracts**: Declaring a service once in a `contract` package and using it on both sides
+7. **Ports and Adapters**: Consumer-owned ports, adapters over contracts, and `ConsumeServices()` validated at startup
+8. **Error Handling**: Managing failures gracefully across module boundaries
+9. **Request ID Middleware**: Automatic request ID generation and propagation for distributed tracing
+10. **Access Logging Middleware**: Automatic logging of all service calls with timing, status, and request IDs
 
 ## Architecture
 
@@ -52,31 +53,38 @@ Notification (no deps)─┘
    - Asynchronous: Fire-and-forget
 
 4. **Order → EventBus** (Publish)
-   - Subject: `events.orders.created`
+   - Event: `order/contract.OrderCreatedV1`, subject `events.order.v1.order-created`
    - Broadcast: All subscribers receive the event
 
 5. **Notification ← EventBus** (Subscribe)
-   - Subject: `events.orders.created`
+   - Imports `order/contract.OrderCreatedV1` and registers a typed consumer
    - Receives all order creation events
 
 ## Code Structure
 
+Every module follows the hexagonal layout from [`docs/architect/hexagonal-architecture.md`](../../docs/architect/hexagonal-architecture.md): a `contract` sub-package is the only thing other modules import.
+
 ```
 examples/multi-module/
-├── main.go                    # Application orchestration
+├── main.go                    # Application orchestration (calls order through its contract)
 ├── README.md                  # This file
 ├── inventory/
-│   ├── module.go             # Inventory module with stock checking
-│   └── types.go              # Data types for inventory requests/responses
+│   ├── contract/contract.go  # Port: CheckStock contract + DTOs
+│   └── module.go             # Domain logic, RegisterServices via contract
 ├── payment/
-│   ├── module.go             # Payment module with payment processing
-│   └── types.go              # Data types for payment requests/responses
+│   ├── contract/contract.go  # Port: Process contract + DTOs
+│   └── module.go             # Domain logic
 ├── notification/
-│   ├── module.go             # Notification module (QueueGroup + Events)
-│   └── types.go              # Data types for notifications
+│   ├── contract/contract.go  # Port: OnOrderCreated queue group contract + DTO
+│   ├── module.go             # Queue group handler + typed event consumer
+│   └── types.go              # Module-internal types (NotificationLog)
 └── order/
-    ├── module.go             # Order orchestration module
-    └── types.go              # Data types for order requests/responses/events
+    ├── contract/
+    │   ├── contract.go       # Port: PlaceOrder contract + DTOs
+    │   └── events.go         # OrderCreatedEvent + OrderCreatedV1 (consumed by notification)
+    ├── ports.go              # Driven ports the order domain needs (InventoryPort, ...)
+    ├── adapter.go            # Adapters implementing the ports over the providers' contracts
+    └── module.go             # Orchestration, Dependencies(), ConsumeServices()
 ```
 
 ## Module Implementations
@@ -84,12 +92,12 @@ examples/multi-module/
 ### Inventory Module
 
 ```go
-// Provides stock checking service
-func (m *Module) RegisterServices(container mono.ServiceContainer) error {
-    handler := func(ctx context.Context, req *mono.Msg) ([]byte, error) {
-        return m.checkStock(ctx, req)
-    }
-    return container.RegisterRequestReplyService("check-stock", handler)
+// inventory/contract/contract.go — declared once, used by both sides
+var CheckStock = helper.RequestReplyService[CheckStockRequest, CheckStockResponse]("inventory", "check-stock")
+
+// inventory/module.go — driving adapter binds the typed domain handler
+func (m *InventoryModule) RegisterServices(container mono.ServiceContainer) error {
+    return contract.CheckStock.Register(container, m.checkStock)
 }
 ```
 
@@ -98,12 +106,10 @@ Maintains in-memory inventory and responds to stock availability queries.
 ### Payment Module
 
 ```go
-// Provides payment processing service
-func (m *Module) RegisterServices(container mono.ServiceContainer) error {
-    handler := func(ctx context.Context, req *mono.Msg) ([]byte, error) {
-        return m.processPayment(ctx, req)
-    }
-    return container.RegisterRequestReplyService("process", handler)
+var Process = helper.RequestReplyService[ProcessPaymentRequest, ProcessPaymentResponse]("payment", "process")
+
+func (m *PaymentModule) RegisterServices(container mono.ServiceContainer) error {
+    return contract.Process.Register(container, m.process)
 }
 ```
 
@@ -112,41 +118,57 @@ Simulates payment processing with 90% success rate and transaction ID generation
 ### Notification Module
 
 ```go
-// Implements both ServiceProviderModule and EventBusAwareModule
-func (m *Module) RegisterServices(container mono.ServiceContainer) error {
-    // Register QueueGroup service for direct notifications
-    handler := func(ctx context.Context, msg *mono.Msg) error {
-        return m.sendNotification(ctx, msg)
-    }
-    return container.RegisterQueueGroupService("on-order-created", "notification-workers", handler)
+// notification/contract/contract.go
+var OnOrderCreated = helper.QueueGroupService[OrderCreatedNotification]("notification", "on-order-created")
+
+// notification/module.go — queue group service plus a typed event consumer
+func (m *NotificationModule) RegisterServices(container mono.ServiceContainer) error {
+    return contract.OnOrderCreated.Register(container, types.TypedQGHP[contract.OrderCreatedNotification]{
+        QueueGroup: "notification-workers",
+        Handler:    m.sendNotification,
+    })
 }
 
-func (m *Module) Start(ctx context.Context) error {
-    // Subscribe to event bus for broadcast notifications
-    _, err := m.eventBus.Subscribe("events.orders.created", m.handleOrderCreatedEvent)
-    return err
+func (m *NotificationModule) RegisterEventConsumers(registry mono.EventRegistry) error {
+    return helper.RegisterTypedEventConsumer(registry, ordercontract.OrderCreatedV1, m.handleOrderCreatedEvent, m)
 }
 ```
 
-Receives notifications through both service calls (QueueGroup) and events (Subscribe).
+Receives notifications through both service calls (QueueGroup) and events (typed consumer).
 
 ### Order Module
 
 ```go
-// Declares dependencies on other modules
-func (m *Module) Dependencies() []string {
+// order/ports.go — what the domain needs, in the providers' contract DTOs
+type InventoryPort interface {
+    CheckStock(ctx context.Context, req inventorycontract.CheckStockRequest) (inventorycontract.CheckStockResponse, error)
+}
+
+// order/adapter.go — the port implemented over the provider's contract
+func (a inventoryAdapter) CheckStock(ctx context.Context, req inventorycontract.CheckStockRequest) (inventorycontract.CheckStockResponse, error) {
+    return inventorycontract.CheckStock.Call(ctx, a.container, req)
+}
+
+// order/module.go
+func (m *OrderModule) Dependencies() []string {
     return []string{"inventory", "payment", "notification"}
 }
 
-// Receives service containers from dependencies
-func (m *Module) SetDependencyServiceContainer(dependency string, container mono.ServiceContainer) {
+// Validated by the framework at startup: each contract must be provided by a
+// declared dependency with the matching service type.
+func (m *OrderModule) ConsumeServices() []types.BaseServiceDefinition {
+    return []types.BaseServiceDefinition{
+        inventorycontract.CheckStock.ToBase(),
+        paymentcontract.Process.ToBase(),
+        notificationcontract.OnOrderCreated.ToBase(),
+    }
+}
+
+func (m *OrderModule) SetDependencyServiceContainer(dependency string, container mono.ServiceContainer) {
     switch dependency {
     case "inventory":
-        m.inventory = container
-    case "payment":
-        m.payment = container
-    case "notification":
-        m.notification = container
+        m.inventory = inventoryAdapter{container: container}
+    // ...
     }
 }
 ```
@@ -318,29 +340,26 @@ The framework automatically starts modules in dependency order:
 - Independent modules (Inventory, Payment, Notification) start first
 - Dependent module (Order) starts after all dependencies are running
 
-### 4. Service Container Access
+### 4. Typed Service Contracts
 
 ```go
-// Order module receives service containers from its dependencies
-func (m *Module) SetDependencyServiceContainer(dependency string, container mono.ServiceContainer) {
-    m.inventory = container  // Access inventory services
-}
+// Declared once in the provider's contract package
+var CheckStock = helper.RequestReplyService[CheckStockRequest, CheckStockResponse]("inventory", "check-stock")
 
-// Later, in order placement logic:
-inventoryClient, err := m.inventory.GetRequestReplyService("check-stock")
-response, err := inventoryClient.Call(ctx, requestData)
+// Provider side
+contract.CheckStock.Register(container, m.checkStock)
+
+// Consumer side (the container received in SetDependencyServiceContainer)
+resp, err := inventorycontract.CheckStock.Call(ctx, container, req)
 ```
+
+Service name, subject, kind and serialization are written once; a consumer that imports a renamed contract fails to compile, and a consumer whose declared contract is not provided fails at startup.
 
 ### 5. RequestReply Pattern (Synchronous)
 
 ```go
-// Call inventory service and wait for response
-inventoryClient, _ := m.inventory.GetRequestReplyService("check-stock")
-response, _ := inventoryClient.Call(ctx, requestData)
-
-// Parse response and continue based on result
-var stockResult CheckStockResponse
-json.Unmarshal(response.Data, &stockResult)
+// Domain logic talks to the port; the adapter calls the contract and waits for the reply
+stockResult, err := m.inventory.CheckStock(ctx, inventorycontract.CheckStockRequest{ProductID: id, Quantity: qty})
 if !stockResult.Available {
     return failureResponse  // Stop order placement
 }
@@ -349,23 +368,21 @@ if !stockResult.Available {
 ### 6. QueueGroup Pattern (Asynchronous)
 
 ```go
-// Send notification without waiting for response
-notificationClient, _ := m.notification.GetQueueGroupService("on-order-created")
-notificationClient.Send(ctx, notificationData)
-// Execution continues immediately
+// Send notification and continue (acceptance ACK only)
+_ = m.notification.OrderCreated(ctx, notif) // adapter: notificationcontract.OnOrderCreated.Send(...)
 ```
 
 ### 7. Event Publishing and Subscription
 
 ```go
-// Order publishes event (broadcast to all subscribers)
-event := OrderCreatedEvent{...}
-m.eventBus.Publish("events.orders.created", eventData)
+// order/contract/events.go: the emitter declares the event
+var OrderCreatedV1 = helper.EventDefinition[OrderCreatedEvent]("order", "OrderCreated", "v1")
 
-// Notification subscribes to events
-m.eventBus.Subscribe("events.orders.created", func(ctx context.Context, msg *mono.Msg) {
-    // Handle event
-})
+// Order publishes (typed, best-effort)
+contract.OrderCreatedV1.Publish(m.eventBus, event, nil)
+
+// Notification consumes (typed)
+helper.RegisterTypedEventConsumer(registry, ordercontract.OrderCreatedV1, m.handleOrderCreatedEvent, m)
 ```
 
 ### 8. Graceful Error Handling
@@ -386,14 +403,16 @@ if !paymentSuccess {
 }
 
 // Notification failure doesn't fail the order (graceful degradation)
-_ = notificationClient.Send(ctx, data)  // Best effort
+if err := m.notification.OrderCreated(ctx, notif); err != nil {
+    fmt.Printf("warning: %v\n", err) // Best effort
+}
 ```
 
 ## Extending the Example
 
 Ideas for learning and experimentation:
 
-1. **Add Health Checks**: Implement `HealthAwareModule` for each module
+1. **Add Health Checks**: Implement `HealthCheckableModule` for each module
 2. **Add Metrics**: Track order success/failure rates
 3. **Implement Inventory Reservation**: Prevent overselling with stock reservations
 4. **Add Retry Logic**: Implement payment retry with exponential backoff
@@ -409,4 +428,5 @@ Ideas for learning and experimentation:
 - [Basic Example](../basic/) - Simple single-module example
 - [Channel Services Example](../channel-services/) - Channel-based communication patterns (if implemented)
 - [Design Document](../../docs/spec/foundation.md) - Complete framework design
+- [Hexagonal Architecture Guide](../../docs/architect/hexagonal-architecture.md) - Contracts, ports and adapters
 - [Module Interface Documentation](../../pkg/types/module.go) - All module interfaces

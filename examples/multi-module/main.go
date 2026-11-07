@@ -2,6 +2,9 @@
 //
 // This example shows:
 //   - Module dependencies and service orchestration
+//   - Typed service contracts (<module>/contract packages) used by both sides
+//   - Ports and adapters: consumer-owned ports, adapters over contracts,
+//     ConsumeServices() validated by the framework at startup
 //   - RequestReply and QueueGroup service patterns
 //   - EventEmitterModule for event publishing (order module)
 //   - EventRegistryAwareModule for event consuming (notification module)
@@ -24,6 +27,7 @@ import (
 	"github.com/go-monolith/mono/examples/multi-module/inventory"
 	"github.com/go-monolith/mono/examples/multi-module/notification"
 	"github.com/go-monolith/mono/examples/multi-module/order"
+	ordercontract "github.com/go-monolith/mono/examples/multi-module/order/contract"
 	"github.com/go-monolith/mono/examples/multi-module/payment"
 )
 
@@ -157,70 +161,60 @@ func runScenarios(app mono.MonoApplication) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	// In a real monolith application, other modules would call the order service
-	// using the order.OrderAdapterPort interface. Here in main.go, we demonstrate
-	// how an external component (e.g., an API handler, a CLI command, or another
-	// module that doesn't declare order as a dependency) can access order services.
-	//
-	// The framework exposes ServiceContainer via app.Services(moduleName), which
-	// returns the same ServiceContainer that dependent modules receive via
-	// SetDependencyServiceContainer().
+	// Inside the monolith, modules reach the order module through its contract
+	// package (ordercontract.PlaceOrder) and the container they receive in
+	// SetDependencyServiceContainer. Here in main.go, the host program does the
+	// same with the container the framework exposes via app.Services(name);
+	// app.Services is a host-level escape hatch, not for module code.
 	orderContainer := app.Services("order")
 	if orderContainer == nil {
 		fmt.Println("⚠ Order service container not available")
 		return
 	}
 
-	// Create the order adapter using the real ServiceContainer from the framework.
-	// This is the same pattern used by modules internally via SetDependencyServiceContainer().
-	orderAdapter := order.NewOrderAdapter(orderContainer)
-
 	// Scenario 1: Successful order
 	fmt.Println("[Scenario 1] Successful Order")
-	placeOrderWithAdapter(ctx, orderAdapter, "laptop", 1, 999.99, "USD")
+	placeOrder(ctx, orderContainer, "laptop", 1, 999.99, "USD")
 	fmt.Println()
 
 	time.Sleep(500 * time.Millisecond)
 
 	// Scenario 2: Out of stock
 	fmt.Println("[Scenario 2] Out of Stock")
-	placeOrderWithAdapter(ctx, orderAdapter, "rare-item", 1, 1999.99, "USD")
+	placeOrder(ctx, orderContainer, "rare-item", 1, 1999.99, "USD")
 	fmt.Println()
 
 	time.Sleep(500 * time.Millisecond)
 
 	// Scenario 3: Another successful order (or payment might fail due to 90% success rate)
 	fmt.Println("[Scenario 3] Another Order")
-	placeOrderWithAdapter(ctx, orderAdapter, "mouse", 2, 29.99, "USD")
+	placeOrder(ctx, orderContainer, "mouse", 2, 29.99, "USD")
 	fmt.Println()
 
 	time.Sleep(500 * time.Millisecond)
 
 	// Scenario 4: Third order attempt
 	fmt.Println("[Scenario 4] Third Order")
-	placeOrderWithAdapter(ctx, orderAdapter, "keyboard", 1, 79.99, "USD")
+	placeOrder(ctx, orderContainer, "keyboard", 1, 79.99, "USD")
 	fmt.Println()
 }
 
-func placeOrderWithAdapter(ctx context.Context, orderAdapter order.OrderAdapterPort, productID string, quantity int, amount float64, currency string) {
+func placeOrder(ctx context.Context, orderContainer mono.ServiceContainer, productID string, quantity int, amount float64, currency string) {
 	fmt.Printf("  → Placing order for product '%s' (qty: %d, $%.2f %s)\n", productID, quantity, amount, currency)
 
-	// Create typed request using the order module's types
-	request := &order.CreateOrderRequest{
+	// Call the order service through its typed contract: request and response
+	// types, service name and serialization all come from the contract.
+	result, err := ordercontract.PlaceOrder.Call(ctx, orderContainer, ordercontract.CreateOrderRequest{
 		ProductID: productID,
 		Quantity:  quantity,
 		Amount:    amount,
 		Currency:  currency,
-	}
-
-	// Call order service via type-safe adapter (simulating inter-module communication)
-	result, err := orderAdapter.PlaceOrder(ctx, request)
+	})
 	if err != nil {
 		fmt.Printf("  ✗ Order failed: %v\n", err)
 		return
 	}
 
-	// Handle typed response
 	switch result.Status {
 	case "success":
 		fmt.Printf("  ✓ Order created successfully: %s\n", result.OrderID)

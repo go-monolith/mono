@@ -1,15 +1,15 @@
 // Package inventory implements an inventory management module for stock tracking
-// and availability checking.
+// and availability checking. Its port is the contract sub-package; this package
+// holds the domain logic and the driving adapter (service registration).
 package inventory
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"sync"
 
 	"github.com/go-monolith/mono"
-	"github.com/go-monolith/mono/pkg/helper"
+	"github.com/go-monolith/mono/examples/multi-module/inventory/contract"
 )
 
 // NAME is the unique identifier for the inventory module.
@@ -53,45 +53,29 @@ func (m *InventoryModule) Stop(_ context.Context) error {
 	return nil
 }
 
-// RegisterServices registers the check_stock service using type-safe helper
+// RegisterServices is the driving adapter: it binds the domain handler to the
+// check-stock contract. Deserialization of the request and serialization of
+// the response are handled by the contract.
 func (m *InventoryModule) RegisterServices(container mono.ServiceContainer) error {
-	// Register the check_stock request-reply service using typed helper
-	// This automatically handles JSON unmarshaling of requests and marshaling of responses
-	return helper.RegisterTypedRequestReplyService(
-		container,
-		"check-stock",
-		json.Unmarshal,
-		json.Marshal,
-		m.checkStock,
-	)
+	return contract.CheckStock.Register(container, m.checkStock)
 }
 
-// checkStock handles stock availability requests with typed request/response
-func (m *InventoryModule) checkStock(_ context.Context, request CheckStockRequest, _ *mono.Msg) (CheckStockResponse, error) {
-	// Validate request
+// checkStock is the domain logic: pure, typed, and unit-testable without NATS.
+func (m *InventoryModule) checkStock(_ context.Context, request contract.CheckStockRequest, _ *mono.Msg) (contract.CheckStockResponse, error) {
 	if request.ProductID == "" {
-		return CheckStockResponse{}, fmt.Errorf("product_id is required")
+		return contract.CheckStockResponse{}, fmt.Errorf("product_id is required")
 	}
 	if request.Quantity <= 0 {
-		return CheckStockResponse{}, fmt.Errorf("quantity must be positive")
+		return contract.CheckStockResponse{}, fmt.Errorf("quantity must be positive")
 	}
 
-	// Check stock
 	m.mu.RLock()
 	stock, exists := m.inventory[request.ProductID]
 	m.mu.RUnlock()
 
-	var response CheckStockResponse
-	if !exists {
-		response = CheckStockResponse{
-			Available: false,
-			Stock:     0,
-		}
-	} else {
-		response = CheckStockResponse{
-			Available: stock >= request.Quantity,
-			Stock:     stock,
-		}
+	response := contract.CheckStockResponse{Stock: stock}
+	if exists {
+		response.Available = stock >= request.Quantity
 	}
 
 	fmt.Printf("  → Inventory: check_stock(%s, qty=%d) → available=%v, stock=%d\n",

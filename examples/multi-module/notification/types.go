@@ -1,24 +1,10 @@
 package notification
 
-import (
-	"context"
-	"time"
-)
+import "time"
 
-// NotificationAdapterPort provides a type-safe interface for sending notifications
-type NotificationAdapterPort interface {
-	SendOnOrderCreatedNotification(ctx context.Context, notification *OrderCreatedNotification) error
-}
-
-// OrderCreatedNotification represents a notification about an order
-type OrderCreatedNotification struct {
-	OrderID   string    `json:"order_id"`
-	ProductID string    `json:"product_id"`
-	Amount    float64   `json:"amount"`
-	Timestamp time.Time `json:"timestamp"`
-}
-
-// NotificationLog represents a logged notification
+// NotificationLog represents a logged notification. It is internal to the
+// module: the types other modules exchange with it live in the contract
+// sub-package.
 type NotificationLog struct {
 	NotificationID string
 	Channel        string // "service" or "event"
