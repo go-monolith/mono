@@ -19,6 +19,7 @@ type ServiceProviderModule interface { RegisterServices(ServiceContainer) error 
 type HealthCheckableModule interface { Health(ctx context.Context) HealthStatus }
 type EventEmitterModule interface { EmitEvents() []BaseEventDefinition }
 type EventConsumerModule interface { RegisterEventConsumers(EventRegistry) error }
+type ServiceConsumerModule interface { ConsumeServices() []BaseServiceDefinition }  // pkg/types
 ```
 
 {% hint style="info" %}
@@ -358,6 +359,29 @@ type EventConsumerModule interface {
 ```
 
 **When to implement:** When your module subscribes to events published by other modules.
+
+### ServiceConsumerModule
+
+```go
+// pkg/types (no root alias yet)
+type ServiceConsumerModule interface {
+    // ConsumeServices returns the contracts of the services this module calls.
+    ConsumeServices() []types.BaseServiceDefinition
+}
+```
+
+**When to implement:** When your module calls services of its dependencies through typed contracts (`helper.RequestReplyService`, `helper.QueueGroupService`, `helper.StreamConsumerService`). Return the `ToBase()` of each contract you call:
+
+```go
+func (m *OrderModule) ConsumeServices() []types.BaseServiceDefinition {
+    return []types.BaseServiceDefinition{
+        inventorycontract.CheckStock.ToBase(),
+        paymentcontract.Process.ToBase(),
+    }
+}
+```
+
+The framework validates the list when the module starts, after its dependency containers are set: each contract must name a module in `Dependencies()` (or a plugin), that module must have registered the service, and the registered service type must match. A mismatch fails the start (`ErrModuleStartFailed` wrapping `ErrMissingDependency`, `ErrServiceNotFound` or `ErrServiceContractMismatch`) instead of surfacing on the first call. The list is also part of the module's `ModuleBoundaryReport`. See the [Hexagonal Architecture Guide](../../architect/hexagonal-architecture.md).
 
 **Note:** This interface extends only `Module`, not `EventBusAwareModule`. The `EventRegistry` provides event discovery and registration without requiring direct EventBus access.
 
