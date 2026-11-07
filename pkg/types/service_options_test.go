@@ -184,3 +184,21 @@ func TestServiceOptions_PendingLimits(t *testing.T) {
 		}
 	})
 }
+
+// TestServiceOptions_PendingLimits_SingleDimension checks the single-dimension
+// cases: the dimension left at zero takes nats.go's default, never 0 (which
+// nats.go rejects).
+func TestServiceOptions_PendingLimits_SingleDimension(t *testing.T) {
+	msgs, bytes, apply := types.ServiceOptions{PendingBytes: 4096}.PendingLimits(false)
+	if !apply || msgs != nats.DefaultSubPendingMsgsLimit || bytes != 4096 {
+		t.Fatalf("bytes-only PendingLimits = %d/%d/%v, want %d/4096/true", msgs, bytes, apply, nats.DefaultSubPendingMsgsLimit)
+	}
+	msgs, bytes, apply = types.ServiceOptions{PendingMsgs: 1000}.PendingLimits(false)
+	if !apply || msgs != 1000 || bytes != nats.DefaultSubPendingBytesLimit {
+		t.Fatalf("msgs-only PendingLimits = %d/%d/%v, want 1000/%d/true", msgs, bytes, apply, nats.DefaultSubPendingBytesLimit)
+	}
+	msgs, bytes, apply = types.ServiceOptions{PendingBytes: -1}.PendingLimits(true)
+	if !apply || msgs != types.DefaultRequestReplyPendingMsgs || bytes != -1 {
+		t.Fatalf("request-reply PendingLimits = %d/%d/%v, want %d/-1/true", msgs, bytes, apply, types.DefaultRequestReplyPendingMsgs)
+	}
+}

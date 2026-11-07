@@ -730,3 +730,37 @@ func (s *drainDeliveringSubscription) NextMsg(time.Duration) (*types.Msg, error)
 func (s *drainDeliveringSubscription) NextMsgWithContext(context.Context) (*types.Msg, error) {
 	return nil, errors.New("not implemented")
 }
+
+// TestNewPool_PanicInJobIsLoggedAndPoolSurvives checks the last-resort panic
+// handler of a subscription pool: a panic in the job itself (not the handler)
+// is logged with the subscription identity and the pool keeps running jobs.
+func TestNewPool_PanicInJobIsLoggedAndPoolSurvives(t *testing.T) {
+	lm, logger, _ := newBareManager(t, newMockEventBus())
+	lm.mu.Lock()
+	lm.pools = nil // the first pool creates the map
+	lm.mu.Unlock()
+
+	pool := lm.newPool(types.ServiceOptions{MaxConcurrency: 1}, true, logger, "orders", "request-reply", "check", "check")
+	if err := pool.Submit(func() { panic("job bug") }, true); err != nil {
+		t.Fatalf("submit: %v", err)
+	}
+	done := make(chan struct{})
+	if err := pool.Submit(func() { close(done) }, true); err != nil {
+		t.Fatalf("submit second job: %v", err)
+	}
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the pool stopped running jobs after a panic")
+	}
+	if !logger.hasErrorContaining("Panic in worker pool job") || !logger.hasErrorContaining("check") || !logger.hasErrorContaining("job bug") {
+		t.Fatalf("expected the panic to be logged with the subscription identity, got %v", logger.entries)
+	}
+	lm.mu.Lock()
+	n := len(lm.pools["orders"])
+	lm.mu.Unlock()
+	if n != 1 {
+		t.Fatalf("pools recorded for orders = %d, want 1", n)
+	}
+	_ = pool.Close(context.Background())
+}

@@ -5,6 +5,7 @@ package integration_test
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -174,4 +175,115 @@ func TestSubscriptionStats_NilAfterStop(t *testing.T) {
 	if stats := fw.SubscriptionStats(); stats != nil {
 		t.Fatalf("stats after Stop = %v, want nil", stats)
 	}
+}
+
+// waitForLog waits until the log output contains every substring.
+func waitForLog(t *testing.T, logs *syncBuffer, timeout time.Duration, substrings ...string) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for {
+		out := logs.String()
+		missing := ""
+		for _, s := range substrings {
+			if !strings.Contains(out, s) {
+				missing = s
+				break
+			}
+		}
+		if missing == "" {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("log output never contained %q; output:\n%s", missing, out)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// newLoggingApp creates an in-process application whose JSON debug log is
+// captured in logs.
+func newLoggingApp(t *testing.T, logs *syncBuffer, opts ...mono.MonoFrameworkOption) mono.MonoApplication {
+	t.Helper()
+	opts = append([]mono.MonoFrameworkOption{
+		mono.WithNATSDontListen(),
+		mono.WithNATSInProcessConn(),
+		mono.WithLogOutput(logs),
+		mono.WithLogFormat(mono.LogFormatJSON),
+		mono.WithLogLevel(mono.LogLevelDebug),
+	}, opts...)
+	fw, err := mono.NewMonoApplication(opts...)
+	if err != nil {
+		t.Fatalf("Failed to create application: %v", err)
+	}
+	return fw
+}
+
+// TestNATSClientOptions_SlowConsumerIsLoggedWithServiceAndCounted forces a
+// slow consumer on a real service (issue #23): a serial queue group with a
+// one-message client buffer and a blocked handler. The framework logger must
+// report it with the module and service derived from the subject, and
+// SubscriptionStats must count the dropped messages.
+func TestNATSClientOptions_SlowConsumerIsLoggedWithServiceAndCounted(t *testing.T) {
+	logs := &syncBuffer{}
+	fw := newLoggingApp(t, logs)
+
+	gate := make(chan struct{})
+	defer close(gate)
+	module := &testModule{name: "slow"}
+	module.registerServicesFunc = func(container mono.ServiceContainer) error {
+		return container.RegisterQueueGroupService("jobs", mono.QGHP{
+			QueueGroup: "workers",
+			Handler:    func(context.Context, *mono.Msg) error { <-gate; return nil },
+			Options:    mono.ServiceOptions{MaxConcurrency: 1, MaxPending: 1, PendingMsgs: 1, PendingBytes: -1},
+		})
+	}
+	if err := fw.Register(module); err != nil {
+		t.Fatalf("Failed to register module: %v", err)
+	}
+	startWorkerPoolApp(t, fw)
+
+	// Optimistic sends (no reply subject) are never rejected: the callback
+	// blocks once the pool is full, the client buffer fills, and nats.go
+	// drops what does not fit in the one-message buffer.
+	for i := 0; i < 50; i++ {
+		if err := module.eventBus.Publish("services.slow.jobs", []byte("x")); err != nil {
+			t.Fatalf("publish %d: %v", i, err)
+		}
+	}
+	dropped := func() int {
+		for _, s := range fw.SubscriptionStats() {
+			if s.Module == "slow" && s.Name == "jobs" {
+				return s.Dropped
+			}
+		}
+		return 0
+	}
+	waitForCount(t, dropped, 1, 10*time.Second)
+	waitForLog(t, logs, 10*time.Second, "NATS slow consumer", `"module":"slow"`, `"service":"jobs"`, `"subject":"services.slow.jobs"`, `"dropped":`)
+}
+
+// TestSubscriptionStats_PeriodicLogEmitsOneLinePerSubscription checks the
+// optional Debug line of WithSubscriptionStatsLogInterval.
+func TestSubscriptionStats_PeriodicLogEmitsOneLinePerSubscription(t *testing.T) {
+	logs := &syncBuffer{}
+	fw := newLoggingApp(t, logs, mono.WithSubscriptionStatsLogInterval(20*time.Millisecond))
+	module := &testModule{name: "stats"}
+	module.registerServicesFunc = func(container mono.ServiceContainer) error {
+		return container.RegisterRequestReplyService("check", func(_ context.Context, req *mono.Msg) ([]byte, error) { return req.Data, nil })
+	}
+	if err := fw.Register(module); err != nil {
+		t.Fatalf("Failed to register module: %v", err)
+	}
+	startWorkerPoolApp(t, fw)
+
+	client, err := module.container.GetRequestReplyService("check")
+	if err != nil {
+		t.Fatalf("Failed to get client: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if _, err := client.Call(ctx, []byte("x")); err != nil {
+		t.Fatalf("Call: %v", err)
+	}
+	waitForLog(t, logs, 5*time.Second, `"msg":"Subscription stats"`, `"kind":"request_reply"`, `"module":"stats"`, `"name":"check"`, `"delivered":1`)
 }

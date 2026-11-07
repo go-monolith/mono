@@ -142,3 +142,17 @@ func TestRequestContext(t *testing.T) {
 		}
 	})
 }
+
+// TestOverloadReporter_ClockSkewWarningIsRateLimited checks that the clock
+// skew warning is logged at most once per interval per subscription.
+func TestOverloadReporter_ClockSkewWarningIsRateLimited(t *testing.T) {
+	logger := &mockLogger{}
+	r := newOverloadReporter(logger, "module", "orders", "service", "check")
+	msg := &types.Msg{Header: types.Header{types.HeaderDeadline: []string{"1"}, types.HeaderTimeout: []string{"2000"}}}
+	for i := 0; i < 5; i++ {
+		r.clockSkew(time.Now(), msg)
+	}
+	if got := logger.countEntries("skew allowance"); got != 1 {
+		t.Fatalf("skew warnings = %d, want 1 (rate limited), entries: %v", got, logger.entries)
+	}
+}

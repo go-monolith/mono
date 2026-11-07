@@ -158,7 +158,14 @@ func (p *Pool) Close(ctx context.Context) error {
 	p.mu.Lock()
 	p.closed = true
 	p.cond.Broadcast()
+	idle := p.active == 0 && len(p.pending) == 0
 	p.mu.Unlock()
+	// An idle pool has nothing to wait for. This is decided before the select
+	// below so that a context that is already done never reports an idle
+	// pool as still busy (with both channels ready, select picks at random).
+	if idle {
+		return nil
+	}
 
 	done := make(chan struct{})
 	go func() {
