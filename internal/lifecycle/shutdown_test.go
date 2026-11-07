@@ -285,3 +285,99 @@ func TestDrainBudget(t *testing.T) {
 		t.Fatalf("negative drain timeout should select the default, got %s", got)
 	}
 }
+
+// newBareManager returns an unstarted manager and its logger.
+func newBareManager(t *testing.T, eventBus types.EventBus) (*lifecycleManager, *mockLogger, registry.ModuleRegistry) {
+	t.Helper()
+	logger := &mockLogger{}
+	reg := registry.NewModuleRegistry(logger)
+	lm := NewLifecycleManager(reg, registry.NewPluginRegistry(logger), eventBus, registry.NewEventRegistry(logger), logger, 0)
+	return lm.(*lifecycleManager), logger, reg
+}
+
+// TestBeginHandler_StatesAfterShutdownAndWithoutRuntimeContext checks the two
+// branches of beginHandler that the happy path never takes: once the fetch
+// context is cancelled no handler is admitted, and without a runtime context
+// the handler gets a background context.
+func TestBeginHandler_StatesAfterShutdownAndWithoutRuntimeContext(t *testing.T) {
+	lm, _, _ := newBareManager(t, newMockEventBus())
+
+	lm.mu.Lock()
+	lm.runtimeCtx = nil
+	lm.mu.Unlock()
+	ctx, ok := lm.beginHandler()
+	if !ok || ctx == nil || ctx.Err() != nil {
+		t.Fatalf("beginHandler without runtime context = (%v, %v), want a live context", ctx, ok)
+	}
+	if lm.inFlightHandlers.Load() != 1 {
+		t.Fatalf("in-flight = %d, want 1", lm.inFlightHandlers.Load())
+	}
+	lm.endHandler()
+
+	lm.cancelFetch()
+	if ctx, ok := lm.beginHandler(); ok || ctx != nil {
+		t.Fatal("beginHandler must refuse a handler once the fetch context is cancelled")
+	}
+	if lm.inFlightHandlers.Load() != 0 {
+		t.Fatalf("a refused handler must not be counted, in-flight = %d", lm.inFlightHandlers.Load())
+	}
+}
+
+// TestResetSubscriptionState_KeepsInFlightCounterAndWarns checks that a
+// handler still running when a failed Start is cleaned up is not forgotten:
+// the counter is kept (its own endHandler will decrement it) and a warning
+// is logged.
+func TestResetSubscriptionState_KeepsInFlightCounterAndWarns(t *testing.T) {
+	lm, logger, _ := newBareManager(t, newMockEventBus())
+	lm.inFlightHandlers.Add(1)
+	lm.resetSubscriptionState()
+	if lm.inFlightHandlers.Load() != 1 {
+		t.Fatalf("in-flight = %d, want 1 (kept)", lm.inFlightHandlers.Load())
+	}
+	if !logger.hasWarnContaining("Fetch loop handlers still running after failed Start teardown") {
+		t.Fatalf("expected a warning, got %v", logger.entries)
+	}
+	if lm.fetchCtx == nil || lm.fetchCtx.Err() != nil {
+		t.Fatal("reset must leave a live fetch context for the retried Start")
+	}
+	lm.inFlightHandlers.Add(-1)
+}
+
+// TestStop_WithCancelledContextLogsDrainInterrupted checks the shutdown
+// summary when the caller's context is already done: nothing is left
+// undrained (the mock subscriptions drain at once), so the interruption is
+// what is reported.
+func TestStop_WithCancelledContextLogsDrainInterrupted(t *testing.T) {
+	eventBus := newMockEventBus()
+	lm, logger, reg := newBareManager(t, eventBus)
+	module := &mockModuleWithServices{
+		mockModule: mockModule{name: "orders"},
+		serviceEntries: []*types.ServiceEntry{{
+			Name: "check", Type: types.ServiceTypeRequestReply, Subject: "services.orders.check", QueueGroup: "check",
+			RequestHandler: func(_ context.Context, msg *types.Msg) ([]byte, error) { return msg.Data, nil },
+		}},
+	}
+	if err := reg.Register(module); err != nil {
+		t.Fatal(err)
+	}
+	if err := lm.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := lm.Stop(ctx); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	if !logger.hasWarnContaining("Drain interrupted by context cancellation") {
+		t.Fatalf("expected the interruption to be logged, got %v", logger.entries)
+	}
+	// The idle request-reply pool must not be counted as still busy just
+	// because the context was already done (Pool.Close used to pick at random
+	// between "done" and "context done" when both were ready).
+	if logger.hasWarnContaining("Shutdown drain incomplete") {
+		t.Fatalf("an idle pool was reported busy: %v", logger.entries)
+	}
+	if !module.stopCalled {
+		t.Fatal("modules must still be stopped after an interrupted drain")
+	}
+}

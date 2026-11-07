@@ -3,12 +3,14 @@ package lifecycle
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/go-monolith/mono/internal/registry"
 	"github.com/go-monolith/mono/internal/workerpool"
+	"github.com/go-monolith/mono/pkg/helper"
 	"github.com/go-monolith/mono/pkg/types"
 	"github.com/nats-io/nats.go"
 )
@@ -296,4 +298,99 @@ func TestStatsLog_DisabledByDefault(t *testing.T) {
 	lm.startStatsLog() // interval 0 and nil fetch context: must be a no-op
 	lm.SetStatsLogInterval(time.Hour)
 	lm.startStatsLog() // nil fetch context: still a no-op
+}
+
+// failingLimitSubscription is a subscription whose SetPendingLimits and
+// Unsubscribe both fail, so the cleanup path after a pending limit error is
+// exercised end to end.
+type failingLimitSubscription struct {
+	mockSubscription
+}
+
+func (s *failingLimitSubscription) SetPendingLimits(int, int) error {
+	return errors.New("limits refused")
+}
+
+func (s *failingLimitSubscription) Unsubscribe() error { return errors.New("already gone") }
+
+// failingLimitBus returns failingLimitSubscription for every subscription.
+type failingLimitBus struct {
+	*mockEventBus
+}
+
+func (b *failingLimitBus) Subscribe(subject string, handler types.MsgHandler) (types.Subscription, error) {
+	if _, err := b.mockEventBus.Subscribe(subject, handler); err != nil {
+		return nil, err
+	}
+	return &failingLimitSubscription{mockSubscription{subject: subject}}, nil
+}
+
+func (b *failingLimitBus) QueueSubscribe(subject, queue string, handler types.MsgHandler) (types.Subscription, error) {
+	if _, err := b.mockEventBus.QueueSubscribe(subject, queue, handler); err != nil {
+		return nil, err
+	}
+	return &failingLimitSubscription{mockSubscription{subject: subject}}, nil
+}
+
+// limitedEventConsumerModule registers one event consumer with pending limits.
+type limitedEventConsumerModule struct {
+	mockModule
+}
+
+var limitedEventDef = helper.EventDefinition[struct{}]("billing", "InvoiceIssued", "v1")
+
+func (m *limitedEventConsumerModule) RegisterEventConsumers(reg types.EventRegistry) error {
+	return reg.RegisterEventConsumerWithOptions(limitedEventDef.ToBase(), func(context.Context, *types.Msg) error { return nil }, m,
+		types.EventConsumerOptions{ServiceOptions: types.ServiceOptions{PendingMsgs: 5}})
+}
+
+// TestStart_PendingLimitErrorUnsubscribesAndWarnsWhenThatFailsToo checks,
+// for each subscription kind, that a failed SetPendingLimits fails Start, that
+// the framework tries to unsubscribe the live subscription, and that a failed
+// unsubscribe is logged rather than ignored.
+func TestStart_PendingLimitErrorUnsubscribesAndWarnsWhenThatFailsToo(t *testing.T) {
+	cases := []struct {
+		name   string
+		module types.Module
+	}{
+		{"request-reply", &mockModuleWithServices{
+			mockModule: mockModule{name: "orders"},
+			serviceEntries: []*types.ServiceEntry{{
+				Name: "check", Type: types.ServiceTypeRequestReply, Subject: "services.orders.check", QueueGroup: "check",
+				RequestHandler: func(_ context.Context, msg *types.Msg) ([]byte, error) { return msg.Data, nil },
+			}},
+		}},
+		{"queue-group", &mockModuleWithServices{
+			mockModule: mockModule{name: "orders"},
+			serviceEntries: []*types.ServiceEntry{{
+				Name: "jobs", Type: types.ServiceTypeQueueGroup, Subject: "services.orders.jobs",
+				QueueHandlers: []types.QGHP{{QueueGroup: "workers", Handler: func(context.Context, *types.Msg) error { return nil },
+					Options: types.ServiceOptions{PendingMsgs: 5}}},
+			}},
+		}},
+		{"event-consumer", &limitedEventConsumerModule{mockModule: mockModule{name: "billing"}}},
+	}
+	for _, tc := range cases {
+		module := tc.module
+		t.Run(tc.name, func(t *testing.T) {
+			bus := &failingLimitBus{mockEventBus: newMockEventBus()}
+			lm, logger, reg := newBareManager(t, bus)
+			if err := reg.Register(module); err != nil {
+				t.Fatal(err)
+			}
+			err := lm.Start(context.Background())
+			if err == nil || !strings.Contains(err.Error(), "limits refused") {
+				t.Fatalf("Start error = %v, want the pending limit error", err)
+			}
+			if !logger.hasWarnContaining("Failed to unsubscribe after pending limit error") || !logger.hasWarnContaining("already gone") {
+				t.Fatalf("expected the failed unsubscribe to be logged, got %v", logger.entries)
+			}
+			lm.mu.RLock()
+			leftover := len(lm.subscriptions)
+			lm.mu.RUnlock()
+			if leftover != 0 {
+				t.Fatalf("subscriptions left after failed Start = %d, want 0", leftover)
+			}
+		})
+	}
 }

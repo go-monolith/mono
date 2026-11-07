@@ -1011,6 +1011,7 @@ type mockLifecycleManager struct {
 	ctx             context.Context
 	cancelFunc      context.CancelFunc
 	stopHadDeadline bool // whether the context passed to Stop carried a deadline
+	stats           []types.SubscriptionStats
 }
 
 func newMockLifecycleManager() *mockLifecycleManager {
@@ -1064,7 +1065,7 @@ func (m *mockLifecycleManager) SetStatsLogInterval(_ time.Duration)      {}
 
 func (m *mockLifecycleManager) SetServiceDiscovery(_ *types.ServiceDiscoveryConfig) {}
 
-func (m *mockLifecycleManager) SubscriptionStats() []types.SubscriptionStats { return nil }
+func (m *mockLifecycleManager) SubscriptionStats() []types.SubscriptionStats { return m.stats }
 
 // TestStop_AppliesShutdownTimeoutWhenContextHasNoDeadline checks that Stop
 // bounds itself with the configured ShutdownTimeout when the caller passes a

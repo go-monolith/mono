@@ -260,3 +260,139 @@ func TestServiceDiscovery_InvalidModuleNameFailsSetup(t *testing.T) {
 		t.Fatalf("expected an error about the module name, got %v", err)
 	}
 }
+
+// discoverySubscribeFailBus lets the first control subject subscribe (with a
+// subscription whose Unsubscribe fails) and refuses the second.
+type discoverySubscribeFailBus struct {
+	*mockEventBus
+	controlSubjects int
+}
+
+type failingUnsubSubscription struct {
+	mockSubscription
+}
+
+func (s *failingUnsubSubscription) Unsubscribe() error { return errors.New("unsubscribe refused") }
+
+func (b *discoverySubscribeFailBus) Subscribe(subject string, handler types.MsgHandler) (types.Subscription, error) {
+	if !strings.HasPrefix(subject, "$SRV.") {
+		return b.mockEventBus.Subscribe(subject, handler)
+	}
+	b.mu.Lock()
+	b.controlSubjects++
+	n := b.controlSubjects
+	b.mu.Unlock()
+	if n == 2 {
+		return nil, errors.New("control subject refused")
+	}
+	return &failingUnsubSubscription{mockSubscription{subject: subject}}, nil
+}
+
+// TestStart_DiscoverySubscribeFailureFailsStartAndCleansUp checks that a
+// control subject the event bus refuses fails Start through the normal
+// teardown, that the control subjects already subscribed are unsubscribed
+// (a failing unsubscribe is logged), and that the module is rolled back.
+func TestStart_DiscoverySubscribeFailureFailsStartAndCleansUp(t *testing.T) {
+	bus := &discoverySubscribeFailBus{mockEventBus: newMockEventBus()}
+	lm, logger, reg := newBareManager(t, bus)
+	lm.SetServiceDiscovery(&types.ServiceDiscoveryConfig{})
+	module := &mockModuleWithServices{
+		mockModule: mockModule{name: "orders"},
+		serviceEntries: []*types.ServiceEntry{{
+			Name: "check", Type: types.ServiceTypeRequestReply, Subject: "services.orders.check", QueueGroup: "check",
+			RequestHandler: func(_ context.Context, msg *types.Msg) ([]byte, error) { return msg.Data, nil },
+		}},
+	}
+	if err := reg.Register(module); err != nil {
+		t.Fatal(err)
+	}
+	err := lm.Start(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "failed to set up service discovery") || !strings.Contains(err.Error(), "control subject refused") {
+		t.Fatalf("Start error = %v, want the discovery setup failure", err)
+	}
+	if !logger.hasWarnContaining("Failed to unsubscribe discovery responder") {
+		t.Fatalf("expected the failed unsubscribe of the first control subject to be logged, got %v", logger.entries)
+	}
+	if !module.stopCalled {
+		t.Fatal("the module must be rolled back after the failed subscription setup")
+	}
+	lm.mu.RLock()
+	leftover := len(lm.subscriptions)
+	lm.mu.RUnlock()
+	if leftover != 0 {
+		t.Fatalf("subscriptions left after failed Start = %d, want 0", leftover)
+	}
+}
+
+// TestDiscoveryRespond_FailuresAreLogged checks the two failure paths of a
+// control request: a response that cannot be encoded and a reply that cannot
+// be published.
+func TestDiscoveryRespond_FailuresAreLogged(t *testing.T) {
+	logger := &mockLogger{}
+	bus := newMockEventBus()
+	msg := &types.Msg{Subject: "$SRV.PING", Reply: "reply"}
+
+	discoveryRespond(bus, logger, msg, func() any { return make(chan int) })
+	if !logger.hasErrorContaining("Failed to encode service discovery response") {
+		t.Fatalf("expected the encode failure to be logged, got %v", logger.entries)
+	}
+	if len(bus.getPublishedMessages("reply")) != 0 {
+		t.Fatal("nothing must be published when encoding fails")
+	}
+
+	bus.setPublishError(errors.New("connection closed"))
+	discoveryRespond(bus, logger, msg, func() any { return micro.Ping{Type: micro.PingResponseType} })
+	if !logger.hasErrorContaining("Failed to publish service discovery response") || !logger.hasErrorContaining("connection closed") {
+		t.Fatalf("expected the publish failure to be logged, got %v", logger.entries)
+	}
+}
+
+// TestDiscoveryService_ControlSubjectValues checks that every control subject
+// of a service yields the response type the protocol expects, including the
+// PING and INFO closures.
+func TestDiscoveryService_ControlSubjectValues(t *testing.T) {
+	svc, err := newDiscoveryService("orders", types.ServiceDiscoveryConfig{Version: "1.2.3", Description: "orders API"},
+		[]*discoveryEndpoint{{name: "check", subject: "services.orders.check", queueGroup: "check"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	subjects, err := svc.controlSubjects()
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]string{
+		"$SRV.PING": micro.PingResponseType, "$SRV.PING.orders": micro.PingResponseType, "$SRV.PING.orders." + svc.identity.ID: micro.PingResponseType,
+		"$SRV.INFO": micro.InfoResponseType, "$SRV.INFO.orders": micro.InfoResponseType, "$SRV.INFO.orders." + svc.identity.ID: micro.InfoResponseType,
+		"$SRV.STATS": micro.StatsResponseType, "$SRV.STATS.orders": micro.StatsResponseType, "$SRV.STATS.orders." + svc.identity.ID: micro.StatsResponseType,
+	}
+	if len(subjects) != len(want) {
+		t.Fatalf("control subjects = %d, want %d", len(subjects), len(want))
+	}
+	for subject, wantType := range want {
+		value, ok := subjects[subject]
+		if !ok {
+			t.Fatalf("missing control subject %s", subject)
+		}
+		raw, err := json.Marshal(value())
+		if err != nil {
+			t.Fatalf("%s: %v", subject, err)
+		}
+		var head struct {
+			Type string `json:"type"`
+			Name string `json:"name"`
+			ID   string `json:"id"`
+		}
+		if err := json.Unmarshal(raw, &head); err != nil {
+			t.Fatalf("%s: %v", subject, err)
+		}
+		if head.Type != wantType || head.Name != "orders" || head.ID != svc.identity.ID {
+			t.Fatalf("%s -> %+v, want type %s", subject, head, wantType)
+		}
+	}
+	// INFO carries the description and the endpoint; PING does not.
+	var info micro.Info
+	raw, _ := json.Marshal(subjects["$SRV.INFO.orders"]())
+	if err := json.Unmarshal(raw, &info); err != nil || info.Description != "orders API" || len(info.Endpoints) != 1 || info.Endpoints[0].Subject != "services.orders.check" {
+		t.Fatalf("info = %+v (%v)", info, err)
+	}
+}

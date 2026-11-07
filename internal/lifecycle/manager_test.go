@@ -5182,3 +5182,16 @@ func TestRunCronConsumerLoop_NaksInFlightOnCancel(t *testing.T) {
 		t.Fatalf("expected in-flight message Nak'd once on cancel, got %d", got)
 	}
 }
+
+// countEntries returns how many log entries contain substr.
+func (m *mockLogger) countEntries(substr string) int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	n := 0
+	for _, e := range m.entries {
+		if strings.Contains(e, substr) {
+			n++
+		}
+	}
+	return n
+}
