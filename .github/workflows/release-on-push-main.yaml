@@ -12,6 +12,15 @@ on:
 permissions:
   contents: write
 
+# Release runs take over an hour (tests and benchmarks). Two pushes to main in
+# that window used to run in parallel, both computed the same next tag from
+# the tags present at checkout, and the second push of that tag was rejected
+# ("already exists"), leaving the later commit unreleased. Serialize the runs
+# instead; a queued run for an older commit is superseded by a newer one.
+concurrency:
+  group: release-on-push-main
+  cancel-in-progress: false
+
 jobs:
   release:
     runs-on: ubuntu-latest
@@ -201,6 +210,24 @@ jobs:
       - name: Calculate next version
         id: version
         run: |
+          # The checkout happened over an hour ago; a release run for an
+          # earlier commit may have pushed a tag since. Compute from the
+          # remote's tags, not the ones fetched at checkout.
+          git fetch --tags --force origin
+
+          # A commit already tagged (for example a manual minor bump pushed
+          # for this commit, or a previous run that tagged and then failed to
+          # create the release) needs no new tag; the release step below
+          # still runs if that tag has no release yet.
+          EXISTING=$(git tag -l 'v[0-9]*.[0-9]*.[0-9]*' --points-at HEAD | head -n1)
+          if [ -n "$EXISTING" ]; then
+            echo "HEAD is already tagged $EXISTING"
+            echo "new_tag=$EXISTING" >> "$GITHUB_OUTPUT"
+            echo "existing=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "existing=false" >> "$GITHUB_OUTPUT"
+
           # Get latest semver tag (vX.Y.Z format only), default to v0.0.0 if none exists
           LATEST_TAG=$(git tag -l 'v[0-9]*.[0-9]*.[0-9]*' --sort=-v:refname | head -n1)
           if [ -z "$LATEST_TAG" ]; then
@@ -228,11 +255,26 @@ jobs:
 
       - name: Create and push tag
         id: create_tag
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           NEW_TAG="${{ steps.version.outputs.new_tag }}"
 
-          # Check if tag already exists
-          if git rev-parse "$NEW_TAG" >/dev/null 2>&1; then
+          # HEAD was tagged already: create the release only if it is missing
+          # (a previous run may have pushed the tag and failed right after).
+          if [ "${{ steps.version.outputs.existing }}" = "true" ]; then
+            if gh release view "$NEW_TAG" >/dev/null 2>&1; then
+              echo "Tag $NEW_TAG is already released, skipping"
+              echo "created=false" >> "$GITHUB_OUTPUT"
+            else
+              echo "Tag $NEW_TAG has no release yet, creating it"
+              echo "created=true" >> "$GITHUB_OUTPUT"
+            fi
+            exit 0
+          fi
+
+          # Check if tag already exists, locally or on the remote
+          if git rev-parse "$NEW_TAG" >/dev/null 2>&1 || [ -n "$(git ls-remote --tags origin "refs/tags/$NEW_TAG")" ]; then
             echo "Tag $NEW_TAG already exists, skipping creation"
             echo "created=false" >> "$GITHUB_OUTPUT"
             exit 0
