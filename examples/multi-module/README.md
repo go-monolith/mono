@@ -179,6 +179,14 @@ Orchestrates order placement by:
 3. Sending notification (QueueGroup, fire-and-forget)
 4. Publishing event (EventBus, broadcast)
 
+## Tests
+
+Each module has a conformance test built on `monotest.CheckModule` (`inventory/module_test.go`, `payment/module_test.go`, `notification/module_test.go`, `order/module_test.go`). The order test stands in for its three dependencies with `monotest.NewContainer` and the providers' contracts, then exercises `PlaceOrder`; a module that registered on a dependency's container, bypassed a port with a raw request, or never used a declared dependency would fail it.
+
+```bash
+go test ./examples/multi-module/...
+```
+
 ## Running the Example
 
 ```bash

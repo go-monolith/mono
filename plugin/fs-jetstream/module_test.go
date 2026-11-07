@@ -11,55 +11,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-monolith/mono/monotest"
 	"github.com/go-monolith/mono/pkg/storage"
 	"github.com/go-monolith/mono/pkg/types"
 	"github.com/nats-io/nats.go/jetstream"
 )
-
-// mockServiceContainer implements types.ServiceContainer for testing
-type mockServiceContainer struct {
-	bound bool
-}
-
-func (m *mockServiceContainer) BindModule(_ types.Module) error                  { m.bound = true; return nil }
-func (m *mockServiceContainer) SetEventBus(_ types.EventBus)                     {}
-func (m *mockServiceContainer) SetQueueGroupOptimisticWindow(_ time.Duration)    {}
-func (m *mockServiceContainer) SetMiddlewareChain(_ types.MiddlewareChainRunner) {}
-func (m *mockServiceContainer) RegisterChannelService(_ string, _ chan *types.Msg, _ chan *types.Msg) error {
-	return nil
-}
-func (m *mockServiceContainer) RegisterRequestReplyService(_ string, _ types.RequestReplyHandler, _ ...types.ServiceOption) error {
-	return nil
-}
-func (m *mockServiceContainer) RegisterQueueGroupService(_ string, _ ...types.QGHP) error { return nil }
-func (m *mockServiceContainer) RegisterStreamConsumerService(_ string, _ types.StreamConsumerConfig, _ types.StreamConsumerHandler) error {
-	return nil
-}
-func (m *mockServiceContainer) RegisterCronService(_ string, _ types.CronServiceConfig, _ types.CronHandler) error {
-	return nil
-}
-func (m *mockServiceContainer) GetChannelService(_, _ string) (chan *types.Msg, chan *types.Msg, error) {
-	return nil, nil, nil
-}
-func (m *mockServiceContainer) MustGetChannelService(_, _ string) (chan *types.Msg, chan *types.Msg) {
-	return nil, nil
-}
-func (m *mockServiceContainer) GetRequestReplyService(_ string) (types.RequestReplyServiceClient, error) {
-	return nil, nil
-}
-func (m *mockServiceContainer) GetQueueGroupService(_ string) (types.QueueGroupServiceClient, error) {
-	return nil, nil
-}
-func (m *mockServiceContainer) GetStreamConsumerService(_ string) (types.StreamConsumerServiceClient, error) {
-	return nil, nil
-}
-func (m *mockServiceContainer) Has(_ string) bool                     { return false }
-func (m *mockServiceContainer) Unregister(_ string) error             { return nil }
-func (m *mockServiceContainer) Entries() []*types.ServiceEntry        { return nil }
-func (m *mockServiceContainer) StartChannelRouters(_ context.Context) {}
-
-// Ensure mockServiceContainer implements types.ServiceContainer
-var _ types.ServiceContainer = (*mockServiceContainer)(nil)
 
 // objectMetadata stores metadata for an object.
 type objectMetadata struct {
@@ -444,7 +400,7 @@ func TestModule_ContainerInjection(t *testing.T) {
 	}
 
 	// SetContainer should store the container
-	var container types.ServiceContainer = &mockServiceContainer{}
+	var container types.ServiceContainer = monotest.NewContainer("fs-jetstream", monotest.NewEventBus())
 	module.SetContainer(container)
 
 	if module.Container() == nil {

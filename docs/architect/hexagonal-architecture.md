@@ -364,9 +364,9 @@ for _, r := range app.ModuleBoundaries() {
 
 With `mono.WithStrictModuleBoundaries()` a crossing fails instead with `ErrModuleBoundaryViolation`. The intended path: run non-strict, read the report, fix the modules, then turn strict on, and keep it on in tests.
 
-### Planned
+### In tests: `monotest.CheckModule`
 
-- **`monotest` harness**: an in-memory event bus and container, a `Harness` that runs the documented lifecycle order without NATS through the same views and scoped bus, and `CheckModule(t, m)` conformance assertions.
+The `monotest` package runs a module without NATS through the same lifecycle order, dependency views and scoped bus as the framework, and `CheckModule` turns the rules above into one test per module. See "Testing Hexagonal Architecture" below.
 
 ## Best Practices
 
@@ -459,7 +459,55 @@ func (m *InventoryModule) checkStock(ctx context.Context, req contract.CheckStoc
 
 ## Testing Hexagonal Architecture
 
-One of the primary benefits of hexagonal architecture is improved testability.
+One of the primary benefits of hexagonal architecture is improved testability. The `monotest` package (`github.com/go-monolith/mono/monotest`) runs a module without NATS: an in-memory event bus, the real service container bound to the module with its handlers dispatched, stand-in containers for dependencies, and the framework's own dependency views and scoped bus, so a test sees exactly what production would.
+
+### Conformance Test (one per module)
+
+```go
+func TestOrderModuleConformance(t *testing.T) {
+    bus := monotest.NewEventBus()
+    inventory := monotest.NewContainer("inventory", bus)
+    // Register the dependency's services through its own contract...
+    err := inventorycontract.CheckStock.Register(inventory, func(_ context.Context, req inventorycontract.CheckStockRequest, _ *mono.Msg) (inventorycontract.CheckStockResponse, error) {
+        return inventorycontract.CheckStockResponse{Available: true, Stock: 5}, nil
+    })
+    if err != nil {
+        t.Fatal(err)
+    }
+    // ...or with a JSON stub when the contract is not at hand.
+    payment := monotest.NewContainer("payment", bus)
+    err = monotest.StubRequestReply(payment, "process", func(_ context.Context, req paymentcontract.ProcessPaymentRequest) (paymentcontract.ProcessPaymentResponse, error) {
+        return paymentcontract.ProcessPaymentResponse{Success: true}, nil
+    })
+    if err != nil {
+        t.Fatal(err)
+    }
+
+    monotest.CheckModule(t, order.NewModule(),
+        monotest.WithDependency("inventory", inventory),
+        monotest.WithDependency("payment", payment),
+        monotest.WithExercise(func(ctx context.Context, h *monotest.Harness) error {
+            _, err := contract.PlaceOrder.Call(ctx, h.Container(), contract.CreateOrderRequest{ProductID: "laptop", Quantity: 1, Amount: 10})
+            return err
+        }))
+}
+```
+
+`CheckModule` reports, each as its own failure: a non-kebab-case name; a self or duplicate dependency, or one without a stand-in container; a provider that registers nothing or an invalid subject; a consumed contract the stand-in does not provide with the same type; every boundary violation (with a hint on how to fix it); a declared dependency that was never looked up (use `WithOrderingOnlyDependency` for start-ordering dependencies); an emitted event with an invalid subject or an `events.*` subject the module published that is missing from `EmitEvents()`; and `Start`/`Stop` failures or a `Stop` that exceeds its timeout (`Stop` receives a context with that deadline, as in the framework). The harness dispatches services only after `Start`, as the framework does, so a module that calls a dependency from `Start` fails here as it would in production; a consumer that looks events up through the registry gets them with `WithEmittedEvents`.
+
+### Driving a Module in a Test
+
+```go
+h := monotest.New(t, order.NewModule(), monotest.WithDependency("inventory", inventory), monotest.WithDependency("payment", payment))
+if err := h.Start(ctx); err != nil { t.Fatal(err) }
+defer h.Stop(ctx)
+
+resp := monotest.Call[contract.CreateOrderRequest, contract.CreateOrderResponse](t, h, "place-order", contract.CreateOrderRequest{ProductID: "laptop", Quantity: 1, Amount: 10})
+if inventory.Calls("check-stock") != 1 { t.Error("inventory not consulted") }
+report := h.Report() // the module's types.ModuleBoundaryReport
+```
+
+Events published by the module appear on `h.EventBus()`; events the module consumes can be published there with their definition's `Publish`. JetStream (stream consumer, event stream consumer, cron) is not emulated: use an integration test with the embedded server for those.
 
 ### Unit Testing Domain Logic
 
