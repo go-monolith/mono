@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -1214,4 +1215,55 @@ func TestGetRemoteError(t *testing.T) {
 			t.Error("expected nil RemoteError for nil")
 		}
 	})
+}
+
+func TestWrapServiceContractMismatch(t *testing.T) {
+	def := types.BaseServiceDefinition{ModuleName: "inventory", Name: "check-stock", Type: types.ServiceTypeQueueGroup}
+	err := pkgerrors.WrapServiceContractMismatch(def, "inventory", types.ServiceTypeRequestReply)
+
+	if !errors.Is(err, pkgerrors.ErrServiceContractMismatch) {
+		t.Fatalf("expected pkgerrors.ErrServiceContractMismatch, got %v", err)
+	}
+	var se *pkgerrors.ServiceError
+	if !errors.As(err, &se) {
+		t.Fatalf("expected *pkgerrors.ServiceError, got %T", err)
+	}
+	if se.ServiceName != "check-stock" || se.ModuleName != "inventory" || se.ServiceType != types.ServiceTypeRequestReply {
+		t.Errorf("unexpected fields: %+v", se)
+	}
+	msg := err.Error()
+	for _, want := range []string{"service contract mismatch", "inventory/check-stock (queue_group)", "request_reply"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("message %q lacks %q", msg, want)
+		}
+	}
+}
+
+func TestWrapModuleBoundaryViolation(t *testing.T) {
+	err := pkgerrors.WrapModuleBoundaryViolation("order", types.BoundaryViolationUndeclaredServiceSubject, "payment", "services.payment.charge")
+	if !errors.Is(err, pkgerrors.ErrModuleBoundaryViolation) {
+		t.Fatalf("expected pkgerrors.ErrModuleBoundaryViolation, got %v", err)
+	}
+	var me *pkgerrors.ModuleError
+	if !errors.As(err, &me) || me.ModuleName != "order" {
+		t.Fatalf("expected *pkgerrors.ModuleError for module order, got %v", err)
+	}
+	msg := err.Error()
+	for _, want := range []string{"undeclared-service-subject", "payment", "services.payment.charge"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("message %q lacks %q", msg, want)
+		}
+	}
+	plain := pkgerrors.WrapModuleBoundaryViolation("order", types.BoundaryViolationRegisterOnDependency, "payment", "")
+	if strings.Contains(plain.Error(), "subject") {
+		t.Errorf("no subject expected in %q", plain.Error())
+	}
+}
+
+func TestWrapModuleStartFailedKeepsCause(t *testing.T) {
+	cause := pkgerrors.ErrMissingDependency
+	err := pkgerrors.WrapModuleStartFailed("order", fmt.Errorf("wrapped: %w", cause))
+	if !errors.Is(err, pkgerrors.ErrModuleStartFailed) || !errors.Is(err, cause) {
+		t.Fatalf("expected both pkgerrors.ErrModuleStartFailed and the cause to be inspectable, got %v", err)
+	}
 }

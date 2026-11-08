@@ -154,6 +154,35 @@ type ServiceProviderModule interface {
 	RegisterServices(container ServiceContainer) error
 }
 
+// ServiceConsumerModule declares the services a module calls on other modules.
+//
+// Each entry is the contract of a service provided by one of the module's
+// dependencies (or by a registered plugin), typically the ToBase() of a typed
+// definition imported from the provider's contract package. The framework
+// validates the list when the module starts, after its dependency containers
+// have been set and before RegisterServices: every contract must name a module
+// listed in Dependencies() (or a plugin), that module must have registered the
+// service, and the registered service must be of the contract's type. A
+// mismatch fails the start of the module (fail fast) instead of surfacing as a
+// "service not found" error on the first call at runtime.
+//
+// The declaration is also reported in the module's ModuleBoundaryReport, next
+// to the services the module was observed to use, so an undeclared use stands
+// out.
+//
+// Example:
+//
+//	func (m *OrderModule) ConsumeServices() []types.BaseServiceDefinition {
+//	    return []types.BaseServiceDefinition{
+//	        inventorycontract.CheckStock.ToBase(),
+//	        paymentcontract.Process.ToBase(),
+//	    }
+//	}
+type ServiceConsumerModule interface {
+	// ConsumeServices returns the contracts of the services this module calls.
+	ConsumeServices() []BaseServiceDefinition
+}
+
 // EventBusAwareModule receives an EventBus instance during framework initialization
 //
 // Modules implementing this interface gain access to the EventBus for low-level

@@ -203,9 +203,15 @@ type ServiceEntry struct {
 	CronConfig            *CronServiceConfig    // For Cron type
 	CronHandler           CronHandler           // For Cron type
 	ScheduleSubject       string                // For Cron type: internal schedule subject
-	ModuleName            string
-	Subject               string
-	Created               time.Time
+	// Contract is the service contract the provider registered this service
+	// with (see BaseServiceDefinition and helper.RequestReplyDefinition);
+	// nil for a service registered without one. It is set through
+	// ContractRegistrar after registration, so middleware that rebuilds the
+	// ServiceRegistration cannot drop it.
+	Contract   *BaseServiceDefinition
+	ModuleName string
+	Subject    string
+	Created    time.Time
 }
 
 // ServiceType identifies the type of service.

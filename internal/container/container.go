@@ -135,6 +135,33 @@ func (c *serviceContainer) Entries() []*types.ServiceEntry {
 	return entries
 }
 
+// RegisterContract implements types.ContractRegistrar: it records def on the
+// entry of the already registered service def.Name. The contract must name the
+// module this container is bound to and the type the service was registered
+// with; otherwise ErrServiceContractMismatch is returned and nothing is
+// recorded. Registering the same contract twice is a no-op.
+func (c *serviceContainer) RegisterContract(def types.BaseServiceDefinition) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.boundModule == nil {
+		return monoerrors.ErrContainerNotBound
+	}
+	entry, exists := c.services[def.Name]
+	if !exists {
+		return &monoerrors.ServiceError{
+			ServiceName: def.Name, ModuleName: c.boundModule.Name(), ServiceType: def.Type,
+			Err: monoerrors.ErrServiceNotFound,
+		}
+	}
+	if def.ModuleName != entry.ModuleName || def.Type != entry.Type {
+		return monoerrors.WrapServiceContractMismatch(def, entry.ModuleName, entry.Type)
+	}
+	contract := def
+	entry.Contract = &contract
+	return nil
+}
+
 // validateServiceName validates that a service name is kebab-case.
 func validateServiceName(name string) error {
 	if name == "" {
@@ -174,7 +201,7 @@ func (c *serviceContainer) computeServiceSubject(serviceName string) (string, er
 		return "", monoerrors.ErrContainerNotBound
 	}
 
-	subject := fmt.Sprintf("services.%s.%s", c.boundModule.Name(), serviceName)
+	subject := types.ServiceSubject(c.boundModule.Name(), serviceName)
 
 	// Validate the computed subject
 	if err := monoerrors.ValidateServiceSubject(subject); err != nil {

@@ -1,16 +1,16 @@
 // Package payment implements a payment processing module for handling payment transactions
-// with simulated success rates for demonstration purposes.
+// with simulated success rates for demonstration purposes. Its port is the
+// contract sub-package.
 package payment
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"math/rand"
 	"time"
 
 	"github.com/go-monolith/mono"
-	"github.com/go-monolith/mono/pkg/helper"
+	"github.com/go-monolith/mono/examples/multi-module/payment/contract"
 )
 
 // NAME is the unique identifier for the payment module.
@@ -49,66 +49,47 @@ func (m *PaymentModule) Stop(_ context.Context) error {
 	return nil
 }
 
-// RegisterServices registers the process payment service using type-safe helper
+// RegisterServices binds the domain handler to the process contract.
 func (m *PaymentModule) RegisterServices(container mono.ServiceContainer) error {
-	// Register the process request-reply service using typed helper
-	// This automatically handles JSON unmarshaling of requests and marshaling of responses
-	return helper.RegisterTypedRequestReplyService(
-		container,
-		"process",
-		json.Unmarshal,
-		json.Marshal,
-		m.process,
-	)
+	return contract.Process.Register(container, m.process)
 }
 
 // process handles payment processing requests with typed request/response
-func (m *PaymentModule) process(_ context.Context, request ProcessPaymentRequest, _ *mono.Msg) (ProcessPaymentResponse, error) {
-	// Validate request
+func (m *PaymentModule) process(_ context.Context, request contract.ProcessPaymentRequest, _ *mono.Msg) (contract.ProcessPaymentResponse, error) {
 	if request.OrderID == "" {
-		return ProcessPaymentResponse{}, fmt.Errorf("order_id is required")
+		return contract.ProcessPaymentResponse{}, fmt.Errorf("order_id is required")
 	}
 	if request.Amount <= 0 {
-		return ProcessPaymentResponse{}, fmt.Errorf("amount must be positive")
+		return contract.ProcessPaymentResponse{}, fmt.Errorf("amount must be positive")
 	}
 	if request.Currency == "" {
 		request.Currency = "USD" // Default currency
 	}
 
-	// Supported currencies
-	validCurrencies := map[string]bool{
-		"USD": true,
-		"EUR": true,
-		"GBP": true,
-	}
+	validCurrencies := map[string]bool{"USD": true, "EUR": true, "GBP": true}
 	if !validCurrencies[request.Currency] {
-		return ProcessPaymentResponse{}, fmt.Errorf("unsupported currency: %s", request.Currency)
+		return contract.ProcessPaymentResponse{}, fmt.Errorf("unsupported currency: %s", request.Currency)
 	}
 
 	// Simulate payment processing with artificial delay
 	time.Sleep(50 * time.Millisecond)
 
 	// Simulate 90% success rate (for demonstration)
-	success := m.rand.Float64() < 0.9
-
-	var response ProcessPaymentResponse
-	if success {
-		response = ProcessPaymentResponse{
+	if m.rand.Float64() < 0.9 {
+		response := contract.ProcessPaymentResponse{
 			Success:       true,
 			TransactionID: fmt.Sprintf("txn_%d", time.Now().Unix()),
 			Message:       "Payment processed successfully",
 		}
 		fmt.Printf("  → Payment: process(order=%s, amount=%.2f %s) → SUCCESS, txn=%s\n",
 			request.OrderID, request.Amount, request.Currency, response.TransactionID)
-	} else {
-		response = ProcessPaymentResponse{
-			Success:       false,
-			TransactionID: "",
-			Message:       "Payment declined by gateway",
-		}
-		fmt.Printf("  → Payment: process(order=%s, amount=%.2f %s) → DECLINED\n",
-			request.OrderID, request.Amount, request.Currency)
+		return response, nil
 	}
 
-	return response, nil
+	fmt.Printf("  → Payment: process(order=%s, amount=%.2f %s) → DECLINED\n",
+		request.OrderID, request.Amount, request.Currency)
+	return contract.ProcessPaymentResponse{
+		Success: false,
+		Message: "Payment declined by gateway",
+	}, nil
 }

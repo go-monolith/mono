@@ -67,6 +67,23 @@ var (
 
 	// ErrPluginAlreadyRegistered is returned when attempting to register a duplicate plugin alias
 	ErrPluginAlreadyRegistered = errors.New("plugin already registered")
+
+	// ErrServiceContractMismatch is returned when a service contract
+	// (types.BaseServiceDefinition) does not match the service it refers to:
+	// the contract names a different module than the container it is
+	// registered on, or a different service type than the one registered or
+	// consumed. It is reported at registration or at module start, never on
+	// the first call.
+	ErrServiceContractMismatch = errors.New("service contract mismatch")
+
+	// ErrModuleBoundaryViolation is returned, when strict module boundaries
+	// are enabled (WithStrictModuleBoundaries), by an operation that crosses a
+	// boundary the module did not declare: registering on or otherwise
+	// mutating a dependency's ServiceContainer, or publishing to, requesting
+	// or subscribing to the service subject of a module that is not a declared
+	// dependency. Without strict mode the operation goes through and is
+	// recorded in the module's ModuleBoundaryReport instead.
+	ErrModuleBoundaryViolation = errors.New("module boundary violation")
 )
 
 // ModuleError wraps errors with module context.
@@ -288,7 +305,7 @@ func WrapModuleStartFailed(moduleName string, err error) error {
 	return &ModuleError{
 		ModuleName: moduleName,
 		Operation:  "start",
-		Err:        fmt.Errorf("%w: %v", ErrModuleStartFailed, err),
+		Err:        fmt.Errorf("%w: %w", ErrModuleStartFailed, err),
 	}
 }
 
@@ -335,7 +352,7 @@ func WrapPluginStartFailed(alias string, err error) error {
 	return &ModuleError{
 		ModuleName: alias,
 		Operation:  "start",
-		Err:        fmt.Errorf("%w: %v", ErrModuleStartFailed, err),
+		Err:        fmt.Errorf("%w: %w", ErrModuleStartFailed, err),
 	}
 }
 
@@ -629,4 +646,28 @@ func FormatFrameworkState(state types.MonoFrameworkState) string {
 	default:
 		return fmt.Sprintf("Unknown(%d)", state)
 	}
+}
+
+// WrapServiceContractMismatch wraps ErrServiceContractMismatch with the contract
+// and the service it was compared with. moduleName and serviceType describe the
+// actual service; def is the contract that disagrees with it.
+func WrapServiceContractMismatch(def types.BaseServiceDefinition, moduleName string, serviceType types.ServiceType) error {
+	return &ServiceError{
+		ServiceName: def.Name,
+		ModuleName:  moduleName,
+		ServiceType: serviceType,
+		Err: fmt.Errorf("%w: contract declares %s but the service is %s in module '%s'",
+			ErrServiceContractMismatch, def.String(), types.FormatServiceType(serviceType), moduleName),
+	}
+}
+
+// WrapModuleBoundaryViolation wraps ErrModuleBoundaryViolation with the module
+// that crossed the boundary, the kind of crossing, the module whose boundary
+// was crossed and, for bus operations, the subject.
+func WrapModuleBoundaryViolation(module string, kind types.BoundaryViolationKind, dependency, subject string) error {
+	err := fmt.Errorf("%w: %s on module '%s'", ErrModuleBoundaryViolation, kind, dependency)
+	if subject != "" {
+		err = fmt.Errorf("%w (subject %q)", err, subject)
+	}
+	return &ModuleError{ModuleName: module, Operation: string(kind), Err: err}
 }

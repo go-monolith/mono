@@ -162,7 +162,10 @@ Returns the `EventBus` for a specific module.
 ```go
 func (app MonoApplication) Health(ctx context.Context) FrameworkHealth
 func (app MonoApplication) SubscriptionStats() []SubscriptionStats
+func (app MonoApplication) ModuleBoundaries() []ModuleBoundaryReport
 ```
+
+`ModuleBoundaries` returns one report per started module, sorted by name: `Declared` (its `Dependencies()`), `Consumed` (its `ConsumeServices()` contracts), `Observed` (the dependency services it looked up, with counts), `UnusedDependencies` (declared but never looked up) and `Violations` (boundary crossings: `register-on-dependency`, `channel-consumer-mismatch`, `undeclared-service-subject`, `foreign-service-subscription`, each with a count and the time first seen). It returns nil unless the application is running. The same summary is logged at `Stop`. With `WithStrictModuleBoundaries` the crossings fail instead of being recorded.
 
 `SubscriptionStats` returns one snapshot per framework-managed NATS subscription (request-reply service, queue group, event consumer; JetStream-based stream, event stream and cron consumers are not included): identity (`Kind`, `Module`, `Name`, `Subject`, `QueueGroup`), the NATS client buffer (`PendingMsgs`, `PendingBytes`, `Dropped`, `Delivered`), the worker pool (`PoolActive`, `PoolQueued`, `MaxConcurrency`, `MaxPending`) and the framework's counters (`Rejected`, `Expired`, `DroppedAtShutdown`). It returns nil unless the application is running. Export it as metrics, or enable `WithSubscriptionStatsLogInterval` for a periodic Debug log.
 
@@ -632,6 +635,19 @@ nats micro ls
 nats micro info orders
 nats micro stats orders
 ```
+
+#### WithStrictModuleBoundaries
+
+```go
+func WithStrictModuleBoundaries() MonoFrameworkOption
+```
+
+Makes a module boundary violation fail with `ErrModuleBoundaryViolation` instead of being recorded: a mutating call on a dependency's `ServiceContainer` (only lookups are allowed), a channel service requested under another module's name, or a publish, request or subscription on the `services.<module>.<service>` subject of a module that is not itself, a declared dependency or a plugin. Off by default: the call then goes through, is warned once, and appears in `ModuleBoundaries()`. Turn it on once the report is clean, and in tests.
+
+| Property | Value |
+|----------|-------|
+| Type | none (flag) |
+| Default | off (record and warn) |
 
 #### WithSubscriptionStatsLogInterval
 

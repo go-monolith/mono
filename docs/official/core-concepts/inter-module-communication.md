@@ -38,6 +38,25 @@ Service communication creates a **direct dependency** between modules. Use these
 | **Stream Consumer** | ~1ms | JetStream | Durable message processing | No |
 | **Cron** | scheduled | JetStream | Periodic / scheduled work | No |
 
+### Typed Service Contracts
+
+A contract declares a service once, in the provider's `contract` sub-package, with its request and response types; the provider registers through it and consumers call through it, so the service name, kind and serialization live in one place and consumers never import the provider's module package:
+
+```go
+// inventory/contract/contract.go
+var CheckStock = helper.RequestReplyService[CheckStockRequest, CheckStockResponse]("inventory", "check-stock")
+
+// inventory/module.go (provider)
+func (m *InventoryModule) RegisterServices(c mono.ServiceContainer) error {
+    return contract.CheckStock.Register(c, m.checkStock) // typed handler, JSON by default
+}
+
+// order/adapter.go (consumer, with the container received in SetDependencyServiceContainer)
+resp, err := inventorycontract.CheckStock.Call(ctx, m.inventory, inventorycontract.CheckStockRequest{ProductID: id, Quantity: 1})
+```
+
+`helper.QueueGroupService[T]` (`Register`/`Send`) and `helper.StreamConsumerService[T]` (`Register`/`Publish`) follow the same shape; `WithMarshaler`/`WithUnmarshaler` change the codec. Declare what a module calls with `ConsumeServices()` (see [ServiceConsumerModule](../api/module.md#serviceconsumermodule)) and the framework checks it at startup. The [Hexagonal Architecture Guide](../../architect/hexagonal-architecture.md) covers the full contract/ports/adapters layout, the runtime boundary report and the `monotest` harness.
+
 ### Declaring Service Dependencies
 
 When Module B uses a service from Module A, Module B must:

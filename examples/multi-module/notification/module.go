@@ -1,18 +1,20 @@
 // Package notification implements a notification module for sending notifications
 // via queue groups and event subscriptions.
 // It demonstrates the EventConsumerModule pattern for consuming events
-// using RegisterTypedEventConsumer for type-safe event handling.
+// using RegisterTypedEventConsumer for type-safe event handling. Its port is the
+// contract sub-package; the event it consumes is imported from the order
+// module's contract package.
 package notification
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"sync"
 	"time"
 
 	"github.com/go-monolith/mono"
-	"github.com/go-monolith/mono/examples/multi-module/events"
+	"github.com/go-monolith/mono/examples/multi-module/notification/contract"
+	ordercontract "github.com/go-monolith/mono/examples/multi-module/order/contract"
 	"github.com/go-monolith/mono/pkg/helper"
 	"github.com/go-monolith/mono/pkg/types"
 )
@@ -63,35 +65,27 @@ func (m *NotificationModule) Stop(_ context.Context) error {
 // RegisterEventConsumers registers event consumers for this module.
 // Called by the framework after RegisterServices but before Start.
 func (m *NotificationModule) RegisterEventConsumers(registry mono.EventRegistry) error {
-	// Use type-safe RegisterTypedEventConsumer with direct import of events.OrderCreatedV1.
-	// This provides automatic unmarshaling and compile-time type safety.
-	if err := helper.RegisterTypedEventConsumer(registry, events.OrderCreatedV1, m.handleOrderCreatedEvent, m); err != nil {
+	// The event definition is imported from the order module's contract
+	// package: typed, and declared once by the emitter.
+	if err := helper.RegisterTypedEventConsumer(registry, ordercontract.OrderCreatedV1, m.handleOrderCreatedEvent, m); err != nil {
 		return fmt.Errorf("failed to register OrderCreated consumer: %w", err)
 	}
 
 	fmt.Printf("  → Notification: registered consumer for %s.%s (%s)\n",
-		events.OrderCreatedV1.ModuleName, events.OrderCreatedV1.Name, events.OrderCreatedV1.Subject)
+		ordercontract.OrderCreatedV1.ModuleName, ordercontract.OrderCreatedV1.Name, ordercontract.OrderCreatedV1.Subject)
 	return nil
 }
 
-// RegisterServices registers the on_order_created queue group service using type-safe helper
+// RegisterServices binds the queue group handler to the on-order-created contract.
 func (m *NotificationModule) RegisterServices(container mono.ServiceContainer) error {
-	// Register the on_order_created queue group service using typed helper
-	// This automatically handles JSON unmarshaling of messages
-	return helper.RegisterTypedQueueGroupService(
-		container,
-		"on-order-created",
-		json.Unmarshal,
-		types.TypedQGHP[OrderCreatedNotification]{
-			QueueGroup: "notification-workers",
-			Handler:    m.sendNotification,
-		},
-	)
+	return contract.OnOrderCreated.Register(container, types.TypedQGHP[contract.OrderCreatedNotification]{
+		QueueGroup: "notification-workers",
+		Handler:    m.sendNotification,
+	})
 }
 
 // sendNotification handles queue group notifications with typed payload (fire-and-forget)
-func (m *NotificationModule) sendNotification(_ context.Context, notif OrderCreatedNotification, _ *mono.Msg) error {
-	// Log the notification - notif is already unmarshaled
+func (m *NotificationModule) sendNotification(_ context.Context, notif contract.OrderCreatedNotification, _ *mono.Msg) error {
 	logEntry := NotificationLog{
 		NotificationID: notif.OrderID,
 		Channel:        "service",
@@ -109,9 +103,7 @@ func (m *NotificationModule) sendNotification(_ context.Context, notif OrderCrea
 
 // handleOrderCreatedEvent handles event bus notifications via EventRegistry.
 // This handler uses the TypedEventConsumerHandler signature with automatic unmarshaling.
-func (m *NotificationModule) handleOrderCreatedEvent(_ context.Context, event events.OrderCreatedEvent, _ *mono.Msg) error {
-	// Event is already unmarshaled by RegisterTypedEventConsumer.
-	// Log the notification
+func (m *NotificationModule) handleOrderCreatedEvent(_ context.Context, event ordercontract.OrderCreatedEvent, _ *mono.Msg) error {
 	logEntry := NotificationLog{
 		NotificationID: event.OrderID,
 		Channel:        "event",

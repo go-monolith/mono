@@ -1,6 +1,6 @@
 # Hexagonal Architecture Guide
 
-This guide explains how to apply hexagonal architecture (also known as Ports and Adapters) when developing modules with the Monolith-Framework.
+This guide explains how to apply hexagonal architecture (also known as Ports and Adapters) when developing modules with the Monolith-Framework, and what the framework checks for you.
 
 > **Working Example**: See [`/examples/multi-module/`](../../examples/multi-module/) for a complete
 > working implementation with inventory, payment, order, and notification modules demonstrating
@@ -19,15 +19,16 @@ For simple utility modules or single-responsibility modules with minimal logic, 
 
 ## Overview
 
-Hexagonal architecture organizes code around the core business logic, isolating it from external concerns like databases, messaging, and external services. In this framework, each module naturally fits this pattern through:
+Hexagonal architecture organizes code around the core business logic, isolating it from external concerns like databases, messaging, and external services. In this framework, each module fits this pattern through:
 
-- **Ports**: Interfaces defining how the module interacts with the outside world
-- **Adapters**: Concrete implementations that connect ports to infrastructure
-- **Domain**: Core business logic independent of external systems
+- **Contract**: the published port of a module — the DTOs its services exchange and the typed service and event definitions other modules use to reach it (`<module>/contract`)
+- **Ports**: interfaces owned by a module that describe what its domain logic needs from the outside world (`ports.go`)
+- **Adapters**: concrete implementations that connect ports to infrastructure — here, to other modules' contracts over NATS (`adapter.go`)
+- **Domain**: core business logic independent of external systems (`module.go`)
 
 The diagram below shows the flow: incoming NATS requests are handled by driving adapters
-(services), which invoke domain logic, which uses driven adapters to communicate with
-external modules via NATS.
+(services registered through the module's contract), which invoke domain logic, which uses
+driven adapters to call other modules through *their* contracts.
 
 ```
                  ┌───────────────────────────────────────────────────┐
@@ -36,15 +37,15 @@ external modules via NATS.
 ┌──────────┐     │  ┌──────────────┐       ┌──────────────────┐      │
 │ Incoming │     │  │   Driving    │       │                  │      │
 │ Request  │────▶│  │   Adapter    │──────▶│   Domain Logic   │      │
-│ (NATS)   │     │  │  (Services)  │       │                  │      │
-└──────────┘     │  └──────────────┘       └────────┬─────────┘      │
-                 │                                  │                │
+│ (NATS)   │     │  │  (contract   │       │                  │      │
+└──────────┘     │  │   .Register) │       └────────┬─────────┘      │
+                 │  └──────────────┘                │ port           │
                  │                                  ▼                │
                  │                         ┌──────────────────┐      │    ┌──────────┐
                  │                         │  Driven Adapter  │      │    │ External │
-                 │                         │   (AdapterPort)  │──────│───▶│  Module  │
-                 │                         └──────────────────┘      │    │  (NATS)  │
-                 │                                                   │    └──────────┘
+                 │                         │  (their contract │──────│───▶│  Module  │
+                 │                         │   .Call)         │      │    │  (NATS)  │
+                 │                         └──────────────────┘      │    └──────────┘
                  └───────────────────────────────────────────────────┘
 ```
 
@@ -54,141 +55,39 @@ Follow this standard file organization for each module:
 
 ```
 mymodule/
-├── types.go      # Port interface + DTOs (request/response types)
-├── adapter.go    # Driven adapter implementation (outbound)
-└── module.go     # Domain logic + driving adapter (inbound services)
+├── contract/
+│   └── contract.go   # Published port: DTOs + typed service/event definitions
+├── ports.go          # Driven ports this module needs (interfaces it owns)
+├── adapter.go        # Driven adapters: implement ports.go over other modules' contracts
+└── module.go         # Domain logic + driving adapter (service registration)
 ```
 
 ### File Responsibilities
 
-| File | Purpose |
-|------|---------|
-| `types.go` | Defines the **port interface** (`XxxAdapterPort`) and **DTOs** used for communication |
-| `adapter.go` | Implements the **driven adapter** that wraps `ServiceContainer` for outbound calls |
-| `module.go` | Contains **domain logic** and registers **driving adapters** (services that handle incoming requests) |
+| File | Purpose | Who imports it |
+|------|---------|----------------|
+| `contract/` | **Published port**: DTOs, `helper.RequestReplyService[...]` / `QueueGroupService[...]` / `StreamConsumerService[...]` definitions, `helper.EventDefinition[...]` definitions | Any module, the host program, tests |
+| `ports.go` | **Driven ports** the domain logic depends on, written in terms of other modules' contract DTOs | The module itself (and its tests, to substitute fakes) |
+| `adapter.go` | **Driven adapters** that implement `ports.go` by calling other modules' contracts with the `ServiceContainer` received in `SetDependencyServiceContainer` | The module itself |
+| `module.go` | **Domain logic** and the **driving adapter** (`RegisterServices` binding handlers to the module's own contracts) | `main.go` only |
 
-## Ports: Defining Module Boundaries
+### The contract package import rule
 
-A port is an interface that defines how external systems interact with your module. There are two types:
+A `contract` package imports **only** the standard library, `pkg/types` and `pkg/helper`. It never imports its own module package and never another module's non-contract package. Consumers import `<provider>/contract` and nothing else of the provider.
 
-### Driving Ports (Primary/Inbound)
+This rule is what keeps consumers decoupled from provider internals, lets two modules share events without a separate "events" package or an import cycle, and is the anchor for boundary tooling.
 
-Services that handle incoming requests to your module. These are registered via `RegisterServices()`.
+A module that only exists to be started before others and exposes nothing does not need a `contract` package.
 
-```go
-// In module.go - Driving adapter via RegisterServices
-func (m *InventoryModule) RegisterServices(container mono.ServiceContainer) error {
-    return helper.RegisterTypedRequestReplyService(
-        container,
-        "check-stock",
-        json.Unmarshal,
-        json.Marshal,
-        m.checkStock,  // Domain logic handler
-    )
-}
-```
+## Contracts: Defining the Published Port
 
-### Driven Ports (Secondary/Outbound)
-
-Interfaces that your domain logic uses to interact with external modules. Define these in `types.go`.
+A contract declares a service once — name, providing module, kind, request/response types and serialization — and both sides use it. Service names are never string literals in module code.
 
 ```go
-// types.go - Port interface for external consumers
-type InventoryAdapterPort interface {
-    CheckStock(ctx context.Context, req *CheckStockRequest) (*CheckStockResponse, error)
-}
-```
+// inventory/contract/contract.go
+package contract
 
-## Adapters: Connecting to Infrastructure
-
-### Driven Adapter Implementation
-
-The driven adapter implements the port interface and handles the infrastructure details (NATS messaging, serialization).
-
-```go
-// adapter.go
-package inventory
-
-import (
-    "context"
-    "encoding/json"
-    "fmt"
-
-    "github.com/go-monolith/mono"
-    "github.com/go-monolith/mono/pkg/helper"
-)
-
-// inventoryAdapter implements InventoryAdapterPort
-type inventoryAdapter struct {
-    container mono.ServiceContainer
-}
-
-// NewInventoryAdapter creates a new adapter for inventory operations.
-// This is called by dependent modules in SetDependencyServiceContainer.
-func NewInventoryAdapter(container mono.ServiceContainer) InventoryAdapterPort {
-    if container == nil {
-        panic("inventory adapter requires non-nil ServiceContainer")
-    }
-    return &inventoryAdapter{container: container}
-}
-
-func (a *inventoryAdapter) CheckStock(ctx context.Context, req *CheckStockRequest) (*CheckStockResponse, error) {
-    var resp CheckStockResponse
-    if err := helper.CallRequestReplyService(
-        ctx, a.container, "check-stock",
-        json.Marshal, json.Unmarshal, req, &resp,
-    ); err != nil {
-        return nil, fmt.Errorf("inventory check failed: %w", err)
-    }
-    return &resp, nil
-}
-```
-
-### Driving Adapter (Service Registration)
-
-The driving adapter is implemented through service registration in `module.go`. The framework handles the infrastructure (NATS subscriptions) automatically.
-
-```go
-// module.go
-func (m *InventoryModule) RegisterServices(container mono.ServiceContainer) error {
-    // Register a typed request-reply service
-    return helper.RegisterTypedRequestReplyService(
-        container,
-        "check-stock",
-        json.Unmarshal,
-        json.Marshal,
-        m.checkStock,
-    )
-}
-
-// checkStock is the domain logic handler
-func (m *InventoryModule) checkStock(ctx context.Context, req CheckStockRequest, msg *mono.Msg) (CheckStockResponse, error) {
-    // Pure domain logic - no infrastructure concerns
-    m.mu.RLock()
-    stock, exists := m.inventory[req.ProductID]
-    m.mu.RUnlock()
-
-    return CheckStockResponse{
-        Available: exists && stock >= req.Quantity,
-        Stock:     stock,
-    }, nil
-}
-```
-
-## Data Transfer Objects (DTOs)
-
-Define request and response types in `types.go`. These are the data structures exchanged between modules.
-
-```go
-// types.go
-package inventory
-
-import "context"
-
-// InventoryAdapterPort - the driven port interface
-type InventoryAdapterPort interface {
-    CheckStock(ctx context.Context, req *CheckStockRequest) (*CheckStockResponse, error)
-}
+import "github.com/go-monolith/mono/pkg/helper"
 
 // CheckStockRequest - inbound DTO
 type CheckStockRequest struct {
@@ -201,53 +100,149 @@ type CheckStockResponse struct {
     Available bool `json:"available"`
     Stock     int  `json:"stock"`
 }
+
+// CheckStock is the request-reply service that checks stock availability.
+var CheckStock = helper.RequestReplyService[CheckStockRequest, CheckStockResponse]("inventory", "check-stock")
 ```
+
+Three kinds of service contract exist, mirroring the three client-facing service types:
+
+| Constructor | Kind | Consumer side | Provider side |
+|-------------|------|---------------|---------------|
+| `helper.RequestReplyService[Req, Resp](module, name)` | Request-reply | `def.Call(ctx, container, req) (Resp, error)` | `def.Register(container, handler, opts...)` |
+| `helper.QueueGroupService[T](module, name)` | Queue group | `def.Send(ctx, container, payload) error` | `def.Register(container, pairs...)` |
+| `helper.StreamConsumerService[T](module, name)` | Stream consumer | `def.Publish(ctx, container, payload) (MsgPubAck, error)` | `def.Register(container, config, handler)` |
+
+Serialization is JSON by default; `WithMarshaler` / `WithUnmarshaler` return a copy with a different codec (for example Protobuf). `ToBase()` returns the non-generic `types.BaseServiceDefinition` used in interfaces. The constructors panic on a name that is not kebab-case, like `helper.EventDefinition`: contracts are package-level variables and an invalid one is a programming error caught at process start.
+
+Channel services have no contract type: they are in-process and already attributed to the consumer through `GetChannelService(name, consumerModule)`.
+
+### Driving Adapter (Service Registration)
+
+The provider binds its domain handler to its own contract. The framework handles the infrastructure (NATS subscriptions) and the contract handles serialization:
+
+```go
+// inventory/module.go
+func (m *InventoryModule) RegisterServices(container mono.ServiceContainer) error {
+    return contract.CheckStock.Register(container, m.checkStock)
+}
+
+// checkStock is the domain logic handler: typed, pure, testable without NATS.
+func (m *InventoryModule) checkStock(ctx context.Context, req contract.CheckStockRequest, msg *mono.Msg) (contract.CheckStockResponse, error) {
+    m.mu.RLock()
+    stock, exists := m.inventory[req.ProductID]
+    m.mu.RUnlock()
+
+    return contract.CheckStockResponse{
+        Available: exists && stock >= req.Quantity,
+        Stock:     stock,
+    }, nil
+}
+```
+
+`Register` also records the contract on the service entry (`ServiceEntry.Contract`), so the framework and tooling can tell contract-backed services from ad hoc ones. A contract registered on a container bound to a different module fails with `ErrServiceContractMismatch`.
+
+## Ports: What the Domain Needs
+
+The consumer owns its ports. They are small interfaces, written in terms of the providers' contract DTOs, that say what the domain logic needs — nothing about NATS:
+
+```go
+// order/ports.go
+package order
+
+import (
+    "context"
+
+    inventorycontract "myapp/inventory/contract"
+    paymentcontract   "myapp/payment/contract"
+)
+
+// InventoryPort checks stock for an order.
+type InventoryPort interface {
+    CheckStock(ctx context.Context, req inventorycontract.CheckStockRequest) (inventorycontract.CheckStockResponse, error)
+}
+
+// PaymentPort charges for an order.
+type PaymentPort interface {
+    Process(ctx context.Context, req paymentcontract.ProcessPaymentRequest) (paymentcontract.ProcessPaymentResponse, error)
+}
+```
+
+Tests substitute fakes for these ports; production wires the adapters below.
+
+## Adapters: Connecting Ports to Contracts
+
+A driven adapter implements one port by calling the provider's contract with the provider's `ServiceContainer`. It is the only place in the module that knows the call crosses a module boundary:
+
+```go
+// order/adapter.go
+package order
+
+type inventoryAdapter struct{ container mono.ServiceContainer }
+
+func (a inventoryAdapter) CheckStock(ctx context.Context, req inventorycontract.CheckStockRequest) (inventorycontract.CheckStockResponse, error) {
+    resp, err := inventorycontract.CheckStock.Call(ctx, a.container, req)
+    if err != nil {
+        return inventorycontract.CheckStockResponse{}, fmt.Errorf("inventory check failed: %w", err)
+    }
+    return resp, nil
+}
+```
+
+`Call` propagates the caller's context deadline to the handler (see "Request Deadlines" in the foundation spec) and wraps errors with the contract identity (`contract inventory/check-stock (request_reply): ...`).
 
 ## Consuming Dependencies
 
-When your module depends on other modules, use their adapter ports to maintain loose coupling.
-
-### Declaring Dependencies
+### Declaring Dependencies and Consumed Services
 
 ```go
-// module.go
+// order/module.go
 func (m *OrderModule) Dependencies() []string {
     return []string{"inventory", "payment", "notification"}
 }
+
+// ConsumeServices declares the contracts this module calls. The framework
+// validates them at startup (see "What the Framework Checks").
+func (m *OrderModule) ConsumeServices() []types.BaseServiceDefinition {
+    return []types.BaseServiceDefinition{
+        inventorycontract.CheckStock.ToBase(),
+        paymentcontract.Process.ToBase(),
+        notificationcontract.OnOrderCreated.ToBase(),
+    }
+}
 ```
 
-### Receiving and Using Adapters
+### Wiring Adapters Behind Ports
 
 ```go
-// module.go
+// order/module.go
 type OrderModule struct {
-    inventory    inventory.InventoryAdapterPort    // Driven port
-    payment      payment.PaymentAdapterPort        // Driven port
-    notification notification.NotificationAdapterPort // Driven port
+    inventory    InventoryPort    // Driven port (ports.go)
+    payment      PaymentPort      // Driven port
+    notification NotificationPort // Driven port
     eventBus     mono.EventBus
 }
 
-// SetDependencyServiceContainer - create adapters from dependency containers
+// SetDependencyServiceContainer - wire the adapters behind the ports
 func (m *OrderModule) SetDependencyServiceContainer(dependency string, container mono.ServiceContainer) {
     switch dependency {
     case "inventory":
-        m.inventory = inventory.NewInventoryAdapter(container)
+        m.inventory = inventoryAdapter{container: container}
     case "payment":
-        m.payment = payment.NewPaymentAdapter(container)
+        m.payment = paymentAdapter{container: container}
     case "notification":
-        m.notification = notification.NewNotificationAdapter(container)
+        m.notification = notificationAdapter{container: container}
     }
 }
 
-// Domain logic uses adapters, not raw containers
-func (m *OrderModule) placeOrder(ctx context.Context, req CreateOrderRequest, msg *mono.Msg) (CreateOrderResponse, error) {
-    // Use the typed adapter interface
-    stockResult, err := m.inventory.CheckStock(ctx, &inventory.CheckStockRequest{
+// Domain logic uses ports, never containers or service names
+func (m *OrderModule) placeOrder(ctx context.Context, req contract.CreateOrderRequest, msg *mono.Msg) (contract.CreateOrderResponse, error) {
+    stockResult, err := m.inventory.CheckStock(ctx, inventorycontract.CheckStockRequest{
         ProductID: req.ProductID,
         Quantity:  req.Quantity,
     })
     if err != nil {
-        return CreateOrderResponse{}, fmt.Errorf("inventory check failed: %w", err)
+        return contract.CreateOrderResponse{}, fmt.Errorf("inventory check failed: %w", err)
     }
     // ... continue with domain logic
 }
@@ -257,40 +252,23 @@ func (m *OrderModule) placeOrder(ctx context.Context, req CreateOrderRequest, ms
 
 The framework supports multiple communication patterns. Choose based on your use case:
 
-| Pattern | Use Case | Example |
-|---------|----------|---------|
-| **Request-Reply** | Synchronous operations requiring a response | Check inventory, process payment |
-| **Queue Group** | Fire-and-forget with load balancing | Send notifications |
-| **Channel** | High-performance in-process communication | Analytics event tracking |
-| **Event Bus** | Broadcast events to multiple consumers | Order created notification |
-
-### Request-Reply Adapter
-
-For synchronous request-response communication:
-
-```go
-func (a *paymentAdapter) Process(ctx context.Context, req *ProcessPaymentRequest) (*ProcessPaymentResponse, error) {
-    var resp ProcessPaymentResponse
-    if err := helper.CallRequestReplyService(
-        ctx, a.container, "process",
-        json.Marshal, json.Unmarshal, req, &resp,
-    ); err != nil {
-        return nil, fmt.Errorf("payment failed: %w", err)
-    }
-    return &resp, nil
-}
-```
+| Pattern | Use Case | Contract | Example |
+|---------|----------|----------|---------|
+| **Request-Reply** | Synchronous operations requiring a response | `helper.RequestReplyService` | Check inventory, process payment |
+| **Queue Group** | Fire-and-forget with load balancing | `helper.QueueGroupService` | Send notifications |
+| **Stream Consumer** | Durable, at-least-once processing | `helper.StreamConsumerService` | Audit trail |
+| **Channel** | High-performance in-process communication | none (in-process) | Analytics event tracking |
+| **Event Bus** | Broadcast events to multiple consumers | `helper.EventDefinition` | Order created notification |
 
 ### Queue Group Adapter
 
-For asynchronous fire-and-forget operations:
-
 ```go
-func (a *notificationAdapter) SendOrderCreated(ctx context.Context, notif *OrderCreatedNotification) error {
-    if err := helper.SendQueueGroupService(
-        ctx, a.container, "on-order-created",
-        json.Marshal, notif,
-    ); err != nil {
+// notification/contract/contract.go
+var OnOrderCreated = helper.QueueGroupService[OrderCreatedNotification]("notification", "on-order-created")
+
+// order/adapter.go
+func (a notificationAdapter) OrderCreated(ctx context.Context, notif notificationcontract.OrderCreatedNotification) error {
+    if err := notificationcontract.OnOrderCreated.Send(ctx, a.container, notif); err != nil {
         return fmt.Errorf("notification send failed: %w", err)
     }
     return nil
@@ -299,83 +277,96 @@ func (a *notificationAdapter) SendOrderCreated(ctx context.Context, notif *Order
 
 ## Event-Driven Communication
 
-For cross-cutting events that multiple modules may consume:
+Events belong in the **emitter's** contract package: the emitter declares them, consumers import them from there. No shared "events" package is needed, and no import cycle arises because contract packages import no module packages.
+
+```
+myapp/
+├── order/
+│   ├── contract/
+│   │   ├── contract.go   # PlaceOrder service + DTOs
+│   │   └── events.go     # OrderCreatedEvent + OrderCreatedV1
+│   └── module.go         # Emits OrderCreatedV1
+└── notification/
+    └── module.go         # Imports order/contract, consumes OrderCreatedV1
+```
 
 ### Publishing Events
 
 ```go
-// module.go - Implement EventEmitterModule
+// order/contract/events.go
+var OrderCreatedV1 = helper.EventDefinition[OrderCreatedEvent]("order", "OrderCreated", "v1")
+
+// order/module.go - Implement EventEmitterModule
 func (m *OrderModule) EmitEvents() []mono.BaseEventDefinition {
-    return []mono.BaseEventDefinition{
-        events.OrderCreatedV1.ToBase(),
-    }
+    return []mono.BaseEventDefinition{contract.OrderCreatedV1.ToBase()}
 }
 
-// In domain logic
-func (m *OrderModule) placeOrder(ctx context.Context, ...) (..., error) {
-    // After order is created...
-    event := events.OrderCreatedEvent{
-        OrderID:   orderID,
-        ProductID: req.ProductID,
-        Amount:    req.Amount,
-        Timestamp: time.Now(),
-    }
-    events.OrderCreatedV1.Publish(m.eventBus, event, nil)
-    // ...
+// In domain logic (best-effort)
+if err := contract.OrderCreatedV1.Publish(m.eventBus, event, nil); err != nil {
+    log.Printf("event publish failed (continuing): %v", err)
 }
 ```
 
 ### Consuming Events
 
 ```go
-// module.go - Implement EventConsumerModule
+// notification/module.go - Implement EventConsumerModule
 func (m *NotificationModule) RegisterEventConsumers(registry mono.EventRegistry) error {
-    return registry.RegisterTypedEventConsumer(
-        events.OrderCreatedV1,
-        m.handleOrderCreated,
-    )
+    return helper.RegisterTypedEventConsumer(registry, ordercontract.OrderCreatedV1, m.handleOrderCreated, m)
 }
 
-func (m *NotificationModule) handleOrderCreated(ctx context.Context, event events.OrderCreatedEvent, msg *mono.Msg) error {
+func (m *NotificationModule) handleOrderCreated(ctx context.Context, event ordercontract.OrderCreatedEvent, msg *mono.Msg) error {
     // Handle the event
     return nil
 }
 ```
 
-## Shared Event Definitions
+## What the Framework Checks
 
-To avoid circular dependencies, place shared event definitions in a separate package:
+The layout above is a convention; these are the parts the framework enforces or reports.
 
-```
-myapp/
-├── events/
-│   └── events.go       # Shared event definitions
-├── order/
-│   └── module.go       # Emits events
-└── notification/
-    └── module.go       # Consumes events
-```
+### At startup: consumed contracts (`ServiceConsumerModule`)
+
+When a module implements `ConsumeServices()`, the framework validates the list while the module starts, after its dependency containers are set and before `RegisterServices`. For each contract:
+
+- the providing module must be in `Dependencies()` — or be a registered plugin, since plugins are injected into every `UsePluginModule` and are not part of the dependency graph;
+- that provider must have registered the service;
+- the registered service must be of the contract's type.
+
+A violation fails the module start (`ErrModuleStartFailed` wrapping `ErrMissingDependency`, `ErrServiceNotFound` or `ErrServiceContractMismatch`) and rolls back the modules already started. A renamed service or a forgotten dependency is therefore caught the moment the process starts, not on the first call in production.
+
+### At registration: contract recording
+
+`def.Register(...)` records the contract on the provider's `ServiceEntry.Contract`. The container refuses a contract whose module or type does not match (`ErrServiceContractMismatch`). The field is set after registration, outside the `ServiceRegistration` that middleware rebuilds, so access-log, audit and request-id middleware cannot drop it.
+
+### Host-level escape hatches
+
+`MonoApplication.Services(name)` and `MonoApplication.EventBus(name)` hand the host program (`main.go`) a module's container and the event bus, for API handlers, CLI commands or tests. They are not for module code: a module that holds the application object bypasses every check above, and neither the framework nor tooling can detect it.
+
+### At runtime: boundary report and strict mode
+
+The `ServiceContainer` a module receives for a dependency is a read-only view that attributes every lookup to the module, and the `EventBus` it receives is scoped to its declared boundaries. Four kinds of crossing are detected:
+
+| Kind | What the module did |
+|------|---------------------|
+| `register-on-dependency` | Called `Register*`, `Unregister`, `BindModule`, `Set*`, `StartChannelRouters` or `RegisterContract` on a dependency's container |
+| `channel-consumer-mismatch` | Asked for a channel service under another module's name |
+| `undeclared-service-subject` | Published to or requested `services.<module>.<service>` of a module that is not itself, a declared dependency or a plugin — bypassing the port |
+| `foreign-service-subscription` | Subscribed to another module's service subject |
+
+By default a crossing is counted, warned once, and let through, so existing applications keep working. `MonoApplication.ModuleBoundaries()` returns, per module, the declared dependencies, the consumed contracts, the services actually looked up (with counts), the declared dependencies never used, and the crossings. The same summary is logged at `Stop`.
 
 ```go
-// events/events.go
-package events
-
-import (
-    "time"
-    "github.com/go-monolith/mono/pkg/helper"
-)
-
-type OrderCreatedEvent struct {
-    OrderID   string    `json:"order_id"`
-    ProductID string    `json:"product_id"`
-    Amount    float64   `json:"amount"`
-    Timestamp time.Time `json:"timestamp"`
+for _, r := range app.ModuleBoundaries() {
+    fmt.Println(r.Module, "uses", r.Observed, "never used", r.UnusedDependencies, "violations", r.Violations)
 }
-
-var OrderCreatedV1 = helper.EventDefinition[OrderCreatedEvent](
-    "order", "OrderCreated", "v1",
-)
 ```
+
+With `mono.WithStrictModuleBoundaries()` a crossing fails instead with `ErrModuleBoundaryViolation`. The intended path: run non-strict, read the report, fix the modules, then turn strict on, and keep it on in tests.
+
+### In tests: `monotest.CheckModule`
+
+The `monotest` package runs a module without NATS through the same lifecycle order, dependency views and scoped bus as the framework, and `CheckModule` turns the rules above into one test per module. See "Testing Hexagonal Architecture" below.
 
 ## Best Practices
 
@@ -384,51 +375,56 @@ var OrderCreatedV1 = helper.EventDefinition[OrderCreatedEvent](
 The domain logic in your handlers should not depend on infrastructure:
 
 ```go
-// Good: Pure domain logic
-func (m *InventoryModule) checkStock(ctx context.Context, req CheckStockRequest, msg *mono.Msg) (CheckStockResponse, error) {
+// Good: typed handler, no serialization, talks to ports
+func (m *InventoryModule) checkStock(ctx context.Context, req contract.CheckStockRequest, msg *mono.Msg) (contract.CheckStockResponse, error) {
     m.mu.RLock()
     stock := m.inventory[req.ProductID]
     m.mu.RUnlock()
-    return CheckStockResponse{Available: stock >= req.Quantity, Stock: stock}, nil
+    return contract.CheckStockResponse{Available: stock >= req.Quantity, Stock: stock}, nil
 }
 
-// Bad: Infrastructure leaking into domain
+// Bad: infrastructure leaking into domain
 func (m *InventoryModule) checkStock(ctx context.Context, req *mono.Msg) ([]byte, error) {
-    // Parsing JSON and marshaling are infrastructure concerns
     var request CheckStockRequest
-    json.Unmarshal(req.Data, &request)
+    json.Unmarshal(req.Data, &request) // parsing is an infrastructure concern
     // ...
 }
 ```
 
-### 2. Use Typed Helpers
-
-Prefer typed service registration and calls:
+### 2. Register and Call Through Contracts
 
 ```go
-// Good: Typed helper
-helper.RegisterTypedRequestReplyService(container, "check-stock",
-    json.Unmarshal, json.Marshal, m.checkStock)
+// Good: one definition, both sides use it
+return contract.CheckStock.Register(container, m.checkStock)
+resp, err := inventorycontract.CheckStock.Call(ctx, a.container, req)
 
-// Less ideal: Raw handler
-container.RegisterRequestReplyService("check-stock", func(ctx context.Context, req *mono.Msg) ([]byte, error) {
-    // Manual marshaling...
-})
+// Less ideal: service name as a string literal in two places, hand-rolled codecs
+helper.RegisterTypedRequestReplyService(container, "check-stock", json.Unmarshal, json.Marshal, m.checkStock)
+helper.CallRequestReplyService(ctx, c, "check-stock", json.Marshal, json.Unmarshal, req, &resp)
+
+// Avoid: bypassing the port entirely
+m.eventBus.Request("services.inventory.check-stock", data, time.Second)
 ```
 
-### 3. Interface Validation
+### 3. Declare What You Consume
+
+Implement `ConsumeServices()` on every module that calls another module's services. It costs one method and turns a missing or renamed service into a startup failure.
+
+### 4. Interface Validation
 
 Use compile-time interface checks to catch errors early:
 
 ```go
 var (
-    _ mono.DependentModule       = (*OrderModule)(nil)
-    _ mono.ServiceProviderModule = (*OrderModule)(nil)
-    _ mono.EventEmitterModule    = (*OrderModule)(nil)
+    _ mono.DependentModule        = (*OrderModule)(nil)
+    _ mono.ServiceProviderModule  = (*OrderModule)(nil)
+    _ mono.EventEmitterModule     = (*OrderModule)(nil)
+    _ types.ServiceConsumerModule = (*OrderModule)(nil)
+    _ InventoryPort               = inventoryAdapter{}
 )
 ```
 
-### 4. Graceful Degradation
+### 5. Graceful Degradation
 
 Handle failures appropriately based on criticality:
 
@@ -436,37 +432,82 @@ Handle failures appropriately based on criticality:
 // Critical: Return error to stop the operation
 stockResult, err := m.inventory.CheckStock(ctx, req)
 if err != nil {
-    return CreateOrderResponse{}, fmt.Errorf("inventory check failed: %w", err)
+    return contract.CreateOrderResponse{}, fmt.Errorf("inventory check failed: %w", err)
 }
 
 // Non-critical: Log and continue
-if err := m.notification.SendOrderCreated(ctx, notif); err != nil {
+if err := m.notification.OrderCreated(ctx, notif); err != nil {
     log.Printf("notification failed (continuing): %v", err)
 }
 ```
 
-### 5. Validate at Boundaries
+### 6. Validate at Boundaries
 
 Validate input at the adapter boundary, not deep in domain logic:
 
 ```go
-func (m *InventoryModule) checkStock(ctx context.Context, req CheckStockRequest, msg *mono.Msg) (CheckStockResponse, error) {
-    // Validate at the boundary
+func (m *InventoryModule) checkStock(ctx context.Context, req contract.CheckStockRequest, msg *mono.Msg) (contract.CheckStockResponse, error) {
     if req.ProductID == "" {
-        return CheckStockResponse{}, fmt.Errorf("product_id is required")
+        return contract.CheckStockResponse{}, fmt.Errorf("product_id is required")
     }
     if req.Quantity <= 0 {
-        return CheckStockResponse{}, fmt.Errorf("quantity must be positive")
+        return contract.CheckStockResponse{}, fmt.Errorf("quantity must be positive")
     }
-
     // Domain logic proceeds with valid data
-    // ...
 }
 ```
 
 ## Testing Hexagonal Architecture
 
-One of the primary benefits of hexagonal architecture is improved testability. Here's how to test each layer:
+One of the primary benefits of hexagonal architecture is improved testability. The `monotest` package (`github.com/go-monolith/mono/monotest`) runs a module without NATS: an in-memory event bus, the real service container bound to the module with its handlers dispatched, stand-in containers for dependencies, and the framework's own dependency views and scoped bus, so a test sees exactly what production would.
+
+### Conformance Test (one per module)
+
+```go
+func TestOrderModuleConformance(t *testing.T) {
+    bus := monotest.NewEventBus()
+    inventory := monotest.NewContainer("inventory", bus)
+    // Register the dependency's services through its own contract...
+    err := inventorycontract.CheckStock.Register(inventory, func(_ context.Context, req inventorycontract.CheckStockRequest, _ *mono.Msg) (inventorycontract.CheckStockResponse, error) {
+        return inventorycontract.CheckStockResponse{Available: true, Stock: 5}, nil
+    })
+    if err != nil {
+        t.Fatal(err)
+    }
+    // ...or with a JSON stub when the contract is not at hand.
+    payment := monotest.NewContainer("payment", bus)
+    err = monotest.StubRequestReply(payment, "process", func(_ context.Context, req paymentcontract.ProcessPaymentRequest) (paymentcontract.ProcessPaymentResponse, error) {
+        return paymentcontract.ProcessPaymentResponse{Success: true}, nil
+    })
+    if err != nil {
+        t.Fatal(err)
+    }
+
+    monotest.CheckModule(t, order.NewModule(),
+        monotest.WithDependency("inventory", inventory),
+        monotest.WithDependency("payment", payment),
+        monotest.WithExercise(func(ctx context.Context, h *monotest.Harness) error {
+            _, err := contract.PlaceOrder.Call(ctx, h.Container(), contract.CreateOrderRequest{ProductID: "laptop", Quantity: 1, Amount: 10})
+            return err
+        }))
+}
+```
+
+`CheckModule` reports, each as its own failure: a non-kebab-case name; a self or duplicate dependency, or one without a stand-in container; a provider that registers nothing or an invalid subject; a consumed contract the stand-in does not provide with the same type; every boundary violation (with a hint on how to fix it); a declared dependency that was never looked up (use `WithOrderingOnlyDependency` for start-ordering dependencies); an emitted event with an invalid subject or an `events.*` subject the module published that is missing from `EmitEvents()`; and `Start`/`Stop` failures or a `Stop` that exceeds its timeout (`Stop` receives a context with that deadline, as in the framework). The harness dispatches services only after `Start`, as the framework does, so a module that calls a dependency from `Start` fails here as it would in production; a consumer that looks events up through the registry gets them with `WithEmittedEvents`.
+
+### Driving a Module in a Test
+
+```go
+h := monotest.New(t, order.NewModule(), monotest.WithDependency("inventory", inventory), monotest.WithDependency("payment", payment))
+if err := h.Start(ctx); err != nil { t.Fatal(err) }
+defer h.Stop(ctx)
+
+resp := monotest.Call[contract.CreateOrderRequest, contract.CreateOrderResponse](t, h, "place-order", contract.CreateOrderRequest{ProductID: "laptop", Quantity: 1, Amount: 10})
+if inventory.Calls("check-stock") != 1 { t.Error("inventory not consulted") }
+report := h.Report() // the module's types.ModuleBoundaryReport
+```
+
+Events published by the module appear on `h.EventBus()`; events the module consumes can be published there with their definition's `Publish`. JetStream (stream consumer, event stream consumer, cron) is not emulated: use an integration test with the embedded server for those.
 
 ### Unit Testing Domain Logic
 
@@ -474,55 +515,39 @@ Test domain handlers by passing typed requests directly:
 
 ```go
 func TestCheckStock_Available(t *testing.T) {
-    m := &InventoryModule{
-        inventory: map[string]int{"laptop": 10},
-    }
+    m := &InventoryModule{inventory: map[string]int{"laptop": 10}}
 
-    resp, err := m.checkStock(context.Background(), CheckStockRequest{
-        ProductID: "laptop",
-        Quantity:  5,
-    }, nil)
-
+    resp, err := m.checkStock(context.Background(), contract.CheckStockRequest{ProductID: "laptop", Quantity: 5}, nil)
     if err != nil {
         t.Fatalf("unexpected error: %v", err)
     }
-    if !resp.Available {
-        t.Error("expected stock to be available")
-    }
-    if resp.Stock != 10 {
-        t.Errorf("expected stock=10, got %d", resp.Stock)
+    if !resp.Available || resp.Stock != 10 {
+        t.Errorf("unexpected response: %+v", resp)
     }
 }
 ```
 
-### Testing with Mock Adapters
+### Testing with Fake Ports
 
-Mock the adapter port interface to test modules in isolation:
+Because the module owns its ports, a test substitutes a fake without any NATS:
 
 ```go
-type mockInventoryAdapter struct {
-    checkStockFn func(ctx context.Context, req *CheckStockRequest) (*CheckStockResponse, error)
+type fakeInventory struct {
+    checkStock func(ctx context.Context, req inventorycontract.CheckStockRequest) (inventorycontract.CheckStockResponse, error)
 }
 
-func (m *mockInventoryAdapter) CheckStock(ctx context.Context, req *CheckStockRequest) (*CheckStockResponse, error) {
-    return m.checkStockFn(ctx, req)
+func (f fakeInventory) CheckStock(ctx context.Context, req inventorycontract.CheckStockRequest) (inventorycontract.CheckStockResponse, error) {
+    return f.checkStock(ctx, req)
 }
 
 func TestOrderModule_PlaceOrder_OutOfStock(t *testing.T) {
     orderModule := &OrderModule{
-        inventory: &mockInventoryAdapter{
-            checkStockFn: func(_ context.Context, _ *CheckStockRequest) (*CheckStockResponse, error) {
-                return &CheckStockResponse{Available: false, Stock: 0}, nil
-            },
-        },
+        inventory: fakeInventory{checkStock: func(context.Context, inventorycontract.CheckStockRequest) (inventorycontract.CheckStockResponse, error) {
+            return inventorycontract.CheckStockResponse{Available: false}, nil
+        }},
     }
 
-    resp, err := orderModule.placeOrder(context.Background(), CreateOrderRequest{
-        ProductID: "laptop",
-        Quantity:  1,
-        Amount:    999.99,
-    }, nil)
-
+    resp, err := orderModule.placeOrder(context.Background(), contract.CreateOrderRequest{ProductID: "laptop", Quantity: 1, Amount: 999.99}, nil)
     if err != nil {
         t.Fatalf("unexpected error: %v", err)
     }
@@ -532,149 +557,30 @@ func TestOrderModule_PlaceOrder_OutOfStock(t *testing.T) {
 }
 ```
 
-## Complete Module Example
+### Integration Testing Through Contracts
 
-> **Note**: This example extends beyond the `/examples/multi-module/inventory/` implementation
-> to demonstrate additional patterns. For the working code, see the examples directory.
-
-Here's a complete example following hexagonal architecture:
-
-### types.go
+With a real embedded NATS (`mono.WithNATSDontListen()`, `mono.WithNATSInProcessConn()`), the host calls the module exactly as another module would:
 
 ```go
-package inventory
-
-import "context"
-
-// InventoryAdapterPort is the driven port for inventory operations
-type InventoryAdapterPort interface {
-    CheckStock(ctx context.Context, req *CheckStockRequest) (*CheckStockResponse, error)
-}
-
-type CheckStockRequest struct {
-    ProductID string `json:"product_id"`
-    Quantity  int    `json:"quantity"`
-}
-
-type CheckStockResponse struct {
-    Available bool `json:"available"`
-    Stock     int  `json:"stock"`
-}
-```
-
-### adapter.go
-
-```go
-package inventory
-
-import (
-    "context"
-    "encoding/json"
-    "fmt"
-
-    "github.com/go-monolith/mono"
-    "github.com/go-monolith/mono/pkg/helper"
-)
-
-type inventoryAdapter struct {
-    container mono.ServiceContainer
-}
-
-func NewInventoryAdapter(container mono.ServiceContainer) InventoryAdapterPort {
-    if container == nil {
-        panic("inventory adapter requires non-nil ServiceContainer")
-    }
-    return &inventoryAdapter{container: container}
-}
-
-func (a *inventoryAdapter) CheckStock(ctx context.Context, req *CheckStockRequest) (*CheckStockResponse, error) {
-    var resp CheckStockResponse
-    if err := helper.CallRequestReplyService(ctx, a.container, "check-stock",
-        json.Marshal, json.Unmarshal, req, &resp); err != nil {
-        return nil, fmt.Errorf("inventory: check stock failed: %w", err)
-    }
-    return &resp, nil
-}
-```
-
-### module.go
-
-```go
-package inventory
-
-import (
-    "context"
-    "encoding/json"
-    "fmt"
-    "sync"
-
-    "github.com/go-monolith/mono"
-    "github.com/go-monolith/mono/pkg/helper"
-)
-
-const NAME = "inventory"
-
-type InventoryModule struct {
-    inventory map[string]int
-    mu        sync.RWMutex
-}
-
-var _ mono.ServiceProviderModule = (*InventoryModule)(nil)
-
-func NewModule() *InventoryModule {
-    return &InventoryModule{
-        inventory: make(map[string]int),
-    }
-}
-
-func (m *InventoryModule) Name() string { return NAME }
-
-func (m *InventoryModule) Start(ctx context.Context) error {
-    // Initialize inventory
-    m.inventory["laptop"] = 10
-    m.inventory["mouse"] = 50
-    return nil
-}
-
-func (m *InventoryModule) Stop(ctx context.Context) error { return nil }
-
-func (m *InventoryModule) RegisterServices(container mono.ServiceContainer) error {
-    return helper.RegisterTypedRequestReplyService(container, "check-stock",
-        json.Unmarshal, json.Marshal, m.checkStock)
-}
-
-func (m *InventoryModule) checkStock(ctx context.Context, req CheckStockRequest, msg *mono.Msg) (CheckStockResponse, error) {
-    if req.ProductID == "" {
-        return CheckStockResponse{}, fmt.Errorf("product_id is required")
-    }
-
-    m.mu.RLock()
-    stock := m.inventory[req.ProductID]
-    m.mu.RUnlock()
-
-    return CheckStockResponse{
-        Available: stock >= req.Quantity,
-        Stock:     stock,
-    }, nil
-}
+resp, err := ordercontract.PlaceOrder.Call(ctx, app.Services("order"), ordercontract.CreateOrderRequest{ProductID: "laptop", Quantity: 1, Amount: 10})
 ```
 
 ## Summary
 
 Hexagonal architecture in this framework:
 
-1. **types.go**: Define port interfaces and DTOs
-2. **adapter.go**: Implement driven adapters wrapping `ServiceContainer`
-3. **module.go**: Implement domain logic and register driving adapters via `RegisterServices()`
+1. **contract/**: publish DTOs and typed service/event definitions — the only thing other modules import
+2. **ports.go**: declare the driven ports the domain needs, in the providers' contract DTOs
+3. **adapter.go**: implement the ports over the providers' contracts
+4. **module.go**: domain logic, `RegisterServices` through the module's own contracts, `ConsumeServices` for what it calls
 
 Key benefits:
-- **Testability**: Domain logic can be unit tested without NATS
-- **Loose coupling**: Modules communicate through interfaces
-- **Flexibility**: Swap adapters without changing domain logic
-- **Clear boundaries**: Each module has well-defined responsibilities
+- **Testability**: domain logic and ports can be unit tested without NATS
+- **Loose coupling**: modules know each other only through contracts
+- **Fail fast**: a missing or mistyped consumed service fails startup
+- **Clear boundaries**: the contract import rule gives every boundary a line that tooling can check
 
 ## See Also
 
-- [Foundation Specification](../spec/foundation.md) - Core framework design
+- [Foundation Specification](../spec/foundation.md) - Core framework design ("Module Boundaries (Ports and Adapters)")
 - [Multi-Module Example](../../examples/multi-module/) - Complete working example
-- [Analytics Example](../../examples/analytics/) - Channel-based service example

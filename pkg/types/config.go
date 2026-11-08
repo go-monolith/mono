@@ -66,6 +66,14 @@ type MonoFrameworkConfig struct {
 	// Queue group services and event consumers are serial unless their own
 	// registration sets MaxConcurrency, so this default does not affect them.
 	DefaultServiceConcurrency int
+
+	// StrictModuleBoundaries makes a module boundary violation fail with
+	// ErrModuleBoundaryViolation: a mutating call on a dependency's
+	// ServiceContainer, or a publish, request or subscription on the service
+	// subject of a module that is not a declared dependency (or a plugin).
+	// When false (default), the operation goes through and is recorded in the
+	// module's ModuleBoundaryReport and warned once.
+	StrictModuleBoundaries bool
 }
 
 // DefaultShutdownDrainTimeout is the default ShutdownDrainTimeout, the same as

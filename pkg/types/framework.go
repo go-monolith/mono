@@ -55,6 +55,15 @@ type MonoFramework interface {
 	// wait. It returns nil before Start and after Stop.
 	SubscriptionStats() []SubscriptionStats
 
+	// ModuleBoundaries returns, for every started module, how it used its
+	// declared boundaries: the dependency services it looked up, the declared
+	// dependencies it never used, and the boundary crossings it attempted
+	// (mutating a dependency's container, addressing the service subject of
+	// an undeclared module). It returns nil before Start and after Stop.
+	// With WithStrictModuleBoundaries the crossings fail instead and the
+	// report lists none.
+	ModuleBoundaries() []ModuleBoundaryReport
+
 	// Health returns the aggregated health status of the framework and all modules
 	Health(ctx context.Context) FrameworkHealth
 
