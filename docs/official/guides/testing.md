@@ -8,6 +8,7 @@ This guide covers testing strategies for the Monolith Framework, including unit 
 - Writing unit tests for modules and handlers
 - Integration testing with embedded NATS
 - Creating and using mock dependencies
+- Testing a module without NATS with `monotest`, including a conformance test
 - Table-driven test patterns
 
 **Prerequisites:**
@@ -333,7 +334,62 @@ func TestOrderEventStreamWithJetStream(t *testing.T) {
 }
 ```
 
+## Testing Without NATS (monotest)
+
+The `monotest` package (`github.com/go-monolith/mono/monotest`, v0.1.0+) starts one module through the framework's lifecycle order with no NATS server. It uses an in-memory event bus, the framework's real service container, and stand-in containers for dependencies.
+
+### Conformance Test
+
+Add one per module. `CheckModule` starts the module, runs your exercise, stops it, and reports every boundary rule the module breaks:
+
+```go
+func TestOrderModuleConformance(t *testing.T) {
+    bus := monotest.NewEventBus()
+    inventory := monotest.NewContainer("inventory", bus)
+    err := monotest.StubRequestReply(inventory, "check-stock",
+        func(_ context.Context, req CheckStockRequest) (CheckStockResponse, error) {
+            return CheckStockResponse{Available: true, Stock: 5}, nil
+        })
+    if err != nil {
+        t.Fatal(err)
+    }
+
+    monotest.CheckModule(t, order.NewModule(),
+        monotest.WithDependency("inventory", inventory),
+        monotest.WithExercise(func(ctx context.Context, h *monotest.Harness) error {
+            _, err := contract.PlaceOrder.Call(ctx, h.Container(), contract.PlaceOrderRequest{ProductID: "laptop", Quantity: 1})
+            return err
+        }))
+}
+```
+
+It checks the module name, the dependency list, the registered services, the consumed contracts, boundary violations, unused dependencies, emitted events, and `Start`/`Stop`. The full rule list and options are in the [Module Boundaries Guide](module-boundaries.md#testing-with-monotest).
+
+### Driving a Module
+
+```go
+h := monotest.New(t, order.NewModule(), monotest.WithDependency("inventory", inventory))
+if err := h.Start(ctx); err != nil {
+    t.Fatal(err)
+}
+defer h.Stop(ctx)
+
+resp := monotest.Call[PlaceOrderRequest, PlaceOrderResponse](t, h, "place-order", PlaceOrderRequest{ProductID: "laptop", Quantity: 1})
+
+if inventory.Calls("check-stock") != 1 {
+    t.Error("inventory was not consulted")
+}
+```
+
+{% hint style="warning" %}
+**Limits:** `monotest` does not emulate JetStream (stream consumers, event stream consumers, cron services), the middleware chain, or worker pools. Use an integration test with embedded NATS for those.
+{% endhint %}
+
 ## Mocking Dependencies
+
+{% hint style="info" %}
+**Use `monotest.NewContainer` instead of a hand-written `ServiceContainer` fake.** It is the real container, so it never falls behind the interface.
+{% endhint %}
 
 {% hint style="info" %}
 **Keep mocks simple.** Don't over-engineer mocks with complex behavior. If your mock is getting complicated, consider using integration tests instead.
@@ -543,6 +599,7 @@ When writing tests for a module, ensure you cover:
 - [ ] Concurrent access (if applicable)
 - [ ] Timeout scenarios (if applicable)
 - [ ] Integration with other modules (integration tests)
+- [ ] Module boundaries (`monotest.CheckModule`)
 
 ## Best Practices Summary
 
@@ -552,6 +609,7 @@ When writing tests for a module, ensure you cover:
 - Name test files with `_test.go` suffix
 - Test error scenarios
 - Mock external dependencies
+- Add a `monotest.CheckModule` test per module
 - Use helper functions for test setup
 - Write descriptive test names
 - Test concurrent behavior explicitly
@@ -569,6 +627,7 @@ When writing tests for a module, ensure you cover:
 
 - [Error Handling Guide](error-handling.md)
 - [Logging Guide](logging.md)
+- [Module Boundaries Guide](module-boundaries.md)
 - [Core Concepts - Modules](../core-concepts/modules.md)
 
 ---

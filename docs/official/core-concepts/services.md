@@ -196,9 +196,28 @@ func (m *OrderModule) createOrder(ctx context.Context, order *Order) error {
 }
 ```
 
+## Typed Service Contracts (Recommended)
+
+Since v0.1.0, declare a service once in the provider's `contract` sub-package and use the same value on both sides. The service name, the types and the encoding are then written once:
+
+```go
+// payment/contract/contract.go
+var Process = helper.RequestReplyService[PaymentRequest, PaymentResponse]("payment", "process-payment")
+
+// Provider
+func (m *PaymentModule) RegisterServices(container mono.ServiceContainer) error {
+    return contract.Process.Register(container, m.process)
+}
+
+// Consumer
+resp, err := paymentcontract.Process.Call(ctx, m.paymentContainer, paymentcontract.PaymentRequest{Amount: order.Total})
+```
+
+`helper.QueueGroupService[T]` and `helper.StreamConsumerService[T]` follow the same shape. See the [Module Boundaries Guide](../guides/module-boundaries.md).
+
 ## Using Helper Functions
 
-The framework provides helper functions to simplify typed service calls:
+The string-based helpers are the lower-level form of the contracts above:
 
 ```go
 import "github.com/go-monolith/mono/pkg/helper"
@@ -300,6 +319,7 @@ This naming is handled automatically by the framework - you only specify the ser
 - **Use meaningful names**: `process-payment` is clearer than `handle`
 - **Declare all dependencies**: If you use a service, declare the dependency
 - **Handle errors explicitly**: Return meaningful errors from handlers
+- **Use typed contracts**: Register and call through a contract in `<module>/contract`
 - **Use appropriate service types**: Choose based on your needs (sync/async, durability)
 
 ### Don't
@@ -307,6 +327,7 @@ This naming is handled automatically by the framework - you only specify the ser
 - **Don't call modules directly**: Always use services for inter-module calls
 - **Don't create circular dependencies**: Refactor to break the cycle
 - **Don't share mutable state**: Use services for communication, not shared objects
+- **Don't mutate a dependency's container**: Only look services up on it
 - **Don't ignore the ServiceContainer**: It's your gateway to other modules
 
 ## Services vs Events

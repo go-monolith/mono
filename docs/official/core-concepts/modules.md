@@ -115,6 +115,29 @@ func (m *MyModule) SetDependencyServiceContainer(
 
 **When to use**: When you need to call services provided by other modules.
 
+{% hint style="info" %}
+**Since v0.1.0** this container is a read-only view of the dependency's container. Look services up on it; do not register on it. The bus from `SetEventBus` is scoped to the module in the same way. See the [Module Boundaries Guide](../guides/module-boundaries.md).
+{% endhint %}
+
+### ServiceConsumerModule
+
+Declare the service contracts your module calls (v0.1.0+):
+
+```go
+import "github.com/go-monolith/mono/pkg/types"
+
+func (m *OrderModule) ConsumeServices() []types.BaseServiceDefinition {
+    return []types.BaseServiceDefinition{
+        inventorycontract.CheckStock.ToBase(),
+        paymentcontract.Process.ToBase(),
+    }
+}
+```
+
+The framework validates the list when the module starts. A contract that no declared dependency provides fails startup instead of the first call.
+
+**When to use**: When your module calls other modules through typed service contracts.
+
 ### EventEmitterModule
 
 Declare events your module emits:
@@ -308,6 +331,7 @@ The framework automatically:
 - Keep modules focused on a single domain
 - Use dependency injection for cross-module communication
 - Implement optional interfaces only if you need them
+- Declare consumed services with `ConsumeServices()` and add a `monotest.CheckModule` test
 - Log important events for debugging
 - Handle errors explicitly in Start/Stop
 
@@ -315,6 +339,7 @@ The framework automatically:
 
 - Store global state in module variables (use the framework's DI)
 - Call other modules directly (use services or events)
+- Register on a dependency's container, or request another module's `services.*` subject on the event bus
 - Block in Start() on I/O (use context with timeout)
 - Panic in modules (return errors instead)
 - Create tight coupling between modules

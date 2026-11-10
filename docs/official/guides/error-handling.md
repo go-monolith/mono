@@ -392,6 +392,34 @@ func (m *OrderModule) getDependency(ctx context.Context) (PaymentService, error)
 }
 ```
 
+### Module Boundary and Contract Errors
+
+Since v0.1.0 the framework reports boundary problems with three sentinel errors:
+
+| Error | When |
+|-------|------|
+| `ErrServiceContractMismatch` | A contract names a different module or service kind than the registered service |
+| `ErrMissingDependency` | A `ConsumeServices()` contract names a module that is not in `Dependencies()` |
+| `ErrModuleBoundaryViolation` | A module crosses an undeclared boundary while `WithStrictModuleBoundaries` is on |
+
+Contract problems surface from `app.Start`, wrapped in `ErrModuleStartFailed`:
+
+```go
+if err := app.Start(ctx); err != nil {
+    switch {
+    case errors.Is(err, monierr.ErrServiceNotFound):
+        // a consumed service is not registered by its provider
+    case errors.Is(err, monierr.ErrServiceContractMismatch):
+        // a consumed service has a different kind than the contract
+    case errors.Is(err, monierr.ErrMissingDependency):
+        // a consumed contract's module is missing from Dependencies()
+    }
+    log.Fatalf("start: %v", err)
+}
+```
+
+See the [Module Boundaries Guide](module-boundaries.md).
+
 ### Configuration Errors
 
 Configuration errors occur during framework setup:
