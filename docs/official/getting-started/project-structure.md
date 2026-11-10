@@ -14,12 +14,19 @@ my-mono-app/
 │
 ├── modules/                         # Application modules
 │   ├── order/
-│   │   ├── module.go               # Module implementation
+│   │   ├── contract/               # Published port: the only package other modules import
+│   │   │   ├── contract.go         # DTOs + typed service contracts
+│   │   │   └── events.go           # Events this module emits
+│   │   ├── module.go               # Module implementation, ConsumeServices()
+│   │   ├── module_test.go          # monotest.CheckModule conformance test
+│   │   ├── ports.go                # Driven ports this module needs
+│   │   ├── adapter.go              # Adapters over other modules' contracts
 │   │   ├── service.go              # Business logic
-│   │   ├── events.go               # Event definitions (if EventEmitterModule)
-│   │   └── types.go                # Domain types (Order, OrderItem, etc.)
+│   │   └── types.go                # Internal domain types
 │   │
 │   ├── payment/
+│   │   ├── contract/
+│   │   │   └── contract.go
 │   │   ├── module.go
 │   │   ├── service.go
 │   │   └── types.go
@@ -42,6 +49,10 @@ my-mono-app/
     ├── architecture.md
     └── modules.md
 ```
+
+{% hint style="info" %}
+**Since v0.1.0** the recommended layout gives each module a `contract` sub-package, and consumers a `ports.go` and `adapter.go`. The framework can then check module boundaries. See the [Module Boundaries Guide](../guides/module-boundaries.md).
+{% endhint %}
 
 ## Module File Structure
 
@@ -305,6 +316,18 @@ func (s *Service) CreateOrder(req *CreateOrderRequest) (*Order, error)
 func (s *Service) validateOrder(order *Order) error
 ```
 
+### Import Only Contract Packages
+
+A module imports another module's `contract` package and nothing else of it. A `contract` package imports only the standard library, `mono/pkg/types` and `mono/pkg/helper`.
+
+```go
+// ✓ order imports the published port
+import inventorycontract "my-mono-app/modules/inventory/contract"
+
+// ❌ order imports the module package
+import "my-mono-app/modules/inventory"
+```
+
 ### Avoid Circular Dependencies
 
 Use event-driven communication instead:
@@ -349,7 +372,7 @@ shared/
 └── errors.go        # Common error types
 ```
 
-But prefer event-driven communication over shared dependencies.
+But prefer event-driven communication over shared dependencies. Types that cross a module boundary belong in the owning module's `contract` package: request and response types with the provider, event types with the emitter. That removes the need for a shared events package.
 
 ## Complete Example
 
@@ -366,17 +389,20 @@ See the [multi-module example](../../../examples/multi-module/README.md) for a c
 - Use dependency injection for cross-module communication
 - Organize by domain/feature, not by layer
 - Keep module packages independent where possible
+- Publish a `contract` package per module and import only that from other modules
 - Use configuration for environment-specific settings
 
 ✗ **Don't:**
 - Create a package per file
 - Mix multiple modules in one package
 - Share internal implementation details across modules
+- Import another module's package other than its `contract`
 - Store global state in module packages
 - Create deep package hierarchies (2-3 levels is typical)
 
 ## Next Steps
 
+- Follow the [Module Boundaries Guide](../guides/module-boundaries.md) for contracts, ports and adapters
 - Learn about [Inter-Module Communication](../core-concepts/inter-module-communication.md) patterns
 - Explore the [multi-module example](../../../examples/multi-module/README.md)
 - Review [Core Concepts](../core-concepts/modules.md) for module lifecycle

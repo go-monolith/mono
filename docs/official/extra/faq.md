@@ -257,7 +257,14 @@ func TestCreateOrder(t *testing.T) {
 - Test both success and error paths
 - Mock external dependencies (databases, services)
 
-**Learn more:** [Testing - How-To Guide](../guides/testing.md)
+Since v0.1.0 you can also start a module without NATS using `monotest`, and check its boundaries with one call:
+
+```go
+monotest.CheckModule(t, order.NewModule(),
+    monotest.WithDependency("inventory", inventory))
+```
+
+**Learn more:** [Testing - How-To Guide](../guides/testing.md) and the [Module Boundaries Guide](../guides/module-boundaries.md)
 
 ---
 

@@ -7,7 +7,7 @@ API documentation for the `ServiceContainer` interface, which manages service re
 ```go
 // Registration methods
 func RegisterChannelService(name string, in chan *Msg, out chan *Msg) error
-func RegisterRequestReplyService(name string, handler RequestReplyHandler) error
+func RegisterRequestReplyService(name string, handler RequestReplyHandler, opts ...ServiceOption) error
 func RegisterQueueGroupService(name string, pairs ...QGHP) error
 func RegisterStreamConsumerService(name string, config StreamConsumerConfig, handler StreamConsumerHandler) error
 func RegisterCronService(name string, config CronServiceConfig, handler CronHandler) error
@@ -601,6 +601,7 @@ type ServiceEntry struct {
     QueueHandlers         []QGHP
     StreamConsumerConfig  *StreamConsumerConfig
     StreamConsumerHandler StreamConsumerHandler
+    Contract              *BaseServiceDefinition // set when registered through a typed contract
     ModuleName            string
     Subject               string
     Created               time.Time
@@ -642,6 +643,30 @@ const (
 ```
 
 Use `FormatServiceType(serviceType)` to convert to string representation.
+
+## Typed Service Contracts
+
+Since v0.1.0, `pkg/helper` provides typed contracts that wrap the registration and discovery methods above. Declare one per service in the provider's `contract` package:
+
+```go
+func RequestReplyService[Req, Resp any](moduleName, serviceName string) RequestReplyDefinition[Req, Resp]
+func QueueGroupService[T any](moduleName, serviceName string) QueueGroupDefinition[T]
+func StreamConsumerService[T any](moduleName, serviceName string) StreamConsumerDefinition[T]
+```
+
+| Definition | Provider | Consumer |
+|------------|----------|----------|
+| `RequestReplyDefinition[Req, Resp]` | `Register(container, handler, opts...)` | `Call(ctx, container, req) (Resp, error)` |
+| `QueueGroupDefinition[T]` | `Register(container, pairs...)` | `Send(ctx, container, payload) error` |
+| `StreamConsumerDefinition[T]` | `Register(container, config, handler)` | `Publish(ctx, container, payload) (MsgPubAck, error)` |
+
+All three have `WithMarshaler`, `WithUnmarshaler` (JSON by default), `ToBase()` and `Subject()`. The constructors panic on a module or service name that is not kebab-case.
+
+`Register` records the contract in `ServiceEntry.Contract`. It returns `ErrServiceContractMismatch` when the container belongs to a different module than the contract names.
+
+{% hint style="info" %}
+**Dependency containers are read-only views.** The container a module receives in `SetDependencyServiceContainer` allows lookups only. Mutating calls are recorded as boundary violations, and fail with `ErrModuleBoundaryViolation` under `WithStrictModuleBoundaries`. See the [Module Boundaries Guide](../guides/module-boundaries.md).
+{% endhint %}
 
 ## Handler Concurrency (Worker Pools)
 
@@ -825,6 +850,7 @@ func (m *OrderModule) processOrder(ctx context.Context, order *Order) error {
 
 ✓ **Do**
 - Register services in `RegisterServices()` method
+- Register and call through typed contracts
 - Check for service availability before using
 - Use request-reply for critical operations
 - Use queue group for non-critical async work
@@ -834,6 +860,7 @@ func (m *OrderModule) processOrder(ctx context.Context, order *Order) error {
 - Call service methods directly (use clients)
 - Assume services are always available
 - Register the same service name twice
+- Register on a dependency's container
 - Block indefinitely in service handlers
 - Ignore error returns from Send/Call
 
@@ -841,6 +868,7 @@ func (m *OrderModule) processOrder(ctx context.Context, order *Order) error {
 
 - [Framework API](framework.md) - Framework lifecycle
 - [Module API](module.md) - Module interfaces
+- [Module Boundaries Guide](../guides/module-boundaries.md) - Contracts, ports and adapters
 - [EventBus API](eventbus.md) - Event publishing
 - [API Reference](README.md) - All APIs overview
 - [Core Concepts - Inter-Module Communication](../core-concepts/inter-module-communication.md) - Service and Event patterns explained

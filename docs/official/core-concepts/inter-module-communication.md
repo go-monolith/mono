@@ -55,7 +55,7 @@ func (m *InventoryModule) RegisterServices(c mono.ServiceContainer) error {
 resp, err := inventorycontract.CheckStock.Call(ctx, m.inventory, inventorycontract.CheckStockRequest{ProductID: id, Quantity: 1})
 ```
 
-`helper.QueueGroupService[T]` (`Register`/`Send`) and `helper.StreamConsumerService[T]` (`Register`/`Publish`) follow the same shape; `WithMarshaler`/`WithUnmarshaler` change the codec. Declare what a module calls with `ConsumeServices()` (see [ServiceConsumerModule](../api/module.md#serviceconsumermodule)) and the framework checks it at startup. The [Hexagonal Architecture Guide](../../architect/hexagonal-architecture.md) covers the full contract/ports/adapters layout, the runtime boundary report and the `monotest` harness.
+`helper.QueueGroupService[T]` (`Register`/`Send`) and `helper.StreamConsumerService[T]` (`Register`/`Publish`) follow the same shape; `WithMarshaler`/`WithUnmarshaler` change the codec. Declare what a module calls with `ConsumeServices()` (see [ServiceConsumerModule](../api/module.md#serviceconsumermodule)) and the framework checks it at startup. The [Module Boundaries Guide](../guides/module-boundaries.md) covers the full contract/ports/adapters layout, the runtime boundary report and the `monotest` harness.
 
 ### Declaring Service Dependencies
 

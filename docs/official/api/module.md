@@ -381,7 +381,7 @@ func (m *OrderModule) ConsumeServices() []types.BaseServiceDefinition {
 }
 ```
 
-The framework validates the list when the module starts, after its dependency containers are set: each contract must name a module in `Dependencies()` (or a plugin), that module must have registered the service, and the registered service type must match. A mismatch fails the start (`ErrModuleStartFailed` wrapping `ErrMissingDependency`, `ErrServiceNotFound` or `ErrServiceContractMismatch`) instead of surfacing on the first call. The list is also part of the module's `ModuleBoundaryReport`. See the [Hexagonal Architecture Guide](../../architect/hexagonal-architecture.md).
+The framework validates the list when the module starts, after its dependency containers are set: each contract must name a module in `Dependencies()` (or a plugin), that module must have registered the service, and the registered service type must match. A mismatch fails the start (`ErrModuleStartFailed` wrapping `ErrMissingDependency`, `ErrServiceNotFound` or `ErrServiceContractMismatch`) instead of surfacing on the first call. The list is also part of the module's `ModuleBoundaryReport`. See the [Module Boundaries Guide](../guides/module-boundaries.md).
 
 **Note:** This interface extends only `Module`, not `EventBusAwareModule`. The `EventRegistry` provides event discovery and registration without requiring direct EventBus access.
 

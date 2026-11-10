@@ -8,6 +8,8 @@ The guides in this section provide step-by-step instructions and best practices 
 
 - **[Error Handling](error-handling.md)** - Handling errors in service handlers, creating custom error types, and error propagation patterns
 - **[Testing](testing.md)** - Unit testing modules, integration testing with embedded NATS, and mocking dependencies
+- **[Module Boundaries](module-boundaries.md)** - Contract packages, ports and adapters, startup validation, the boundary report, strict mode, and `monotest` conformance tests
+- **[Upgrading to v0.1.0](upgrading.md)** - Breaking and behaviour changes since v0.0.14
 - **[Logging](logging.md)** - Using the Logger interface, structured logging best practices, and log level selection
 - **[Storage Backends](storage-backends.md)** - Working with the unified storage interface, capability detection, and backend comparison
 
@@ -36,6 +38,18 @@ Learn how to write comprehensive tests for your modules:
 - Verify error scenarios
 
 **Start here:** [Testing Guide](testing.md)
+
+### Module Boundaries Guide
+
+Learn the recommended way to connect modules (Ports and Adapters):
+
+- Publish a `contract` package per module
+- Register and call services through typed contracts
+- Declare consumed services with `ConsumeServices()`
+- Read `app.ModuleBoundaries()` and enable strict mode
+- Add a `monotest.CheckModule` test per module
+
+**Start here:** [Module Boundaries Guide](module-boundaries.md)
 
 ### Logging Guide
 
@@ -128,6 +142,7 @@ func TestHandleCreateOrder(t *testing.T) {
 - Write unit tests for all public functions
 - Use table-driven tests for multiple cases
 - Mock external dependencies
+- Add a `monotest.CheckModule` conformance test per module
 - Test error scenarios
 - Name test files with `_test.go` suffix
 
@@ -154,6 +169,7 @@ func TestHandleCreateOrder(t *testing.T) {
 ## Related Documentation
 
 - [Core Concepts - Modules](../core-concepts/modules.md)
+- [Module Boundaries Guide](module-boundaries.md)
 - [API Reference - Service Container](../api/container.md)
 - [Middleware System](../middleware/README.md)
 
