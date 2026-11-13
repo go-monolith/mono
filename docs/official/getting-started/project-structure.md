@@ -318,7 +318,7 @@ func (s *Service) validateOrder(order *Order) error
 
 ### Import Only Contract Packages
 
-A module imports another module's `contract` package and nothing else of it. A `contract` package imports only the standard library, `mono/pkg/types`, `mono/pkg/helper` and other contract packages. `monotest.CheckImports(t)` in one test in the root directory of the application checks both rules.
+A module imports another module's `contract` package and nothing else of it. A `contract` package imports only the standard library, `mono/pkg/types`, `mono/pkg/helper` and other contract packages. `monotest.CheckImports(t)` in one test in the root directory of the application checks both rules. It takes every directory named `contract` as a module's contract package, so keep that name for contracts, or name the exceptions with `monotest.WithNonContractPackages`.
 
 ```go
 // ✓ order imports the published contract

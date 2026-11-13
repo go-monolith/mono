@@ -375,7 +375,7 @@ func TestImportRules(t *testing.T) {
 }
 ```
 
-A test placed elsewhere, such as beside `cmd/app/main.go`, points the check at the root with `monotest.WithImportDir("../..")`. The check fails when it matched no package to check, when the application has no module at all, or when `./...` matched no package of a module, so a wrong directory cannot pass by accident. Options are in the [Module Boundaries Guide](module-boundaries.md#checking-imports).
+A test placed elsewhere, such as beside `cmd/app/main.go`, points the check at the root with `monotest.WithImportDir("../..")`. The check fails when it matched no package to check, when the application has no module at all, or when `./...` matched no package of a module, so a wrong directory cannot pass by accident. A package named `contract` that is not a module's contract is excluded with `monotest.WithNonContractPackages`. Options are in the [Module Boundaries Guide](module-boundaries.md#checking-imports).
 
 ### Domain Tests with Fake Ports
 

@@ -178,7 +178,7 @@ A failure stops startup with `ErrModuleStartFailed` wrapping `ErrMissingDependen
 
 What a module receives is wrapped:
 
-- `SetDependencyServiceContainer` gets a **read-only view** of the provider's container. Every lookup is attributed to the consumer. `Entries()` on the view returns descriptions of the services, without the provider's handlers and channels.
+- `SetDependencyServiceContainer` gets a **read-only view** of the provider's container. Every lookup is attributed to the consumer. `Entries()` on the view returns descriptions of the services: copies without the provider's handlers and channels. Changing a description does not change the provider.
 - `SetEventBus` gets a **module-scoped bus**. `events.*` and custom subjects pass untouched.
 
 | Violation kind | What the module did |
@@ -200,6 +200,8 @@ for _, r := range app.ModuleBoundaries() { // nil unless the app is running
     // r.Violations          kind, dependency, subject, count, first seen
 }
 ```
+
+The lists are empty, never nil, when there is nothing to list, so a JSON export of the report always has `observed`, `unused_dependencies`, `unused_contracts` and `violations`.
 
 `Stop` logs the same summary: one Warn per violation kind, one Info per declared dependency and per consumed contract that was never looked up. A dependency declared only for start ordering is legitimate, and so is a contract that was not called during this run.
 
@@ -276,7 +278,7 @@ defer h.Stop(ctx)
 
 resp := monotest.Call[contract.PlaceOrderRequest, contract.PlaceOrderResponse](t, h, "place-order", req)
 inventory.Calls("check-stock") // handler runs on the stand-in
-h.Report()                     // the module's boundary report
+h.Report()                     // the module's boundary report (empty lists before Start)
 h.ModulePublished()            // subjects the module itself published
 h.EventBus()                   // publish consumed events here with def.Publish
 ```
@@ -303,6 +305,8 @@ A test placed elsewhere, such as beside `cmd/app/main.go`, points the check at t
 | `module-import` | A package outside a module that imports a package of that module other than its `contract` |
 
 A module is a package with a `contract` sub-package, together with every package below it. Packages of one module import each other freely. `package main` is exempt: the host program imports module packages to construct and register them.
+
+Every directory named `contract` counts. A package with that name that is not a module's contract (`legal/contract` for customer contracts, a helper `order/internal/contract`) would turn its parent into a module and be held to the contract rule. Exclude it with `WithNonContractPackages`, by import path.
 
 | Option | Use |
 |--------|-----|

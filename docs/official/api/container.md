@@ -665,7 +665,7 @@ All three have `WithMarshaler`, `WithUnmarshaler` (JSON by default), `ToBase()` 
 `Register` records the contract in `ServiceEntry.Contract`. It returns `ErrServiceContractMismatch` when the container belongs to a different module than the contract names.
 
 {% hint style="info" %}
-**Dependency containers are read-only views.** The container a module receives in `SetDependencyServiceContainer` allows lookups only. Mutating calls are recorded as boundary violations, and fail with `ErrModuleBoundaryViolation` under `WithStrictModuleBoundaries`. Since v0.2.0, so is a lookup of a service missing from the module's `ConsumeServices()`, when the module implements it, and `Entries()` on the view returns descriptions of the services, without the provider's handlers and channels. See the [Module Boundaries Guide](../guides/module-boundaries.md).
+**Dependency containers are read-only views.** The container a module receives in `SetDependencyServiceContainer` allows lookups only. Mutating calls are recorded as boundary violations, and fail with `ErrModuleBoundaryViolation` under `WithStrictModuleBoundaries`. Since v0.2.0, so is a lookup of a service missing from the module's `ConsumeServices()`, when the module implements it, and `Entries()` on the view returns descriptions of the services: copies without the provider's handlers and channels. Changing one, including its stream or consumer configuration, has no effect on the provider. See the [Module Boundaries Guide](../guides/module-boundaries.md).
 {% endhint %}
 
 ### ServiceLookup

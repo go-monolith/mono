@@ -8,7 +8,7 @@ The guides in this section provide step-by-step instructions and best practices 
 
 - **[Error Handling](error-handling.md)** - Handling errors in service handlers, creating custom error types, and error propagation patterns
 - **[Testing](testing.md)** - Unit testing modules, integration testing with embedded NATS, and mocking dependencies
-- **[Module Boundaries](module-boundaries.md)** - Contract packages, ports and adapters, startup validation, the boundary report, strict mode, and `monotest` conformance tests
+- **[Module Boundaries](module-boundaries.md)** - Contract packages, ports and adapters, startup validation, the boundary report, strict mode, and the `monotest` conformance and import rule tests
 - **[Upgrading to v0.1.0 and v0.2.0](upgrading.md)** - Breaking and behaviour changes since v0.0.14
 - **[Logging](logging.md)** - Using the Logger interface, structured logging best practices, and log level selection
 - **[Storage Backends](storage-backends.md)** - Working with the unified storage interface, capability detection, and backend comparison
@@ -47,7 +47,7 @@ Learn the recommended way to connect modules (Ports and Adapters):
 - Register and call services through typed contracts
 - Declare consumed services with `ConsumeServices()`
 - Read `app.ModuleBoundaries()` and enable strict mode
-- Add a `monotest.CheckModule` test per module
+- Add a `monotest.CheckModule` test per module and one `monotest.CheckImports` test for the application
 
 **Start here:** [Module Boundaries Guide](module-boundaries.md)
 

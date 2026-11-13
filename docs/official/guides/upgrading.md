@@ -144,7 +144,7 @@ Lookups happen when a module makes the call, so in strict mode an incomplete lis
 
 ### `Entries()` on a dependency container returns descriptions
 
-`Entries()` on the container passed to `SetDependencyServiceContainer` returns copies that describe the dependency's services (name, type, subject, queue groups, options, contract). The handlers and channels are left out, and changing a copy has no effect on the provider. `app.Services(name).Entries()` in the host program is unchanged.
+`Entries()` on the container passed to `SetDependencyServiceContainer` returns copies that describe the dependency's services (name, type, subject, queue groups, options, stream and cron configuration, contract). The handlers and channels are left out. The copies are deep, so changing one, including the subjects or metadata of its stream configuration, has no effect on the provider. `app.Services(name).Entries()` in the host program is unchanged.
 
 ### `monotest.CheckModule` has a rule 9
 
@@ -156,11 +156,18 @@ A `ConsumeServices()` contract that is never looked up during `Start` or the exe
 
 ### More in the boundary report
 
-`ModuleBoundaryReport` gains `UnusedContracts`: the consumed contracts not looked up so far. `Stop` logs one Info line for each.
+`ModuleBoundaryReport` gains `UnusedContracts`: the consumed contracts not looked up so far. `Stop` logs one Info line for each. Like `Observed`, `UnusedDependencies` and `Violations` it is an empty list when there is nothing to list, so `unused_contracts` is always present in the JSON form.
 
 ### New: `monotest.CheckImports`
 
-`monotest.CheckImports(t)` checks the contract package import rule on the import graph of the application. Nothing changes until you add the test. See [Checking Imports](module-boundaries.md#checking-imports).
+`monotest.CheckImports(t)` checks the contract package import rule on the import graph of the application. Nothing changes until you add the test.
+
+Two things to know when you add it:
+
+- Put the test in the root directory of the application. The check fails, instead of passing with nothing checked, when it finds no package to check, no module, or no package of a module.
+- Every directory named `contract` marks its parent as a module. If you have a package with that name that is something else, such as `legal/contract` for customer contracts or a helper `order/internal/contract`, name it with `monotest.WithNonContractPackages`.
+
+See [Checking Imports](module-boundaries.md#checking-imports).
 
 ## Recommended Next Steps
 
