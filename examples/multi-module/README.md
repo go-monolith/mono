@@ -19,7 +19,7 @@ This example implements an e-commerce order processing system with four modules:
 4. **Event Publishing**: Broadcasting events to multiple subscribers
 5. **Event Subscription**: Listening to events from other modules
 6. **Typed Service Contracts**: Declaring a service once in a `contract` package and using it on both sides
-7. **Ports and Adapters**: Consumer-owned ports, adapters over contracts, and `ConsumeServices()` validated at startup
+7. **Ports and Adapters**: Consumer-owned ports in the module's own terms, a plain Go domain service, adapters that translate to the providers' contracts, and `ConsumeServices()` validated at startup
 8. **Error Handling**: Managing failures gracefully across module boundaries
 9. **Request ID Middleware**: Automatic request ID generation and propagation for distributed tracing
 10. **Access Logging Middleware**: Automatic logging of all service calls with timing, status, and request IDs
@@ -67,6 +67,7 @@ Every module follows the hexagonal layout from [`docs/architect/hexagonal-archit
 ```
 examples/multi-module/
 ├── main.go                    # Application orchestration (calls order through its contract)
+├── imports_test.go            # monotest.CheckImports: the contract import rule
 ├── README.md                  # This file
 ├── inventory/
 │   ├── contract/contract.go  # Port: CheckStock contract + DTOs
@@ -82,10 +83,15 @@ examples/multi-module/
     ├── contract/
     │   ├── contract.go       # Port: PlaceOrder contract + DTOs
     │   └── events.go         # OrderCreatedEvent + OrderCreatedV1 (consumed by notification)
-    ├── ports.go              # Driven ports the order domain needs (InventoryPort, ...)
-    ├── adapter.go            # Adapters implementing the ports over the providers' contracts
-    └── module.go             # Orchestration, Dependencies(), ConsumeServices()
+    ├── ports.go              # Driven ports the order domain needs, in its own terms (InventoryPort, ...)
+    ├── service.go            # Domain: order placement rules, plain Go over the ports
+    ├── adapter.go            # Adapters translating the ports to the providers' contracts
+    ├── module.go             # mono.Module: wiring, driving adapter, Dependencies(), ConsumeServices()
+    ├── service_test.go       # Domain tests with fake ports (no framework, no NATS)
+    └── module_test.go        # monotest.CheckModule conformance test
 ```
+
+Inventory, payment and notification are small enough to keep their logic in the handler. The order module has rules and dependencies, so it shows the full layout: `service.go` and `ports.go` import only the standard library.
 
 ## Module Implementations
 
@@ -139,14 +145,28 @@ Receives notifications through both service calls (QueueGroup) and events (typed
 ### Order Module
 
 ```go
-// order/ports.go — what the domain needs, in the providers' contract DTOs
+// order/ports.go — what the domain needs, in the order module's own terms
 type InventoryPort interface {
-    CheckStock(ctx context.Context, req inventorycontract.CheckStockRequest) (inventorycontract.CheckStockResponse, error)
+    Available(ctx context.Context, productID string, quantity int) (bool, error)
 }
 
-// order/adapter.go — the port implemented over the provider's contract
-func (a inventoryAdapter) CheckStock(ctx context.Context, req inventorycontract.CheckStockRequest) (inventorycontract.CheckStockResponse, error) {
-    return inventorycontract.CheckStock.Call(ctx, a.container, req)
+// order/service.go — the domain: plain Go, no framework, no other module
+func (s *Service) PlaceOrder(ctx context.Context, order NewOrder) (Result, error) {
+    available, err := s.inventory.Available(ctx, order.ProductID, order.Quantity)
+    // ...
+}
+
+// order/adapter.go — the port implemented over the provider's contract,
+// translating between the order module's terms and the provider's DTOs
+type inventoryAdapter struct{ services types.ServiceLookup }
+
+func (a inventoryAdapter) Available(ctx context.Context, productID string, quantity int) (bool, error) {
+    resp, err := inventorycontract.CheckStock.Call(ctx, a.services,
+        inventorycontract.CheckStockRequest{ProductID: productID, Quantity: quantity})
+    if err != nil {
+        return false, fmt.Errorf("inventory check failed: %w", err)
+    }
+    return resp.Available, nil
 }
 
 // order/module.go
@@ -155,7 +175,8 @@ func (m *OrderModule) Dependencies() []string {
 }
 
 // Validated by the framework at startup: each contract must be provided by a
-// declared dependency with the matching service type.
+// declared dependency with the matching service type. The list is complete:
+// a call to a dependency service that is not in it is a boundary violation.
 func (m *OrderModule) ConsumeServices() []types.BaseServiceDefinition {
     return []types.BaseServiceDefinition{
         inventorycontract.CheckStock.ToBase(),
@@ -167,9 +188,22 @@ func (m *OrderModule) ConsumeServices() []types.BaseServiceDefinition {
 func (m *OrderModule) SetDependencyServiceContainer(dependency string, container mono.ServiceContainer) {
     switch dependency {
     case "inventory":
-        m.inventory = inventoryAdapter{container: container}
+        m.inventory = inventoryAdapter{services: container}
     // ...
     }
+}
+
+// The containers and the event bus are set before Start: build the domain.
+func (m *OrderModule) Start(_ context.Context) error {
+    service, err := NewService(m.inventory, m.payment, m.notification, m.events)
+    m.service = service
+    return err
+}
+
+// The driving adapter: contract DTO in, domain call, contract DTO out.
+func (m *OrderModule) placeOrder(ctx context.Context, request contract.CreateOrderRequest, _ *mono.Msg) (contract.CreateOrderResponse, error) {
+    result, err := m.service.PlaceOrder(ctx, NewOrder{ProductID: request.ProductID, /* ... */})
+    // ...
 }
 ```
 
@@ -181,7 +215,11 @@ Orchestrates order placement by:
 
 ## Tests
 
-Each module has a conformance test built on `monotest.CheckModule` (`inventory/module_test.go`, `payment/module_test.go`, `notification/module_test.go`, `order/module_test.go`). The order test stands in for its three dependencies with `monotest.NewContainer` and the providers' contracts, then exercises `PlaceOrder`; a module that registered on a dependency's container, bypassed a port with a raw request, or never used a declared dependency would fail it.
+Three kinds of test, from fastest to widest:
+
+- **Domain** (`order/service_test.go`): the order rules with fake ports. The file imports only the `order` package and the standard library.
+- **Conformance** (`*/module_test.go`): each module through `monotest.CheckModule`. The order test stands in for its three dependencies with `monotest.NewContainer` and the providers' contracts, then exercises `PlaceOrder`; a module that registered on a dependency's container, bypassed a port with a raw request, called a service missing from `ConsumeServices()`, or never used a declared dependency or contract would fail it.
+- **Import rule** (`imports_test.go`): `monotest.CheckImports` fails when a contract package imports more than it may, or a module imports another module's package instead of its `contract`.
 
 ```bash
 go test ./examples/multi-module/...
@@ -367,9 +405,9 @@ Service name, subject, kind and serialization are written once; a consumer that 
 
 ```go
 // Domain logic talks to the port; the adapter calls the contract and waits for the reply
-stockResult, err := m.inventory.CheckStock(ctx, inventorycontract.CheckStockRequest{ProductID: id, Quantity: qty})
-if !stockResult.Available {
-    return failureResponse  // Stop order placement
+available, err := s.inventory.Available(ctx, order.ProductID, order.Quantity)
+if !available {
+    return Result{Status: StatusOutOfStock}, nil // Stop order placement
 }
 ```
 
@@ -377,7 +415,7 @@ if !stockResult.Available {
 
 ```go
 // Send notification and continue (acceptance ACK only)
-_ = m.notification.OrderCreated(ctx, notif) // adapter: notificationcontract.OnOrderCreated.Send(...)
+_ = s.notification.OrderPlaced(ctx, placed) // adapter: notificationcontract.OnOrderCreated.Send(...)
 ```
 
 ### 7. Event Publishing and Subscription
@@ -386,8 +424,9 @@ _ = m.notification.OrderCreated(ctx, notif) // adapter: notificationcontract.OnO
 // order/contract/events.go: the emitter declares the event
 var OrderCreatedV1 = helper.EventDefinition[OrderCreatedEvent]("order", "OrderCreated", "v1")
 
-// Order publishes (typed, best-effort)
-contract.OrderCreatedV1.Publish(m.eventBus, event, nil)
+// Order publishes (typed, best-effort): the domain calls its events port,
+// the adapter publishes on the bus
+contract.OrderCreatedV1.Publish(a.bus, event, nil)
 
 // Notification consumes (typed)
 helper.RegisterTypedEventConsumer(registry, ordercontract.OrderCreatedV1, m.handleOrderCreatedEvent, m)
@@ -398,20 +437,16 @@ helper.RegisterTypedEventConsumer(registry, ordercontract.OrderCreatedV1, m.hand
 ```go
 // Check inventory first
 if !available {
-    return CreateOrderResponse{
-        Status: "failed_out_of_stock",
-    }
+    return Result{Status: StatusOutOfStock}, nil
 }
 
 // Process payment
-if !paymentSuccess {
-    return CreateOrderResponse{
-        Status: "payment_failed",
-    }
+if !approved {
+    return Result{Status: StatusPaymentFailed}, nil
 }
 
 // Notification failure doesn't fail the order (graceful degradation)
-if err := m.notification.OrderCreated(ctx, notif); err != nil {
+if err := s.notification.OrderPlaced(ctx, placed); err != nil {
     fmt.Printf("warning: %v\n", err) // Best effort
 }
 ```

@@ -16,8 +16,16 @@ import (
 // - Stream Consumer services: JetStream durable pull consumer (at-least-once)
 // - Cron services: Server-side cron-scheduled handler (JetStream message scheduler)
 //
+// The lookup methods (Get*, Has) are those of the embedded ServiceLookup, the
+// read side of the container. Code that only calls services should accept a
+// ServiceLookup rather than a ServiceContainer.
+//
 // See docs/spec/foundation.md for detailed design documentation.
 type ServiceContainer interface {
+	// ServiceLookup is the read side: the service clients and channels a
+	// consumer needs to call the services registered on this container.
+	ServiceLookup
+
 	// BindModule binds this container to a module
 	BindModule(module Module) error
 
@@ -53,6 +61,53 @@ type ServiceContainer interface {
 	// The handler receives batches of messages that should be individually acknowledged.
 	RegisterStreamConsumerService(name string, config StreamConsumerConfig, handler StreamConsumerHandler) error
 
+	// RegisterCronService registers a cron-scheduled service backed by the
+	// embedded NATS JetStream message scheduler (nats-server v2.14+). The
+	// schedule is registered server-side, so exactly one message fires per
+	// occurrence across a cluster. Each occurrence is delivered to the handler
+	// through a durable pull consumer with explicit acknowledgement. Requires
+	// JetStream to be enabled. There is no client to retrieve: the service is
+	// driven entirely by the server-side schedule.
+	//
+	// Note: cron handlers are not currently wrapped by the middleware chain
+	// (access-log, audit, request-id); the handler is invoked directly.
+	RegisterCronService(name string, config CronServiceConfig, handler CronHandler) error
+
+	// Unregister removes a service from the container
+	Unregister(name string) error
+
+	// Entries returns all registered ServiceEntry pointers
+	Entries() []*ServiceEntry
+
+	// StartChannelRouters starts router goroutines for all registered channel services.
+	// This is called by the lifecycle manager after all modules have started.
+	// Router goroutines handle message routing from provider out channels to per-consumer channels.
+	StartChannelRouters(ctx context.Context)
+}
+
+// ServiceLookup is the read side of a ServiceContainer: it hands out the
+// clients and channels of the services registered on a container and nothing
+// else. It cannot register, replace or remove a service.
+//
+// It is the interface a consumer should hold for a dependency. The container a
+// module receives in DependentModule.SetDependencyServiceContainer is a
+// ServiceContainer for compatibility, but a driven adapter only needs to look
+// services up, so it should store it as a ServiceLookup: mutating a
+// dependency's container is then a compile error instead of a
+// register-on-dependency boundary violation at runtime. The typed contracts in
+// pkg/helper (Call, Send, Publish) and the helper.Call*/Send*/Publish*
+// functions accept a ServiceLookup.
+//
+// Example:
+//
+//	type inventoryAdapter struct{ services types.ServiceLookup }
+//
+//	func (m *OrderModule) SetDependencyServiceContainer(dependency string, container types.ServiceContainer) {
+//	    if dependency == "inventory" {
+//	        m.inventory = inventoryAdapter{services: container}
+//	    }
+//	}
+type ServiceLookup interface {
 	// GetChannelService retrieves a channel service by name with a per-consumer out channel.
 	// The consumerModule parameter identifies the calling module and ensures it receives
 	// a dedicated out channel, preventing race conditions when multiple modules consume
@@ -74,31 +129,8 @@ type ServiceContainer interface {
 	// that can publish messages to the stream for consumption.
 	GetStreamConsumerService(name string) (StreamConsumerServiceClient, error)
 
-	// RegisterCronService registers a cron-scheduled service backed by the
-	// embedded NATS JetStream message scheduler (nats-server v2.14+). The
-	// schedule is registered server-side, so exactly one message fires per
-	// occurrence across a cluster. Each occurrence is delivered to the handler
-	// through a durable pull consumer with explicit acknowledgement. Requires
-	// JetStream to be enabled. There is no client to retrieve: the service is
-	// driven entirely by the server-side schedule.
-	//
-	// Note: cron handlers are not currently wrapped by the middleware chain
-	// (access-log, audit, request-id); the handler is invoked directly.
-	RegisterCronService(name string, config CronServiceConfig, handler CronHandler) error
-
 	// Has checks if a service with the given name is registered
 	Has(name string) bool
-
-	// Unregister removes a service from the container
-	Unregister(name string) error
-
-	// Entries returns all registered ServiceEntry pointers
-	Entries() []*ServiceEntry
-
-	// StartChannelRouters starts router goroutines for all registered channel services.
-	// This is called by the lifecycle manager after all modules have started.
-	// Router goroutines handle message routing from provider out channels to per-consumer channels.
-	StartChannelRouters(ctx context.Context)
 }
 
 // RequestReplyHandler processes request messages and returns response data.

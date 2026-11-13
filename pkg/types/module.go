@@ -166,9 +166,18 @@ type ServiceProviderModule interface {
 // mismatch fails the start of the module (fail fast) instead of surfacing as a
 // "service not found" error on the first call at runtime.
 //
+// The list is complete: implementing the interface, even with an empty list,
+// says that the module calls nothing else. A lookup of a request-reply, queue
+// group or stream consumer service of a dependency that is not in the list is
+// an undeclared-service-use boundary violation: recorded and let through by
+// default, rejected with ErrModuleBoundaryViolation under
+// WithStrictModuleBoundaries. Channel services (they have no contract type)
+// and services of plugins are not checked, and neither is a module that does
+// not implement the interface.
+//
 // The declaration is also reported in the module's ModuleBoundaryReport, next
-// to the services the module was observed to use, so an undeclared use stands
-// out.
+// to the services the module was observed to use and the contracts it has not
+// used so far.
 //
 // Example:
 //

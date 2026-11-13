@@ -226,3 +226,122 @@ func TestModuleBoundaries_ChannelConsumerMismatch(t *testing.T) {
 		}
 	}
 }
+
+// newDeclaringApp starts a "shop" that declares only stock/check in
+// ConsumeServices(), next to a "stock" provider that also offers stock/restock.
+func newDeclaringApp(t *testing.T, opts ...mono.MonoFrameworkOption) (mono.MonoApplication, *contractProvider, *contractConsumer) {
+	t.Helper()
+	fw := newWorkerPoolApp(t, opts...)
+	stock := &contractProvider{testModule: testModule{name: "stock"}, restocked: make(chan string, 1)}
+	shop := &contractConsumer{
+		testModule: testModule{name: "shop"},
+		contracts:  []types.BaseServiceDefinition{checkStockContract.ToBase()},
+	}
+	for _, m := range []mono.Module{stock, shop} {
+		if err := fw.Register(m); err != nil {
+			t.Fatalf("register %s: %v", m.Name(), err)
+		}
+	}
+	startWorkerPoolApp(t, fw)
+	return fw, stock, shop
+}
+
+func shopReport(t *testing.T, fw mono.MonoApplication) types.ModuleBoundaryReport {
+	t.Helper()
+	for _, r := range fw.ModuleBoundaries() {
+		if r.Module == "shop" {
+			return r
+		}
+	}
+	t.Fatal("no report for shop")
+	return types.ModuleBoundaryReport{}
+}
+
+func TestModuleBoundaries_UndeclaredServiceUseRecorded(t *testing.T) {
+	fw, stock, shop := newDeclaringApp(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	// Before any call, the declared contract is reported as not used yet.
+	if r := shopReport(t, fw); len(r.UnusedContracts) != 1 || r.UnusedContracts[0] != checkStockContract.ToBase() {
+		t.Fatalf("UnusedContracts = %+v", r.UnusedContracts)
+	}
+	if _, err := checkStockContract.Call(ctx, shop.stock, stockRequest{ProductID: "a"}); err != nil {
+		t.Fatalf("declared contract: %v", err)
+	}
+	// stock/restock is not in ConsumeServices(): non-strict, so the message is
+	// delivered and the use is recorded.
+	if err := restockContract.Send(ctx, shop.stock, stockRequest{ProductID: "mouse"}); err != nil {
+		t.Fatalf("non-strict send must go through: %v", err)
+	}
+	select {
+	case got := <-stock.restocked:
+		if got != "mouse" {
+			t.Errorf("restocked %q", got)
+		}
+	case <-ctx.Done():
+		t.Fatal("the undeclared send was not delivered")
+	}
+
+	r := shopReport(t, fw)
+	if len(r.Violations) != 1 {
+		t.Fatalf("Violations = %+v", r.Violations)
+	}
+	v := r.Violations[0]
+	if v.Kind != types.BoundaryViolationUndeclaredServiceUse || v.Dependency != "stock" || v.Subject != "services.stock.restock" || v.Count != 1 {
+		t.Errorf("violation = %+v", v)
+	}
+	if len(r.UnusedContracts) != 0 {
+		t.Errorf("UnusedContracts = %+v", r.UnusedContracts)
+	}
+}
+
+func TestModuleBoundaries_UndeclaredServiceUseStrict(t *testing.T) {
+	fw, stock, shop := newDeclaringApp(t, mono.WithStrictModuleBoundaries())
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	if _, err := checkStockContract.Call(ctx, shop.stock, stockRequest{ProductID: "a"}); err != nil {
+		t.Fatalf("declared contract: %v", err)
+	}
+	if err := restockContract.Send(ctx, shop.stock, stockRequest{ProductID: "mouse"}); !errors.Is(err, monoerrors.ErrModuleBoundaryViolation) {
+		t.Fatalf("expected ErrModuleBoundaryViolation, got %v", err)
+	}
+	select {
+	case got := <-stock.restocked:
+		t.Fatalf("strict mode must not deliver the undeclared send, got %q", got)
+	case <-time.After(200 * time.Millisecond):
+	}
+	if r := shopReport(t, fw); len(r.Violations) != 0 {
+		t.Errorf("strict run must record no violations, got %+v", r.Violations)
+	}
+}
+
+// The entries a module sees on a dependency's container describe the services
+// but do not carry the provider's handlers.
+func TestModuleBoundaries_DependencyEntriesCarryNoHandlers(t *testing.T) {
+	fw, _, shop := newDeclaringApp(t)
+	entries := shop.stock.Entries()
+	if len(entries) != 2 {
+		t.Fatalf("Entries = %d", len(entries))
+	}
+	for _, e := range entries {
+		if e.RequestHandler != nil {
+			t.Errorf("%s: request handler exposed to the consumer", e.Name)
+		}
+		for _, pair := range e.QueueHandlers {
+			if pair.Handler != nil {
+				t.Errorf("%s: queue group handler exposed to the consumer", e.Name)
+			}
+		}
+		if e.ModuleName != "stock" || e.Subject == "" || e.Contract == nil {
+			t.Errorf("%s: description incomplete: %+v", e.Name, e)
+		}
+	}
+	// The host still sees the real entries.
+	for _, e := range fw.Services("stock").Entries() {
+		if e.Type == types.ServiceTypeRequestReply && e.RequestHandler == nil {
+			t.Errorf("%s: the host's container must keep the handler", e.Name)
+		}
+	}
+}

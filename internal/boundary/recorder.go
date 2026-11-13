@@ -7,8 +7,11 @@
 //
 // Recording a lookup is on the request path (every helper.Call* looks the
 // service up once), so it is a read-locked map lookup plus an atomic increment,
-// with no allocation after the first lookup of a service. Violations are rare
-// and take a mutex.
+// with no allocation after the first lookup of a service; checking it against
+// the consumed contracts (CheckUse) adds one lock-free map lookup. A repeated
+// violation takes the same path (read lock, atomic increment), because in
+// non-strict mode a module that keeps crossing a boundary does so on every
+// request; only the first occurrence of a violation takes the write lock.
 package boundary
 
 import (
@@ -30,10 +33,16 @@ type Recorder struct {
 	allowed  map[string]struct{} // declared dependencies and plugin names
 	consumed []types.BaseServiceDefinition
 
+	// consumedSet indexes consumed; enforceConsumed makes a lookup outside it
+	// a violation (see EnforceConsumed). Both are fixed before the recorder is
+	// shared, so CheckUse reads them without a lock.
+	consumedSet     map[types.BaseServiceDefinition]struct{}
+	enforceConsumed bool
+
 	usesMu sync.RWMutex
 	uses   map[useKey]*use
 
-	mu         sync.Mutex
+	mu         sync.RWMutex
 	violations map[violationKey]*violation
 }
 
@@ -52,7 +61,7 @@ type violationKey struct {
 }
 
 type violation struct {
-	count int64
+	count atomic.Int64
 	first time.Time
 }
 
@@ -60,16 +69,21 @@ type violation struct {
 // (duplicates are dropped, order kept) and plugins the names of the registered
 // plugin modules; both are allowed targets of service subjects. consumed is
 // what the module reported through ServiceConsumerModule, kept for the
-// report. With strict true, Violation returns an error instead of recording.
+// report and, after EnforceConsumed, checked against the module's lookups.
+// With strict true, Violation returns an error instead of recording.
 func New(module string, declared, plugins []string, consumed []types.BaseServiceDefinition, strict bool, logger types.Logger) *Recorder {
 	r := &Recorder{
-		module:     module,
-		strict:     strict,
-		logger:     logger,
-		allowed:    make(map[string]struct{}, len(declared)+len(plugins)),
-		consumed:   consumed,
-		uses:       make(map[useKey]*use),
-		violations: make(map[violationKey]*violation),
+		module:      module,
+		strict:      strict,
+		logger:      logger,
+		allowed:     make(map[string]struct{}, len(declared)+len(plugins)),
+		consumed:    consumed,
+		consumedSet: make(map[types.BaseServiceDefinition]struct{}, len(consumed)),
+		uses:        make(map[useKey]*use),
+		violations:  make(map[violationKey]*violation),
+	}
+	for _, def := range consumed {
+		r.consumedSet[def] = struct{}{}
 	}
 	for _, dep := range declared {
 		if _, dup := r.allowed[dep]; dup {
@@ -100,6 +114,34 @@ func (r *Recorder) Allowed(module string) bool {
 	return ok
 }
 
+// EnforceConsumed makes the consumed list given to New complete: from then on
+// CheckUse reports a lookup of a service that is not in it. The lifecycle
+// calls it for a module that implements ServiceConsumerModule (even when the
+// list is empty), and not otherwise, so a module that declares nothing is not
+// checked. It must be called before the recorder is handed to a dependency
+// view, and returns the recorder for chaining.
+func (r *Recorder) EnforceConsumed() *Recorder {
+	r.enforceConsumed = true
+	return r
+}
+
+// CheckUse reports whether the module may look up service of kind typ on
+// dependency. When the consumed list is enforced (EnforceConsumed) and holds no
+// contract with that module, name and type, the lookup is an
+// undeclared-service-use violation: rejected with ErrModuleBoundaryViolation
+// in strict mode, recorded and let through (nil) otherwise. Channel services
+// are never checked, as they have no contract type. It is on the request path
+// and costs one map lookup.
+func (r *Recorder) CheckUse(dependency, service string, typ types.ServiceType) error {
+	if !r.enforceConsumed || typ == types.ServiceTypeChannel {
+		return nil
+	}
+	if _, ok := r.consumedSet[types.BaseServiceDefinition{ModuleName: dependency, Name: service, Type: typ}]; ok {
+		return nil
+	}
+	return r.Violation(types.BoundaryViolationUndeclaredServiceUse, dependency, types.ServiceSubject(dependency, service))
+}
+
 // Lookup records a successful lookup of service on dependency.
 func (r *Recorder) Lookup(dependency, service string, typ types.ServiceType) {
 	key := useKey{module: dependency, service: service}
@@ -120,8 +162,10 @@ func (r *Recorder) Lookup(dependency, service string, typ types.ServiceType) {
 	u.count.Add(1)
 }
 
-// Violation records a boundary crossing of kind against dependency (subject
-// is set for bus operations). In strict mode nothing is recorded and
+// Violation records a boundary crossing of kind against dependency. subject
+// is the NATS subject of a bus operation, the service subject of an undeclared
+// service use, the consumer name of a channel-consumer mismatch, and empty
+// otherwise. In strict mode nothing is recorded and
 // ErrModuleBoundaryViolation is returned for the caller to propagate; otherwise
 // the crossing is counted, logged once per (kind, dependency, subject) at Warn,
 // and nil is returned so the operation can go through.
@@ -131,15 +175,25 @@ func (r *Recorder) Violation(kind types.BoundaryViolationKind, dependency, subje
 	}
 	key := violationKey{kind: kind, dependency: dependency, subject: subject}
 
-	r.mu.Lock()
+	r.mu.RLock()
 	v, seen := r.violations[key]
+	r.mu.RUnlock()
+	if seen {
+		v.count.Add(1)
+		return nil
+	}
+
+	r.mu.Lock()
+	v, seen = r.violations[key]
 	if !seen {
 		v = &violation{first: time.Now()}
 		r.violations[key] = v
 	}
-	v.count++
 	r.mu.Unlock()
+	v.count.Add(1)
 
+	// Only the caller that created the entry logs, so the warning is written
+	// once however many goroutines cross the boundary at the same time.
 	if !seen && r.logger != nil {
 		args := []any{"module", r.module, "kind", string(kind), "dependency", dependency}
 		if subject != "" {
@@ -162,9 +216,11 @@ func (r *Recorder) Report() types.ModuleBoundaryReport {
 	}
 
 	used := make(map[string]struct{})
+	usedServices := make(map[useKey]struct{})
 	r.usesMu.RLock()
 	for key, u := range r.uses {
 		used[key.module] = struct{}{}
+		usedServices[key] = struct{}{}
 		report.Observed = append(report.Observed, types.ServiceUse{
 			Module: key.module, Service: key.service, Type: u.typ, Lookups: u.count.Load(),
 		})
@@ -184,13 +240,34 @@ func (r *Recorder) Report() types.ModuleBoundaryReport {
 		}
 	}
 
-	r.mu.Lock()
+	// Consumed contracts never looked up, in declaration order. Only those of
+	// declared dependencies: plugin containers are not views, so a lookup on
+	// one is never observed.
+	declared := make(map[string]struct{}, len(r.declared))
+	for _, dep := range r.declared {
+		declared[dep] = struct{}{}
+	}
+	listed := make(map[types.BaseServiceDefinition]struct{}, len(r.consumed))
+	for _, def := range r.consumed {
+		if _, ok := declared[def.ModuleName]; !ok {
+			continue
+		}
+		if _, dup := listed[def]; dup {
+			continue
+		}
+		listed[def] = struct{}{}
+		if _, ok := usedServices[useKey{module: def.ModuleName, service: def.Name}]; !ok {
+			report.UnusedContracts = append(report.UnusedContracts, def)
+		}
+	}
+
+	r.mu.RLock()
 	for key, v := range r.violations {
 		report.Violations = append(report.Violations, types.BoundaryViolation{
-			Kind: key.kind, Dependency: key.dependency, Subject: key.subject, Count: v.count, First: v.first,
+			Kind: key.kind, Dependency: key.dependency, Subject: key.subject, Count: v.count.Load(), First: v.first,
 		})
 	}
-	r.mu.Unlock()
+	r.mu.RUnlock()
 	sort.Slice(report.Violations, func(i, j int) bool {
 		a, b := report.Violations[i], report.Violations[j]
 		if a.Kind != b.Kind {

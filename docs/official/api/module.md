@@ -381,7 +381,7 @@ func (m *OrderModule) ConsumeServices() []types.BaseServiceDefinition {
 }
 ```
 
-The framework validates the list when the module starts, after its dependency containers are set: each contract must name a module in `Dependencies()` (or a plugin), that module must have registered the service, and the registered service type must match. A mismatch fails the start (`ErrModuleStartFailed` wrapping `ErrMissingDependency`, `ErrServiceNotFound` or `ErrServiceContractMismatch`) instead of surfacing on the first call. The list is also part of the module's `ModuleBoundaryReport`. See the [Module Boundaries Guide](../guides/module-boundaries.md).
+The framework validates the list when the module starts, after its dependency containers are set: each contract must name a module in `Dependencies()` (or a plugin), that module must have registered the service, and the registered service type must match. A mismatch fails the start (`ErrModuleStartFailed` wrapping `ErrMissingDependency`, `ErrServiceNotFound` or `ErrServiceContractMismatch`) instead of surfacing on the first call. Since v0.2.0 the list is complete: a lookup of a request-reply, queue group or stream consumer service of a dependency that is not in it is an `undeclared-service-use` boundary violation (recorded by default, rejected under `WithStrictModuleBoundaries`). The list is also part of the module's `ModuleBoundaryReport`, with the contracts not used so far. See the [Module Boundaries Guide](../guides/module-boundaries.md).
 
 **Note:** This interface extends only `Module`, not `EventBusAwareModule`. The `EventRegistry` provides event discovery and registration without requiring direct EventBus access.
 

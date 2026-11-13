@@ -79,6 +79,13 @@ func WithOrderingOnlyDependency(name string) Option {
 	return func(h *Harness) { h.orderingOnly[name] = true }
 }
 
+// WithUnexercisedContract excludes def from the "consumed but never looked
+// up" check of CheckModule (rule 9), for a contract the exercise cannot reach
+// in a unit test (for example one called only from a JetStream handler).
+func WithUnexercisedContract(def types.BaseServiceDefinition) Option {
+	return func(h *Harness) { h.unexercised[def] = true }
+}
+
 // WithStopTimeout bounds, in Stop and CheckModule, the wait for handlers in
 // flight and for the module's Stop (default 5s).
 func WithStopTimeout(d time.Duration) Option {
@@ -109,6 +116,7 @@ type Harness struct {
 
 	exercise     func(ctx context.Context, h *Harness) error
 	orderingOnly map[string]bool
+	unexercised  map[types.BaseServiceDefinition]bool
 	stopTimeout  time.Duration
 
 	rec        *boundary.Recorder
@@ -130,6 +138,7 @@ func New(tb testing.TB, module types.Module, opts ...Option) *Harness {
 		deps:         make(map[string]*Container),
 		plugins:      make(map[string]types.PluginModule),
 		orderingOnly: make(map[string]bool),
+		unexercised:  make(map[types.BaseServiceDefinition]bool),
 		stopTimeout:  5 * time.Second,
 		logger:       newTestLogger(tb),
 	}
@@ -229,7 +238,8 @@ func (h *Harness) Start(ctx context.Context) (err error) {
 		declared = depMod.Dependencies()
 	}
 	var consumed []types.BaseServiceDefinition
-	if consumer, ok := h.module.(types.ServiceConsumerModule); ok {
+	consumer, declaresConsumed := h.module.(types.ServiceConsumerModule)
+	if declaresConsumed {
 		consumed = consumer.ConsumeServices()
 	}
 	pluginNames := make([]string, 0, len(h.plugins))
@@ -239,6 +249,9 @@ func (h *Harness) Start(ctx context.Context) (err error) {
 		pluginByName[p.Name()] = p
 	}
 	h.rec = boundary.New(name, declared, pluginNames, consumed, h.strict, h.logger)
+	if declaresConsumed {
+		h.rec.EnforceConsumed()
+	}
 
 	// Step 0.5: plugins.
 	if user, ok := h.module.(types.UsePluginModule); ok {

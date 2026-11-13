@@ -3,15 +3,25 @@
 // It demonstrates the EventEmitterModule pattern for publishing events and the
 // ServiceConsumerModule pattern for declaring the service contracts it calls.
 //
+// The package follows the Ports and Adapters layout:
+//
+//   - contract/   what other modules may import: the place-order service, its
+//     DTOs and the events the module emits;
+//   - ports.go    the driven ports the domain needs, in the module's own terms;
+//   - service.go  the domain logic, plain Go over the ports;
+//   - adapter.go  the driven adapters, translating the ports to the providers'
+//     contracts;
+//   - module.go   this file: the mono.Module that wires the adapters behind the
+//     ports and the driving adapter that turns a place-order request into a
+//     call of the domain.
+//
 // The module imports only the contract sub-packages of its dependencies, never
-// their module packages: the ports it needs are its own (ports.go) and the
-// adapters (adapter.go) implement them over the providers' contracts.
+// their module packages.
 package order
 
 import (
 	"context"
 	"fmt"
-	"time"
 
 	"github.com/go-monolith/mono"
 	inventorycontract "github.com/go-monolith/mono/examples/multi-module/inventory/contract"
@@ -24,12 +34,17 @@ import (
 // NAME is the unique identifier for the order module.
 const NAME = "order"
 
-// OrderModule implements the mono.Module that orchestrates order placement
+// OrderModule implements the mono.Module of the order module. It holds no
+// order rules: it receives the framework's containers and event bus, puts the
+// adapters behind the ports, builds the domain Service and exposes it through
+// the place-order contract.
 type OrderModule struct {
 	inventory    InventoryPort
 	payment      PaymentPort
 	notification NotificationPort
-	eventBus     mono.EventBus
+	events       EventsPort
+
+	service *Service
 }
 
 // Compile-time interface checks
@@ -66,7 +81,8 @@ func (m *OrderModule) Dependencies() []string {
 // ConsumeServices declares the service contracts this module calls. The
 // framework checks at startup that each one is provided by a declared
 // dependency with the right service type, so a renamed or missing service
-// fails fast instead of on the first order.
+// fails fast instead of on the first order. The list is complete: a call to a
+// dependency service that is not in it is reported as a boundary violation.
 func (m *OrderModule) ConsumeServices() []types.BaseServiceDefinition {
 	return []types.BaseServiceDefinition{
 		inventorycontract.CheckStock.ToBase(),
@@ -75,8 +91,39 @@ func (m *OrderModule) ConsumeServices() []types.BaseServiceDefinition {
 	}
 }
 
-// Start initializes the module
+// SetDependencyServiceContainer receives service containers from dependencies
+// and wires the driven adapters behind the module's ports.
+func (m *OrderModule) SetDependencyServiceContainer(dependency string, container mono.ServiceContainer) {
+	switch dependency {
+	case "inventory":
+		m.inventory = inventoryAdapter{services: container}
+	case "payment":
+		m.payment = paymentAdapter{services: container}
+	case "notification":
+		m.notification = notificationAdapter{services: container}
+	}
+}
+
+// SetEventBus is called by the framework to inject the event bus. It goes
+// behind the events port like any other outside dependency.
+func (m *OrderModule) SetEventBus(bus mono.EventBus) {
+	m.events = eventsAdapter{bus: bus}
+}
+
+// RegisterServices binds the driving adapter to the place-order contract.
+func (m *OrderModule) RegisterServices(container mono.ServiceContainer) error {
+	return contract.PlaceOrder.Register(container, m.placeOrder)
+}
+
+// Start builds the domain service over the ports wired above. The framework
+// has set every dependency container and the event bus by now, so a missing
+// port is a wiring error and fails the start.
 func (m *OrderModule) Start(_ context.Context) error {
+	service, err := NewService(m.inventory, m.payment, m.notification, m.events)
+	if err != nil {
+		return fmt.Errorf("order module: %w", err)
+	}
+	m.service = service
 	fmt.Println("  → Order module started (depends on: inventory, payment, notification)")
 	return nil
 }
@@ -87,105 +134,22 @@ func (m *OrderModule) Stop(_ context.Context) error {
 	return nil
 }
 
-// SetDependencyServiceContainer receives service containers from dependencies
-// and wires the driven adapters behind the module's ports.
-func (m *OrderModule) SetDependencyServiceContainer(dependency string, container mono.ServiceContainer) {
-	switch dependency {
-	case "inventory":
-		m.inventory = inventoryAdapter{container: container}
-	case "payment":
-		m.payment = paymentAdapter{container: container}
-	case "notification":
-		m.notification = notificationAdapter{container: container}
-	}
-}
-
-// SetEventBus is called by the framework to inject the event bus
-func (m *OrderModule) SetEventBus(bus mono.EventBus) {
-	m.eventBus = bus
-}
-
-// RegisterServices binds the domain handler to the place-order contract.
-func (m *OrderModule) RegisterServices(container mono.ServiceContainer) error {
-	return contract.PlaceOrder.Register(container, m.placeOrder)
-}
-
-// placeOrder handles order placement requests with typed request/response
+// placeOrder is the driving adapter of the place-order contract: it translates
+// the contract's request into the domain's terms, calls the domain, and
+// translates the result back. Requests are served only after Start.
 func (m *OrderModule) placeOrder(ctx context.Context, request contract.CreateOrderRequest, _ *mono.Msg) (contract.CreateOrderResponse, error) {
-	if request.ProductID == "" {
-		return contract.CreateOrderResponse{}, fmt.Errorf("product_id is required")
-	}
-	if request.Quantity <= 0 {
-		return contract.CreateOrderResponse{}, fmt.Errorf("quantity must be positive")
-	}
-	if request.Amount <= 0 {
-		return contract.CreateOrderResponse{}, fmt.Errorf("amount must be positive")
-	}
-	if request.Currency == "" {
-		request.Currency = "USD"
-	}
-
-	orderID := fmt.Sprintf("order_%d", time.Now().Unix())
-
-	// Step 1: Check inventory
-	stockResult, err := m.inventory.CheckStock(ctx, inventorycontract.CheckStockRequest{
+	result, err := m.service.PlaceOrder(ctx, NewOrder{
 		ProductID: request.ProductID,
 		Quantity:  request.Quantity,
+		Amount:    request.Amount,
+		Currency:  request.Currency,
 	})
 	if err != nil {
-		return contract.CreateOrderResponse{}, fmt.Errorf("inventory check failed: %w", err)
+		return contract.CreateOrderResponse{}, err
 	}
-	if !stockResult.Available {
-		return contract.CreateOrderResponse{
-			OrderID: orderID,
-			Status:  "failed_out_of_stock",
-			Message: "Product is out of stock",
-		}, nil
-	}
-
-	// Step 2: Process payment
-	paymentResult, err := m.payment.Process(ctx, paymentcontract.ProcessPaymentRequest{
-		OrderID:  orderID,
-		Amount:   request.Amount,
-		Currency: request.Currency,
-	})
-	if err != nil {
-		return contract.CreateOrderResponse{}, fmt.Errorf("payment processing failed: %w", err)
-	}
-	if !paymentResult.Success {
-		return contract.CreateOrderResponse{
-			OrderID: orderID,
-			Status:  "payment_failed",
-			Message: "Payment was declined",
-		}, nil
-	}
-
-	// Step 3: Send notification via queue group (fire-and-forget).
-	// Graceful degradation: notification failure doesn't fail the order.
-	notif := notificationcontract.OrderCreatedNotification{
-		OrderID:   orderID,
-		ProductID: request.ProductID,
-		Amount:    request.Amount,
-		Timestamp: time.Now(),
-	}
-	if err := m.notification.OrderCreated(ctx, notif); err != nil {
-		fmt.Printf("  → Warning: failed to send notification for order %s: %v\n", orderID, err)
-	}
-
-	// Step 4: Publish event to event bus using the typed definition (best-effort)
-	orderEvent := contract.OrderCreatedEvent{
-		OrderID:   orderID,
-		ProductID: request.ProductID,
-		Amount:    request.Amount,
-		Timestamp: time.Now(),
-	}
-	if err := contract.OrderCreatedV1.Publish(m.eventBus, orderEvent, nil); err != nil {
-		fmt.Printf("  → Warning: failed to publish OrderCreated event for order %s: %v\n", orderID, err)
-	}
-
 	return contract.CreateOrderResponse{
-		OrderID: orderID,
-		Status:  "success",
-		Message: "Order created successfully",
+		OrderID: result.OrderID,
+		Status:  string(result.Status),
+		Message: result.Message,
 	}, nil
 }

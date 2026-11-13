@@ -147,7 +147,8 @@ func (lm *lifecycleManager) ModuleEventBus(moduleName string) types.EventBus {
 }
 
 // newBoundaryRecorder builds the boundary recorder of module from its declared
-// dependencies, the registered plugins and its consumed contracts, and stores
+// dependencies, the registered plugins and its consumed contracts (enforced
+// against its lookups when it implements ServiceConsumerModule), and stores
 // it for ModuleBoundaries. It is removed again when the module's start fails
 // (rollback) and when the application stops.
 func (lm *lifecycleManager) newBoundaryRecorder(module types.Module, plugins map[string]types.PluginModule) *boundary.Recorder {
@@ -156,7 +157,8 @@ func (lm *lifecycleManager) newBoundaryRecorder(module types.Module, plugins map
 		declared = depMod.Dependencies()
 	}
 	var consumed []types.BaseServiceDefinition
-	if consumer, ok := module.(types.ServiceConsumerModule); ok {
+	consumer, declaresConsumed := module.(types.ServiceConsumerModule)
+	if declaresConsumed {
 		consumed = consumer.ConsumeServices()
 	}
 	pluginNames := make([]string, 0, len(plugins))
@@ -167,6 +169,11 @@ func (lm *lifecycleManager) newBoundaryRecorder(module types.Module, plugins map
 	lm.mu.Lock()
 	defer lm.mu.Unlock()
 	rec := boundary.New(module.Name(), declared, pluginNames, consumed, lm.strictBoundaries, lm.logger)
+	if declaresConsumed {
+		// A module that declares what it consumes declares all of it: a
+		// lookup outside the list is an undeclared-service-use violation.
+		rec.EnforceConsumed()
+	}
 	lm.boundaries[module.Name()] = rec
 	return rec
 }
@@ -181,8 +188,9 @@ func (lm *lifecycleManager) forgetBoundaries(moduleName string) {
 }
 
 // logBoundarySummary writes, at Stop, one Warn line per module and violation
-// kind and one Info line per declared dependency that was never looked up. A
-// dependency declared only for start ordering is legitimate, hence Info.
+// kind and one Info line per declared dependency, and per consumed contract,
+// that was never looked up. A dependency declared only for start ordering and
+// a contract not called during this run are legitimate, hence Info.
 func (lm *lifecycleManager) logBoundarySummary() {
 	for _, report := range lm.ModuleBoundaries() {
 		for _, v := range report.Violations {
@@ -194,6 +202,10 @@ func (lm *lifecycleManager) logBoundarySummary() {
 		}
 		for _, dep := range report.UnusedDependencies {
 			lm.logger.Info("Declared dependency never used (start ordering only?)", "module", report.Module, "dependency", dep)
+		}
+		for _, def := range report.UnusedContracts {
+			lm.logger.Info("Consumed service contract never used during this run",
+				"module", report.Module, "provider", def.ModuleName, "service", def.Name, "type", types.FormatServiceType(def.Type))
 		}
 	}
 }

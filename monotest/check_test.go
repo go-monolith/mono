@@ -184,3 +184,56 @@ func TestCheckModuleNilModule(t *testing.T) {
 		t.Fatalf("got %v", rec.errors)
 	}
 }
+
+func TestCheckModuleUndeclaredServiceUse(t *testing.T) {
+	bus := monotest.NewEventBus()
+	// The module calls inventory/reserve, which its ConsumeServices() omits.
+	rec := runCheck(t, &orderModule{extraUse: true},
+		monotest.WithDependency("inventory", newInventory(t, bus)), monotest.WithExercise(exercise))
+	want := "rule 5: boundary violation undeclared-service-use on inventory (services.inventory.reserve), 1 time(s): add the service's contract to ConsumeServices()"
+	if !rec.has(want) {
+		t.Fatalf("missing failure %q in %v", want, rec.errors)
+	}
+	if rec.fatal || len(rec.errors) != 1 {
+		t.Errorf("expected exactly that failure, not fatal: %v", rec.errors)
+	}
+}
+
+func TestCheckModuleUnusedContract(t *testing.T) {
+	bus := monotest.NewEventBus()
+	// The module declares inventory/restock but the exercise never reaches it.
+	rec := runCheck(t, &orderModule{noRestock: true},
+		monotest.WithDependency("inventory", newInventory(t, bus)), monotest.WithExercise(exercise))
+	if !rec.has("rule 9: consumed contract inventory/restock (queue_group) is in ConsumeServices() but was never looked up") {
+		t.Fatalf("expected the unused-contract failure, got %v", rec.errors)
+	}
+	if len(rec.errors) != 1 {
+		t.Errorf("expected exactly one failure, got %v", rec.errors)
+	}
+
+	rec = runCheck(t, &orderModule{noRestock: true},
+		monotest.WithDependency("inventory", newInventory(t, bus)), monotest.WithExercise(exercise),
+		monotest.WithUnexercisedContract(restock.ToBase()))
+	if len(rec.errors) != 0 {
+		t.Fatalf("an excluded contract must be exempt, got %v", rec.errors)
+	}
+}
+
+func TestHarnessStrictRejectsUndeclaredServiceUse(t *testing.T) {
+	bus := monotest.NewEventBus()
+	h := monotest.New(t, &orderModule{extraUse: true}, monotest.WithDependency("inventory", newInventory(t, bus)), monotest.Strict())
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := h.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := h.Stop(ctx); err != nil {
+			t.Errorf("Stop: %v", err)
+		}
+	}()
+	_, err := placeOrder.Call(ctx, h.Container(), stockReq{ProductID: "ab"})
+	if err == nil || !strings.Contains(err.Error(), "undeclared-service-use") {
+		t.Fatalf("expected the handler to fail on the undeclared lookup, got %v", err)
+	}
+}

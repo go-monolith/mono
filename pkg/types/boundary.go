@@ -30,6 +30,16 @@ const (
 	// another module's services.<module>.<service> subject, which would let it
 	// intercept that module's requests.
 	BoundaryViolationForeignServiceSubscription BoundaryViolationKind = "foreign-service-subscription"
+
+	// BoundaryViolationUndeclaredServiceUse: the module implements
+	// ServiceConsumerModule and looked up, on a dependency's container, a
+	// request-reply, queue group or stream consumer service that is not in
+	// its ConsumeServices() list (same module, name and type). A module that
+	// declares what it consumes declares all of it, so the list can be
+	// trusted. The service subject is reported in BoundaryViolation.Subject.
+	// Channel services have no contract type and are not checked, and a
+	// module that does not implement ServiceConsumerModule is not checked.
+	BoundaryViolationUndeclaredServiceUse BoundaryViolationKind = "undeclared-service-use"
 )
 
 // ServiceUse is one dependency service a module looked up at runtime, with
@@ -54,7 +64,8 @@ type BoundaryViolation struct {
 	// Dependency is the module whose boundary was crossed.
 	Dependency string `json:"dependency"`
 	// Subject is the NATS subject involved when the violation was a bus
-	// operation, the consumerModule name passed for a channel-consumer
+	// operation, the subject of the service looked up for an undeclared
+	// service use, the consumerModule name passed for a channel-consumer
 	// mismatch, and empty for other container operations.
 	Subject string `json:"subject"`
 	// Count is how many times it happened.
@@ -85,6 +96,12 @@ type ModuleBoundaryReport struct {
 	// looked nothing up. A dependency declared only for start ordering is
 	// legitimate; this is information, not an error.
 	UnusedDependencies []string `json:"unused_dependencies"`
+	// UnusedContracts lists the Consumed contracts of declared dependencies
+	// the module has not looked up so far. Adapters look services up at call
+	// time, so a contract stays here until its first call; this is
+	// information, not an error. Contracts of plugins are not listed:
+	// plugin containers are not observed.
+	UnusedContracts []BaseServiceDefinition `json:"unused_contracts,omitempty"`
 	// Violations lists the boundary crossings observed, sorted by kind,
 	// dependency and subject.
 	Violations []BoundaryViolation `json:"violations"`

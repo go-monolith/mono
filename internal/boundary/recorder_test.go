@@ -152,3 +152,134 @@ func TestRecorderReportIsSnapshot(t *testing.T) {
 		t.Error("slices must be non-nil for JSON consumers")
 	}
 }
+
+func TestRecorderCheckUse(t *testing.T) {
+	checkStock := types.BaseServiceDefinition{ModuleName: "inventory", Name: "check-stock", Type: types.ServiceTypeRequestReply}
+	consumed := []types.BaseServiceDefinition{checkStock}
+
+	t.Run("not enforced: every lookup is allowed", func(t *testing.T) {
+		r := boundary.New("order", []string{"inventory"}, nil, consumed, false, nil)
+		if err := r.CheckUse("inventory", "reserve", types.ServiceTypeRequestReply); err != nil {
+			t.Fatalf("CheckUse = %v", err)
+		}
+		if got := r.Report().Violations; len(got) != 0 {
+			t.Errorf("Violations = %+v", got)
+		}
+	})
+
+	t.Run("enforced, non-strict: recorded and let through", func(t *testing.T) {
+		logger := &recLogger{}
+		r := boundary.New("order", []string{"inventory"}, nil, consumed, false, logger).EnforceConsumed()
+		if err := r.CheckUse("inventory", "check-stock", types.ServiceTypeRequestReply); err != nil {
+			t.Fatalf("declared contract: CheckUse = %v", err)
+		}
+		// Same name, other kind: not the declared contract.
+		if err := r.CheckUse("inventory", "check-stock", types.ServiceTypeQueueGroup); err != nil {
+			t.Fatalf("non-strict CheckUse must return nil, got %v", err)
+		}
+		for i := 0; i < 2; i++ {
+			if err := r.CheckUse("inventory", "reserve", types.ServiceTypeRequestReply); err != nil {
+				t.Fatalf("non-strict CheckUse must return nil, got %v", err)
+			}
+		}
+		// Channel services have no contract type and are never checked.
+		if err := r.CheckUse("inventory", "feed", types.ServiceTypeChannel); err != nil {
+			t.Fatalf("channel: CheckUse = %v", err)
+		}
+
+		got := r.Report().Violations
+		if len(got) != 2 {
+			t.Fatalf("Violations = %+v", got)
+		}
+		// sorted by subject: check-stock < reserve
+		if got[0].Kind != types.BoundaryViolationUndeclaredServiceUse || got[0].Dependency != "inventory" ||
+			got[0].Subject != "services.inventory.check-stock" || got[0].Count != 1 {
+			t.Errorf("first violation = %+v", got[0])
+		}
+		if got[1].Subject != "services.inventory.reserve" || got[1].Count != 2 {
+			t.Errorf("second violation = %+v", got[1])
+		}
+		if logger.count() != 2 {
+			t.Errorf("expected one warning per distinct violation, got %d", logger.count())
+		}
+	})
+
+	t.Run("enforced, strict: rejected", func(t *testing.T) {
+		r := boundary.New("order", []string{"inventory"}, nil, consumed, true, nil).EnforceConsumed()
+		if err := r.CheckUse("inventory", "check-stock", types.ServiceTypeRequestReply); err != nil {
+			t.Fatalf("declared contract: CheckUse = %v", err)
+		}
+		err := r.CheckUse("inventory", "reserve", types.ServiceTypeRequestReply)
+		if !errors.Is(err, monoerrors.ErrModuleBoundaryViolation) {
+			t.Fatalf("expected ErrModuleBoundaryViolation, got %v", err)
+		}
+		if !strings.Contains(err.Error(), "undeclared-service-use") || !strings.Contains(err.Error(), "services.inventory.reserve") {
+			t.Errorf("error should name the kind and the service subject: %v", err)
+		}
+	})
+
+	t.Run("enforced with an empty list: every lookup is undeclared", func(t *testing.T) {
+		r := boundary.New("order", []string{"inventory"}, nil, nil, true, nil).EnforceConsumed()
+		if err := r.CheckUse("inventory", "check-stock", types.ServiceTypeRequestReply); !errors.Is(err, monoerrors.ErrModuleBoundaryViolation) {
+			t.Fatalf("expected ErrModuleBoundaryViolation, got %v", err)
+		}
+	})
+}
+
+func TestRecorderUnusedContracts(t *testing.T) {
+	checkStock := types.BaseServiceDefinition{ModuleName: "inventory", Name: "check-stock", Type: types.ServiceTypeRequestReply}
+	reserve := types.BaseServiceDefinition{ModuleName: "inventory", Name: "reserve", Type: types.ServiceTypeQueueGroup}
+	charge := types.BaseServiceDefinition{ModuleName: "payment", Name: "charge", Type: types.ServiceTypeRequestReply}
+	// A plugin contract: lookups on plugin containers are not observed, so it
+	// must never be reported as unused.
+	kvGet := types.BaseServiceDefinition{ModuleName: "kv-store", Name: "get", Type: types.ServiceTypeRequestReply}
+	consumed := []types.BaseServiceDefinition{checkStock, reserve, charge, kvGet, reserve}
+
+	r := boundary.New("order", []string{"inventory", "payment"}, []string{"kv-store"}, consumed, false, nil).EnforceConsumed()
+	if got := r.Report().UnusedContracts; len(got) != 3 || got[0] != checkStock || got[1] != reserve || got[2] != charge {
+		t.Fatalf("before any lookup, UnusedContracts = %+v (declaration order, no duplicates, no plugin contract)", got)
+	}
+
+	r.Lookup("inventory", "check-stock", types.ServiceTypeRequestReply)
+	r.Lookup("payment", "charge", types.ServiceTypeRequestReply)
+	if got := r.Report().UnusedContracts; len(got) != 1 || got[0] != reserve {
+		t.Fatalf("UnusedContracts = %+v", got)
+	}
+
+	r.Lookup("inventory", "reserve", types.ServiceTypeQueueGroup)
+	if got := r.Report().UnusedContracts; len(got) != 0 {
+		t.Fatalf("UnusedContracts = %+v", got)
+	}
+}
+
+// A violation repeated from many goroutines is counted exactly and warned
+// about once.
+func TestRecorderViolationConcurrent(t *testing.T) {
+	logger := &recLogger{}
+	r := boundary.New("order", []string{"inventory"}, nil, nil, false, logger).EnforceConsumed()
+
+	const goroutines, each = 16, 200
+	var wg sync.WaitGroup
+	for i := 0; i < goroutines; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < each; j++ {
+				if err := r.CheckUse("inventory", "reserve", types.ServiceTypeRequestReply); err != nil {
+					t.Errorf("non-strict CheckUse must return nil, got %v", err)
+					return
+				}
+				_ = r.Report()
+			}
+		}()
+	}
+	wg.Wait()
+
+	got := r.Report().Violations
+	if len(got) != 1 || got[0].Count != goroutines*each || got[0].First.IsZero() {
+		t.Fatalf("Violations = %+v, want one with count %d", got, goroutines*each)
+	}
+	if logger.count() != 1 {
+		t.Errorf("expected exactly one warning, got %d", logger.count())
+	}
+}

@@ -2,6 +2,7 @@ package container
 
 import (
 	"context"
+	"slices"
 	"time"
 
 	"github.com/go-monolith/mono/internal/boundary"
@@ -14,6 +15,10 @@ import (
 //
 //   - every successful lookup (Get*) is attributed to the consumer through the
 //     boundary recorder, which is what MonoFramework.ModuleBoundaries reports;
+//   - a lookup of a request-reply, queue group or stream consumer service that
+//     a ServiceConsumerModule did not list in ConsumeServices is an
+//     undeclared-service-use violation (channel services have no contract and
+//     are not checked);
 //   - a GetChannelService call that passes a consumerModule other than the
 //     consumer's own name is a channel-consumer-mismatch violation (the
 //     consumer channel would be registered under a name targeted replies do
@@ -27,8 +32,10 @@ import (
 // on a missing service); without it the call is recorded, warned once, and
 // delegated unchanged so that existing applications keep working.
 //
-// Entries() hands out the dependency's *ServiceEntry values as the real
-// container does; the view does not copy them.
+// Entries() returns descriptions of the dependency's services, not its
+// entries: copies without the handlers and channels (see describeEntry), so a
+// consumer can inspect what a dependency provides but cannot run or replace
+// the provider's handlers or change its registrations.
 type dependencyView struct {
 	inner      types.ServiceContainer
 	dependency string
@@ -172,6 +179,9 @@ func (v *dependencyView) MustGetChannelService(serviceName string, consumerModul
 }
 
 func (v *dependencyView) GetRequestReplyService(name string) (types.RequestReplyServiceClient, error) {
+	if err := v.rec.CheckUse(v.dependency, name, types.ServiceTypeRequestReply); err != nil {
+		return nil, err
+	}
 	client, err := v.inner.GetRequestReplyService(name)
 	if err == nil {
 		v.rec.Lookup(v.dependency, name, types.ServiceTypeRequestReply)
@@ -180,6 +190,9 @@ func (v *dependencyView) GetRequestReplyService(name string) (types.RequestReply
 }
 
 func (v *dependencyView) GetQueueGroupService(name string) (types.QueueGroupServiceClient, error) {
+	if err := v.rec.CheckUse(v.dependency, name, types.ServiceTypeQueueGroup); err != nil {
+		return nil, err
+	}
 	client, err := v.inner.GetQueueGroupService(name)
 	if err == nil {
 		v.rec.Lookup(v.dependency, name, types.ServiceTypeQueueGroup)
@@ -188,6 +201,9 @@ func (v *dependencyView) GetQueueGroupService(name string) (types.QueueGroupServ
 }
 
 func (v *dependencyView) GetStreamConsumerService(name string) (types.StreamConsumerServiceClient, error) {
+	if err := v.rec.CheckUse(v.dependency, name, types.ServiceTypeStreamConsumer); err != nil {
+		return nil, err
+	}
 	client, err := v.inner.GetStreamConsumerService(name)
 	if err == nil {
 		v.rec.Lookup(v.dependency, name, types.ServiceTypeStreamConsumer)
@@ -199,4 +215,55 @@ func (v *dependencyView) GetStreamConsumerService(name string) (types.StreamCons
 
 func (v *dependencyView) Has(name string) bool { return v.inner.Has(name) }
 
-func (v *dependencyView) Entries() []*types.ServiceEntry { return v.inner.Entries() }
+// Entries returns one description per service of the dependency, in the
+// order of the real container. Each call returns fresh copies.
+func (v *dependencyView) Entries() []*types.ServiceEntry {
+	entries := v.inner.Entries()
+	described := make([]*types.ServiceEntry, 0, len(entries))
+	for _, entry := range entries {
+		if entry != nil {
+			described = append(described, describeEntry(entry))
+		}
+	}
+	return described
+}
+
+// describeEntry copies what identifies and configures a service (name, type,
+// subject, module, queue groups, options, stream and cron configuration,
+// contract) and leaves out what runs it: the handlers and the channels. The
+// stream and cron configurations are copied by value, so the slices and maps
+// inside a stream configuration are still the provider's and are to be read
+// only. Channel services are reached through GetChannelService, never through
+// the entry.
+func describeEntry(entry *types.ServiceEntry) *types.ServiceEntry {
+	described := &types.ServiceEntry{
+		Name:            entry.Name,
+		Type:            entry.Type,
+		Options:         entry.Options,
+		QueueGroup:      entry.QueueGroup,
+		ScheduleSubject: entry.ScheduleSubject,
+		ModuleName:      entry.ModuleName,
+		Subject:         entry.Subject,
+		Created:         entry.Created,
+	}
+	if len(entry.QueueHandlers) > 0 {
+		described.QueueHandlers = make([]types.QGHP, len(entry.QueueHandlers))
+		for i, pair := range entry.QueueHandlers {
+			described.QueueHandlers[i] = types.QGHP{QueueGroup: pair.QueueGroup, Options: pair.Options}
+		}
+	}
+	if entry.StreamConsumerConfig != nil {
+		config := *entry.StreamConsumerConfig
+		described.StreamConsumerConfig = &config
+	}
+	if entry.CronConfig != nil {
+		config := *entry.CronConfig
+		config.Payload = slices.Clone(config.Payload)
+		described.CronConfig = &config
+	}
+	if entry.Contract != nil {
+		contract := *entry.Contract
+		described.Contract = &contract
+	}
+	return described
+}

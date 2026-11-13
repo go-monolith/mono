@@ -243,3 +243,100 @@ func TestModuleBoundariesStrictFailureIsRolledBack(t *testing.T) {
 		t.Error("the failed module's scoped bus must be dropped")
 	}
 }
+
+// A module that implements ServiceConsumerModule declares everything it
+// consumes: a lookup outside ConsumeServices is recorded (non-strict) and the
+// contracts it never used are reported.
+func TestModuleBoundariesUndeclaredServiceUseRecorded(t *testing.T) {
+	checkStock := types.BaseServiceDefinition{ModuleName: "inventory", Name: "check-stock", Type: types.ServiceTypeRequestReply}
+	consumer := &boundaryConsumer{
+		mockModule: mockModule{name: "order", dependencies: []string{"inventory", "payment"}},
+		contracts:  []types.BaseServiceDefinition{checkStock},
+		onStart: func(m *boundaryConsumer) error {
+			// payment/check-stock is registered by the provider but not declared here.
+			_, err := m.depContainers["payment"].GetRequestReplyService("check-stock")
+			return err
+		},
+	}
+	lm, logger := newBoundaryManager(t, false, newProvider("inventory"), newProvider("payment"), consumer)
+	if err := lm.Start(context.Background()); err != nil {
+		t.Fatalf("non-strict Start must succeed: %v", err)
+	}
+	var order types.ModuleBoundaryReport
+	for _, r := range lm.ModuleBoundaries() {
+		if r.Module == "order" {
+			order = r
+		}
+	}
+	if len(order.Violations) != 1 {
+		t.Fatalf("Violations = %+v", order.Violations)
+	}
+	v := order.Violations[0]
+	if v.Kind != types.BoundaryViolationUndeclaredServiceUse || v.Dependency != "payment" || v.Subject != "services.payment.check-stock" {
+		t.Errorf("violation = %+v", v)
+	}
+	if len(order.Observed) != 1 || order.Observed[0].Module != "payment" {
+		t.Errorf("the lookup went through and must be observed: %+v", order.Observed)
+	}
+	if len(order.UnusedContracts) != 1 || order.UnusedContracts[0] != checkStock {
+		t.Errorf("UnusedContracts = %+v", order.UnusedContracts)
+	}
+	if err := lm.Stop(context.Background()); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	if !logger.hasWarnContaining("Module boundary violations recorded") {
+		t.Error("expected a Warn summary at Stop")
+	}
+	if !logger.hasEntryContaining("INFO: Consumed service contract never used during this run") {
+		t.Error("expected an Info line about the unused contract")
+	}
+}
+
+func TestModuleBoundariesUndeclaredServiceUseStrict(t *testing.T) {
+	consumer := &boundaryConsumer{
+		mockModule: mockModule{name: "order", dependencies: []string{"inventory", "payment"}},
+		contracts:  []types.BaseServiceDefinition{{ModuleName: "inventory", Name: "check-stock", Type: types.ServiceTypeRequestReply}},
+		onStart: func(m *boundaryConsumer) error {
+			if _, err := m.depContainers["inventory"].GetRequestReplyService("check-stock"); err != nil {
+				return err
+			}
+			_, err := m.depContainers["payment"].GetRequestReplyService("check-stock")
+			return err
+		},
+	}
+	lm, _ := newBoundaryManager(t, true, newProvider("inventory"), newProvider("payment"), consumer)
+	err := lm.Start(context.Background())
+	if !errors.Is(err, monoerrors.ErrModuleBoundaryViolation) {
+		t.Fatalf("expected ErrModuleBoundaryViolation, got %v", err)
+	}
+}
+
+// plainConsumer does not implement ServiceConsumerModule: its lookups are
+// observed but never checked against a list, even in strict mode.
+type plainConsumer struct {
+	mockModule
+}
+
+func (m *plainConsumer) Start(ctx context.Context) error {
+	if err := m.mockModule.Start(ctx); err != nil {
+		return err
+	}
+	_, err := m.depContainers["inventory"].GetRequestReplyService("check-stock")
+	return err
+}
+
+func TestModuleBoundariesWithoutConsumeServicesNotChecked(t *testing.T) {
+	consumer := &plainConsumer{mockModule: mockModule{name: "order", dependencies: []string{"inventory"}}}
+	lm, _ := newBoundaryManager(t, true, newProvider("inventory"), consumer)
+	if err := lm.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	for _, r := range lm.ModuleBoundaries() {
+		if r.Module == "order" && (len(r.Observed) != 1 || len(r.UnusedContracts) != 0) {
+			t.Errorf("report = %+v", r)
+		}
+	}
+	if err := lm.Stop(context.Background()); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+}

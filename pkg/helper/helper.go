@@ -248,7 +248,7 @@ func RegisterTypedEventStreamConsumer[T any](
 //
 // Parameters:
 //   - ctx: Context for cancellation and deadline control
-//   - container: ServiceContainer to retrieve the service client from
+//   - container: ServiceLookup (any ServiceContainer) to retrieve the service client from
 //   - serviceName: Name of the request-reply service to call
 //   - marshalF: Function to marshal the request (e.g., json.Marshal, proto.Marshal)
 //   - unmarshalF: Function to unmarshal the response (e.g., json.Unmarshal, proto.Unmarshal)
@@ -286,7 +286,7 @@ func RegisterTypedEventStreamConsumer[T any](
 //	    return fmt.Errorf("failed to place order: %w", err)
 //	}
 //	fmt.Printf("Order placed: %s (status: %s)\n", resp.OrderID, resp.Status)
-func CallRequestReplyService[T1 any, T2 any](ctx context.Context, container types.ServiceContainer, serviceName string, marshalF types.Marshaler, unmarshalF types.Unmarshaler, req T1, resp *T2) error {
+func CallRequestReplyService[T1 any, T2 any](ctx context.Context, container types.ServiceLookup, serviceName string, marshalF types.Marshaler, unmarshalF types.Unmarshaler, req T1, resp *T2) error {
 	// Validate response pointer is not nil
 	if resp == nil {
 		return fmt.Errorf("response pointer cannot be nil")
@@ -332,7 +332,7 @@ func CallRequestReplyService[T1 any, T2 any](ctx context.Context, container type
 //
 // Parameters:
 //   - ctx: Context for cancellation and timeout control
-//   - container: ServiceContainer to retrieve the service client from
+//   - container: ServiceLookup (any ServiceContainer) to retrieve the service client from
 //   - serviceName: Name of the queue group service to send to
 //   - marshalF: Function to marshal the request (e.g., json.Marshal, proto.Marshal)
 //   - req: Pointer to the request payload to send
@@ -371,7 +371,7 @@ func CallRequestReplyService[T1 any, T2 any](ctx context.Context, container type
 //	    return fmt.Errorf("failed to send notification: %w", err)
 //	}
 //	fmt.Println("Notification queued successfully")
-func SendQueueGroupService[T any](ctx context.Context, container types.ServiceContainer, serviceName string, marshalF types.Marshaler, req T) error {
+func SendQueueGroupService[T any](ctx context.Context, container types.ServiceLookup, serviceName string, marshalF types.Marshaler, req T) error {
 	// Serialize request
 	data, err := marshalF(req)
 	if err != nil {
@@ -406,7 +406,7 @@ func SendQueueGroupService[T any](ctx context.Context, container types.ServiceCo
 //
 // Parameters:
 //   - ctx: Context for cancellation and timeout control
-//   - container: ServiceContainer to retrieve the service client from
+//   - container: ServiceLookup (any ServiceContainer) to retrieve the service client from
 //   - serviceName: Name of the stream consumer service to publish to
 //   - marshalF: Function to marshal the message (e.g., json.Marshal, proto.Marshal)
 //   - msg: Pointer to the message payload to publish
@@ -448,7 +448,7 @@ func SendQueueGroupService[T any](ctx context.Context, container types.ServiceCo
 //	    return fmt.Errorf("failed to publish event: %w", err)
 //	}
 //	fmt.Printf("Event published with sequence: %d\n", ack.Sequence)
-func PublishStreamConsumerService[T any](ctx context.Context, container types.ServiceContainer, serviceName string, marshalF types.Marshaler, event T) (types.MsgPubAck, error) {
+func PublishStreamConsumerService[T any](ctx context.Context, container types.ServiceLookup, serviceName string, marshalF types.Marshaler, event T) (types.MsgPubAck, error) {
 	// Serialize message
 	data, err := marshalF(event)
 	if err != nil {

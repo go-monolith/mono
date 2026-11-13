@@ -39,6 +39,8 @@ type orderModule struct {
 	bypass     bool // publish around the port
 	mutate     bool // register on the dependency
 	undeclared bool // emit an undeclared event
+	extraUse   bool // call a dependency service missing from ConsumeServices
+	noRestock  bool // never call the restock contract it declares
 	mu         sync.Mutex
 }
 
@@ -66,6 +68,10 @@ func (m *orderModule) Stop(context.Context) error {
 
 var placeOrder = helper.RequestReplyService[stockReq, stockResp]("order", "place")
 
+// reserveStock is provided by the inventory stand-in but is not in the order
+// module's ConsumeServices().
+var reserveStock = helper.RequestReplyService[stockReq, stockResp]("inventory", "reserve")
+
 func (m *orderModule) RegisterServices(c types.ServiceContainer) error {
 	return placeOrder.Register(c, func(ctx context.Context, req stockReq, _ *types.Msg) (stockResp, error) {
 		if req.ProductID == "fail" {
@@ -81,8 +87,15 @@ func (m *orderModule) RegisterServices(c types.ServiceContainer) error {
 		if err != nil {
 			return stockResp{}, err
 		}
-		if err := restock.Send(ctx, m.inventory, req); err != nil {
-			return stockResp{}, err
+		if !m.noRestock {
+			if err := restock.Send(ctx, m.inventory, req); err != nil {
+				return stockResp{}, err
+			}
+		}
+		if m.extraUse {
+			if _, err := reserveStock.Call(ctx, m.inventory, req); err != nil {
+				return stockResp{}, err
+			}
 		}
 		if m.undeclared {
 			_ = m.bus.Publish("events.order.v1.shadow", nil)
@@ -101,6 +114,11 @@ func newInventory(t *testing.T, bus *monotest.EventBus) *monotest.Container {
 		t.Fatal(err)
 	}
 	if err := restock.Register(inv, types.TypedQGHP[stockReq]{QueueGroup: "w", Handler: func(context.Context, stockReq, *types.Msg) error { return nil }}); err != nil {
+		t.Fatal(err)
+	}
+	if err := reserveStock.Register(inv, func(_ context.Context, req stockReq, _ *types.Msg) (stockResp, error) {
+		return stockResp{Stock: 1}, nil
+	}); err != nil {
 		t.Fatal(err)
 	}
 	return inv
