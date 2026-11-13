@@ -295,7 +295,7 @@ func TestImportRules(t *testing.T) {
 }
 ```
 
-A test placed elsewhere, such as beside `cmd/app/main.go`, points the check at the root with `monotest.WithImportDir("../..")`. The check **fails** when the patterns match no package, or only `package main` and host packages: a wrong directory cannot pass by accident.
+A test placed elsewhere, such as beside `cmd/app/main.go`, points the check at the root with `monotest.WithImportDir("../..")`. The check **fails** when the patterns match no package, or only `package main` and host packages, and when the application has no module at all (no `contract` package and no `WithModuleRoots`): a wrong directory cannot pass by accident. It also fails when `./...` matches packages but none of a module, as in a `cmd/app` directory with helper packages of its own. `WithImportPatterns` turns that last check off: naming the patterns says those packages are the ones to check.
 
 | Rule | What it reports |
 |------|-----------------|
@@ -308,6 +308,7 @@ A module is a package with a `contract` sub-package, together with every package
 |--------|-----|
 | `WithHostPackages(paths...)` | A composition root that is not `package main` |
 | `WithModuleRoots(paths...)` | A module without a `contract` sub-package |
+| `WithNonContractPackages(paths...)` | A package named `contract` that is not a module's contract, such as `legal/contract` or `order/internal/contract`. Its parent is then not a module because of it |
 | `WithAllowedContractImports(paths...)` | Extra imports for contract packages, such as a Protobuf runtime or a shared value type |
 | `WithImportDir(dir)` | Run in another directory (default: the test's directory) |
 | `WithImportPatterns(patterns...)` | Packages to check (default `./...`). The modules of the whole application are still known |

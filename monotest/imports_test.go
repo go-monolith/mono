@@ -3,6 +3,7 @@ package monotest_test
 import (
 	"context"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -216,6 +217,152 @@ func TestImportViolationsFailWhenNothingIsChecked(t *testing.T) {
 				t.Errorf("the error should say how to fix it: %v", err)
 			}
 		})
+	}
+}
+
+// writeApplication writes a small application (its own Go module, standard
+// library only) to a temporary directory and returns the directory. As for
+// the fixture, its listing must not be redirected by the environment.
+func writeApplication(t *testing.T, files map[string]string) string {
+	t.Helper()
+	t.Setenv("GOWORK", "off")
+	t.Setenv("GOFLAGS", "")
+	dir := t.TempDir()
+	for name, content := range files {
+		path := filepath.Join(dir, name)
+		if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return dir
+}
+
+// A host program that has helper packages of its own: "./..." beside its
+// main.go matches a package to check, but none of a module, so the violation
+// between the modules would go unreported.
+func TestImportViolationsFailBesideTheModules(t *testing.T) {
+	const tiny = "example.test/tiny"
+	dir := writeApplication(t, map[string]string{
+		"go.mod":                             "module " + tiny + "\n\ngo 1.25\n",
+		"order/order.go":                     "package order\n\nimport _ \"" + tiny + "/payment/store\"\n",
+		"order/contract/contract.go":         "package contract\n",
+		"payment/contract/contract.go":       "package contract\n",
+		"payment/store/store.go":             "package store\n",
+		"cmd/tiny/main.go":                   "package main\n\nimport _ \"" + tiny + "/cmd/tiny/internal/config\"\n\nfunc main() {}\n",
+		"cmd/tiny/internal/config/config.go": "package config\n",
+	})
+	beside := filepath.Join(dir, "cmd", "tiny")
+
+	violations, err := monotest.ImportViolations(context.Background(), monotest.WithImportDir(beside))
+	if err == nil || !strings.Contains(err.Error(), "no package of a module was checked") {
+		t.Fatalf("expected a \"no package of a module was checked\" error, got violations=%v err=%v", violations, err)
+	}
+	for _, want := range []string{"monotest.WithImportDir", "monotest.WithImportPatterns", tiny + "/order", tiny + "/payment"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the error should mention %s: %v", want, err)
+		}
+	}
+
+	// Naming the patterns says that these packages are the ones meant.
+	violations, err = monotest.ImportViolations(context.Background(), monotest.WithImportDir(beside), monotest.WithImportPatterns("./..."))
+	if err != nil || len(violations) != 0 {
+		t.Errorf("with explicit patterns: violations=%v err=%v", violations, err)
+	}
+
+	// From the root of the application the violation is found.
+	violations, err = monotest.ImportViolations(context.Background(), monotest.WithImportDir(dir))
+	if err != nil {
+		t.Fatalf("ImportViolations: %v", err)
+	}
+	if len(violations) != 1 || violations[0].Package != tiny+"/order" || violations[0].Import != tiny+"/payment/store" {
+		t.Errorf("violations = %v", violations)
+	}
+}
+
+// A directory named contract that is not a module's contract package turns
+// its parent into a module until it is named with WithNonContractPackages.
+func TestImportViolationsWithNonContractPackages(t *testing.T) {
+	const firm = "example.test/firm"
+	dir := writeApplication(t, map[string]string{
+		"go.mod":                              "module " + firm + "\n\ngo 1.25\n",
+		"order/order.go":                      "package order\n\nimport (\n\t_ \"" + firm + "/legal/contract\"\n\t_ \"" + firm + "/legal/store\"\n\t_ \"" + firm + "/order/internal/contract\"\n\t_ \"" + firm + "/order/internal/store\"\n)\n",
+		"order/contract/contract.go":          "package contract\n",
+		"order/internal/contract/contract.go": "package contract\n\nimport _ \"" + firm + "/order/internal/store\"\n",
+		"order/internal/store/store.go":       "package store\n",
+		"legal/contract/contract.go":          "// Package contract models customer contracts.\npackage contract\n\nimport _ \"" + firm + "/legal/store\"\n",
+		"legal/store/store.go":                "package store\n",
+	})
+
+	violations, err := monotest.ImportViolations(context.Background(), monotest.WithImportDir(dir))
+	if err != nil {
+		t.Fatalf("ImportViolations: %v", err)
+	}
+	var got []string
+	for _, v := range violations {
+		got = append(got, string(v.Rule)+" "+strings.TrimPrefix(v.Package, firm+"/")+" -> "+strings.TrimPrefix(v.Import, firm+"/"))
+	}
+	want := []string{
+		"contract-import legal/contract -> legal/store",
+		"module-import order -> legal/store",
+		"module-import order -> order/internal/store",
+		"contract-import order/internal/contract -> order/internal/store",
+	}
+	if !equalLines(got, want) {
+		t.Fatalf("without the option:\n  got  %q\n  want %q", got, want)
+	}
+
+	violations, err = monotest.ImportViolations(context.Background(), monotest.WithImportDir(dir),
+		monotest.WithNonContractPackages(firm+"/legal/contract", firm+"/order/internal/contract/"))
+	if err != nil || len(violations) != 0 {
+		t.Errorf("with the option: violations=%v err=%v", violations, err)
+	}
+
+	// A path that does not name a contract directory would do nothing.
+	for _, path := range []string{firm + "/legal", "contract", ""} {
+		_, err = monotest.ImportViolations(context.Background(), monotest.WithImportDir(dir), monotest.WithNonContractPackages(path))
+		if err == nil || !strings.Contains(err.Error(), "monotest.WithNonContractPackages") {
+			t.Errorf("WithNonContractPackages(%q): expected an error naming the option, got %v", path, err)
+		}
+	}
+}
+
+// An application without a module has nothing the rules protect: whatever its
+// packages import, the check would pass.
+func TestImportViolationsFailWhenTheApplicationHasNoModule(t *testing.T) {
+	dir := writeApplication(t, map[string]string{
+		"go.mod":            "module example.test/flat\n\ngo 1.25\n",
+		"store/store.go":    "package store\n",
+		"order/order.go":    "package order\n\nimport _ \"example.test/flat/store\"\n",
+		"cmd/flat/main.go":  "package main\n\nimport _ \"example.test/flat/order\"\n\nfunc main() {}\n",
+		"contracts/dto.go":  "package contracts\n",
+		"docs/contract.txt": "not a package\n",
+	})
+
+	violations, err := monotest.ImportViolations(context.Background(), monotest.WithImportDir(dir))
+	if err == nil || !strings.Contains(err.Error(), "no module was found") {
+		t.Fatalf("expected a \"no module was found\" error, got violations=%v err=%v", violations, err)
+	}
+	if !strings.Contains(err.Error(), "monotest.WithModuleRoots") {
+		t.Errorf("the error should say how to fix it: %v", err)
+	}
+
+	// A mistyped module root names no package, so it does not hide the error.
+	if _, err := monotest.ImportViolations(context.Background(), monotest.WithImportDir(dir),
+		monotest.WithModuleRoots("example.test/flat/stroe")); err == nil || !strings.Contains(err.Error(), "no module was found") {
+		t.Errorf("a module root without a package must not count as a module, got err=%v", err)
+	}
+
+	// Naming a module without a contract package is enough to check.
+	violations, err = monotest.ImportViolations(context.Background(), monotest.WithImportDir(dir),
+		monotest.WithModuleRoots("example.test/flat/store"))
+	if err != nil {
+		t.Fatalf("ImportViolations with a named module: %v", err)
+	}
+	if len(violations) != 1 || violations[0].Rule != monotest.ImportRuleModule || violations[0].Package != "example.test/flat/order" {
+		t.Errorf("violations = %v", violations)
 	}
 }
 

@@ -170,10 +170,19 @@ func (h *Harness) Container() *Container { return h.container }
 // Dependency returns the stand-in container supplied for name, or nil.
 func (h *Harness) Dependency(name string) *Container { return h.deps[name] }
 
-// Report returns the module's boundary report so far (zero value before Start).
+// Report returns the module's boundary report so far. Before Start it names
+// the module and lists nothing; its lists of observations are empty, not nil,
+// as in every report.
 func (h *Harness) Report() types.ModuleBoundaryReport {
 	if h.rec == nil {
-		return types.ModuleBoundaryReport{Module: h.module.Name()}
+		return types.ModuleBoundaryReport{
+			Module:             h.module.Name(),
+			Declared:           []string{},
+			Observed:           []types.ServiceUse{},
+			UnusedDependencies: []string{},
+			UnusedContracts:    []types.BaseServiceDefinition{},
+			Violations:         []types.BoundaryViolation{},
+		}
 	}
 	return h.rec.Report()
 }
@@ -232,26 +241,9 @@ func (h *Harness) Start(ctx context.Context) (err error) {
 	}
 	h.container = own
 
-	// Boundary recorder, as the framework builds it.
-	var declared []string
-	if depMod, ok := h.module.(types.DependentModule); ok {
-		declared = depMod.Dependencies()
-	}
-	var consumed []types.BaseServiceDefinition
-	consumer, declaresConsumed := h.module.(types.ServiceConsumerModule)
-	if declaresConsumed {
-		consumed = consumer.ConsumeServices()
-	}
-	pluginNames := make([]string, 0, len(h.plugins))
-	pluginByName := make(map[string]types.PluginModule, len(h.plugins))
-	for _, p := range h.plugins {
-		pluginNames = append(pluginNames, p.Name())
-		pluginByName[p.Name()] = p
-	}
-	h.rec = boundary.New(name, declared, pluginNames, consumed, h.strict, h.logger)
-	if declaresConsumed {
-		h.rec.EnforceConsumed()
-	}
+	// Boundary recorder, built by the constructor the framework uses, so the
+	// module is held to the same rules here as in the application.
+	h.rec = boundary.ForModule(h.module, h.plugins, h.strict, h.logger)
 
 	// Step 0.5: plugins.
 	if user, ok := h.module.(types.UsePluginModule); ok {
@@ -284,8 +276,18 @@ func (h *Harness) Start(ctx context.Context) (err error) {
 	}
 
 	// Step 1.5: consumed contracts, with the framework's rules.
-	if err := h.validateConsumed(name, declared, consumed, pluginByName); err != nil {
-		return monoerrors.WrapModuleStartFailed(name, fmt.Errorf("%w: %w", errConsumedContract, err))
+	if consumer, ok := h.module.(types.ServiceConsumerModule); ok {
+		var declared []string
+		if depMod, ok := h.module.(types.DependentModule); ok {
+			declared = depMod.Dependencies()
+		}
+		pluginByName := make(map[string]types.PluginModule, len(h.plugins))
+		for _, p := range h.plugins {
+			pluginByName[p.Name()] = p
+		}
+		if err := h.validateConsumed(name, declared, consumer.ConsumeServices(), pluginByName); err != nil {
+			return monoerrors.WrapModuleStartFailed(name, fmt.Errorf("%w: %w", errConsumedContract, err))
+		}
 	}
 
 	// Step 2: module-scoped event bus, over a recorder of the module's own

@@ -100,8 +100,9 @@ type ModuleBoundaryReport struct {
 	// the module has not looked up so far. Adapters look services up at call
 	// time, so a contract stays here until its first call; this is
 	// information, not an error. Contracts of plugins are not listed:
-	// plugin containers are not observed.
-	UnusedContracts []BaseServiceDefinition `json:"unused_contracts,omitempty"`
+	// plugin containers are not observed. Like the other lists of
+	// observations it is empty, not nil, when there is nothing to list.
+	UnusedContracts []BaseServiceDefinition `json:"unused_contracts"`
 	// Violations lists the boundary crossings observed, sorted by kind,
 	// dependency and subject.
 	Violations []BoundaryViolation `json:"violations"`

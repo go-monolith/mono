@@ -2,6 +2,7 @@ package container
 
 import (
 	"context"
+	"maps"
 	"slices"
 	"time"
 
@@ -231,10 +232,11 @@ func (v *dependencyView) Entries() []*types.ServiceEntry {
 // describeEntry copies what identifies and configures a service (name, type,
 // subject, module, queue groups, options, stream and cron configuration,
 // contract) and leaves out what runs it: the handlers and the channels. The
-// stream and cron configurations are copied by value, so the slices and maps
-// inside a stream configuration are still the provider's and are to be read
-// only. Channel services are reached through GetChannelService, never through
-// the entry.
+// stream and cron configurations are deep copies: the framework reads the
+// provider's configuration when it sets the stream up, after every module has
+// started, so a slice or map shared with a description would let a consumer
+// change the provider's stream. Channel services are reached through
+// GetChannelService, never through the entry.
 func describeEntry(entry *types.ServiceEntry) *types.ServiceEntry {
 	described := &types.ServiceEntry{
 		Name:            entry.Name,
@@ -253,7 +255,7 @@ func describeEntry(entry *types.ServiceEntry) *types.ServiceEntry {
 		}
 	}
 	if entry.StreamConsumerConfig != nil {
-		config := *entry.StreamConsumerConfig
+		config := cloneStreamConsumerConfig(*entry.StreamConsumerConfig)
 		described.StreamConsumerConfig = &config
 	}
 	if entry.CronConfig != nil {
@@ -266,4 +268,58 @@ func describeEntry(entry *types.ServiceEntry) *types.ServiceEntry {
 		described.Contract = &contract
 	}
 	return described
+}
+
+// cloneStreamConsumerConfig returns config with every slice, map and pointer
+// of its stream and consumer configuration copied, so that nothing in the
+// result is shared with config.
+func cloneStreamConsumerConfig(config types.StreamConsumerConfig) types.StreamConsumerConfig {
+	stream := &config.Stream
+	stream.Subjects = slices.Clone(stream.Subjects)
+	if stream.Placement != nil {
+		placement := *stream.Placement
+		placement.Tags = slices.Clone(placement.Tags)
+		stream.Placement = &placement
+	}
+	stream.Mirror = cloneStreamSource(stream.Mirror)
+	if stream.Sources != nil {
+		sources := make([]*types.StreamSource, len(stream.Sources))
+		for i, source := range stream.Sources {
+			sources[i] = cloneStreamSource(source)
+		}
+		stream.Sources = sources
+	}
+	stream.SubjectTransform = clonePointer(stream.SubjectTransform)
+	stream.RePublish = clonePointer(stream.RePublish)
+	stream.Metadata = maps.Clone(stream.Metadata)
+
+	consumer := &config.Consumer
+	consumer.OptStartTime = clonePointer(consumer.OptStartTime)
+	consumer.BackOff = slices.Clone(consumer.BackOff)
+	consumer.FilterSubjects = slices.Clone(consumer.FilterSubjects)
+	consumer.Metadata = maps.Clone(consumer.Metadata)
+	return config
+}
+
+// cloneStreamSource returns a deep copy of source, or nil for nil.
+func cloneStreamSource(source *types.StreamSource) *types.StreamSource {
+	if source == nil {
+		return nil
+	}
+	cloned := *source
+	cloned.OptStartTime = clonePointer(source.OptStartTime)
+	cloned.SubjectTransforms = slices.Clone(source.SubjectTransforms)
+	cloned.External = clonePointer(source.External)
+	return &cloned
+}
+
+// clonePointer returns a pointer to a copy of *p, or nil for nil. It is a
+// shallow copy, for values that hold no mutable state of their own behind a
+// slice, map or pointer.
+func clonePointer[T any](p *T) *T {
+	if p == nil {
+		return nil
+	}
+	v := *p
+	return &v
 }

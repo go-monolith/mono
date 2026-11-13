@@ -11,7 +11,9 @@
 // the consumed contracts (CheckUse) adds one lock-free map lookup. A repeated
 // violation takes the same path (read lock, atomic increment), because in
 // non-strict mode a module that keeps crossing a boundary does so on every
-// request; only the first occurrence of a violation takes the write lock.
+// request; only the first occurrence of a violation takes the write lock. A
+// repeated undeclared service use is found by module and service name, so its
+// subject is built once and that path does not allocate either.
 package boundary
 
 import (
@@ -44,6 +46,10 @@ type Recorder struct {
 
 	mu         sync.RWMutex
 	violations map[violationKey]*violation
+	// undeclared indexes the undeclared-service-use entries of violations by
+	// module and service, so that CheckUse finds a repeated one without
+	// building its subject. Guarded by mu.
+	undeclared map[useKey]*violation
 }
 
 type useKey struct {
@@ -65,6 +71,34 @@ type violation struct {
 	first time.Time
 }
 
+// ForModule creates the recorder of module as the framework builds it: from
+// the module's Dependencies(), the names of the registered plugins and its
+// ConsumeServices(). A module that implements ServiceConsumerModule declares
+// all it consumes (even with an empty list), so its lookups are checked
+// against the list; a module that does not is not checked. The lifecycle
+// manager and the monotest harness both build their recorders here, so a
+// module is held to the same rules in a test as in the application.
+func ForModule(module types.Module, plugins map[string]types.PluginModule, strict bool, logger types.Logger) *Recorder {
+	var declared []string
+	if dependent, ok := module.(types.DependentModule); ok {
+		declared = dependent.Dependencies()
+	}
+	var consumed []types.BaseServiceDefinition
+	consumer, declaresConsumed := module.(types.ServiceConsumerModule)
+	if declaresConsumed {
+		consumed = consumer.ConsumeServices()
+	}
+	pluginNames := make([]string, 0, len(plugins))
+	for _, plugin := range plugins {
+		pluginNames = append(pluginNames, plugin.Name())
+	}
+	rec := New(module.Name(), declared, pluginNames, consumed, strict, logger)
+	if declaresConsumed {
+		rec.EnforceConsumed()
+	}
+	return rec
+}
+
 // New creates the recorder of module. declared are the module's dependencies
 // (duplicates are dropped, order kept) and plugins the names of the registered
 // plugin modules; both are allowed targets of service subjects. consumed is
@@ -81,6 +115,7 @@ func New(module string, declared, plugins []string, consumed []types.BaseService
 		consumedSet: make(map[types.BaseServiceDefinition]struct{}, len(consumed)),
 		uses:        make(map[useKey]*use),
 		violations:  make(map[violationKey]*violation),
+		undeclared:  make(map[useKey]*violation),
 	}
 	for _, def := range consumed {
 		r.consumedSet[def] = struct{}{}
@@ -115,11 +150,12 @@ func (r *Recorder) Allowed(module string) bool {
 }
 
 // EnforceConsumed makes the consumed list given to New complete: from then on
-// CheckUse reports a lookup of a service that is not in it. The lifecycle
-// calls it for a module that implements ServiceConsumerModule (even when the
-// list is empty), and not otherwise, so a module that declares nothing is not
-// checked. It must be called before the recorder is handed to a dependency
-// view, and returns the recorder for chaining.
+// CheckUse reports a lookup of a service that is not in it. ForModule calls it
+// for a module that implements ServiceConsumerModule (even when the list is
+// empty), and not otherwise, so a module that declares nothing is not
+// checked. It is part of building the recorder: it must be called before the
+// recorder is handed to a dependency view, and returns the recorder for
+// chaining.
 func (r *Recorder) EnforceConsumed() *Recorder {
 	r.enforceConsumed = true
 	return r
@@ -131,7 +167,9 @@ func (r *Recorder) EnforceConsumed() *Recorder {
 // undeclared-service-use violation: rejected with ErrModuleBoundaryViolation
 // in strict mode, recorded and let through (nil) otherwise. Channel services
 // are never checked, as they have no contract type. It is on the request path
-// and costs one map lookup.
+// and costs one map lookup; a repeated undeclared use in non-strict mode costs
+// a second one under the read lock and an atomic increment, without
+// allocating.
 func (r *Recorder) CheckUse(dependency, service string, typ types.ServiceType) error {
 	if !r.enforceConsumed || typ == types.ServiceTypeChannel {
 		return nil
@@ -139,7 +177,25 @@ func (r *Recorder) CheckUse(dependency, service string, typ types.ServiceType) e
 	if _, ok := r.consumedSet[types.BaseServiceDefinition{ModuleName: dependency, Name: service, Type: typ}]; ok {
 		return nil
 	}
-	return r.Violation(types.BoundaryViolationUndeclaredServiceUse, dependency, types.ServiceSubject(dependency, service))
+	if r.strict {
+		return r.Violation(types.BoundaryViolationUndeclaredServiceUse, dependency, types.ServiceSubject(dependency, service))
+	}
+
+	// The violation is keyed by the service subject, which module and service
+	// determine, so a repeated one is found without building the subject.
+	key := useKey{module: dependency, service: service}
+	r.mu.RLock()
+	v, seen := r.undeclared[key]
+	r.mu.RUnlock()
+	if seen {
+		v.count.Add(1)
+		return nil
+	}
+	v = r.record(types.BoundaryViolationUndeclaredServiceUse, dependency, types.ServiceSubject(dependency, service))
+	r.mu.Lock()
+	r.undeclared[key] = v
+	r.mu.Unlock()
+	return nil
 }
 
 // Lookup records a successful lookup of service on dependency.
@@ -158,8 +214,10 @@ func (r *Recorder) Lookup(dependency, service string, typ types.ServiceType) {
 		u = &use{typ: typ}
 		r.uses[key] = u
 	}
-	r.usesMu.Unlock()
+	// Counted before the lock is released, as in Violation: a concurrent
+	// Report never shows a service looked up zero times.
 	u.count.Add(1)
+	r.usesMu.Unlock()
 }
 
 // Violation records a boundary crossing of kind against dependency. subject
@@ -173,6 +231,13 @@ func (r *Recorder) Violation(kind types.BoundaryViolationKind, dependency, subje
 	if r.strict {
 		return monoerrors.WrapModuleBoundaryViolation(r.module, kind, dependency, subject)
 	}
+	r.record(kind, dependency, subject)
+	return nil
+}
+
+// record counts one occurrence of a violation, logs its first occurrence and
+// returns its entry.
+func (r *Recorder) record(kind types.BoundaryViolationKind, dependency, subject string) *violation {
 	key := violationKey{kind: kind, dependency: dependency, subject: subject}
 
 	r.mu.RLock()
@@ -180,7 +245,7 @@ func (r *Recorder) Violation(kind types.BoundaryViolationKind, dependency, subje
 	r.mu.RUnlock()
 	if seen {
 		v.count.Add(1)
-		return nil
+		return v
 	}
 
 	r.mu.Lock()
@@ -189,8 +254,10 @@ func (r *Recorder) Violation(kind types.BoundaryViolationKind, dependency, subje
 		v = &violation{first: time.Now()}
 		r.violations[key] = v
 	}
-	r.mu.Unlock()
+	// Counted before the lock is released, so that a concurrent Report never
+	// shows a violation that happened zero times.
 	v.count.Add(1)
+	r.mu.Unlock()
 
 	// Only the caller that created the entry logs, so the warning is written
 	// once however many goroutines cross the boundary at the same time.
@@ -201,7 +268,7 @@ func (r *Recorder) Violation(kind types.BoundaryViolationKind, dependency, subje
 		}
 		r.logger.Warn("Module boundary violation (recorded; enable WithStrictModuleBoundaries to reject)", args...)
 	}
-	return nil
+	return v
 }
 
 // Report returns a snapshot of the observations as a ModuleBoundaryReport.
@@ -212,6 +279,7 @@ func (r *Recorder) Report() types.ModuleBoundaryReport {
 		Consumed:           append([]types.BaseServiceDefinition(nil), r.consumed...),
 		Observed:           []types.ServiceUse{},
 		UnusedDependencies: []string{},
+		UnusedContracts:    []types.BaseServiceDefinition{},
 		Violations:         []types.BoundaryViolation{},
 	}
 

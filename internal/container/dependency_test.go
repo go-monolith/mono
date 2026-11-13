@@ -3,7 +3,9 @@ package container
 import (
 	"context"
 	"errors"
+	"reflect"
 	"testing"
+	"time"
 
 	"github.com/go-monolith/mono/internal/boundary"
 	monoerrors "github.com/go-monolith/mono/pkg/errors"
@@ -404,6 +406,13 @@ func TestDependencyViewEntriesAreDescriptions(t *testing.T) {
 	if real["audit"].StreamConsumerConfig.Fetch.BatchSize != 7 {
 		t.Error("changing the described stream configuration must not reach the provider")
 	}
+	// The registration fills in the default subjects, so every stream
+	// description has a slice the provider's stream is later created from.
+	providerSubject := real["audit"].StreamConsumerConfig.Stream.Subjects[0]
+	stream.StreamConsumerConfig.Stream.Subjects[0] = "services.other.>"
+	if got := real["audit"].StreamConsumerConfig.Stream.Subjects[0]; got != providerSubject {
+		t.Errorf("changing the described stream subjects reached the provider: %q", got)
+	}
 	cron := byName["sweep"]
 	if cron.CronConfig == nil || cron.CronConfig.Schedule != real["sweep"].CronConfig.Schedule || string(cron.CronConfig.Payload) != "tick" {
 		t.Fatalf("cron configuration must be described: %+v", cron.CronConfig)
@@ -420,5 +429,185 @@ func TestDependencyViewEntriesAreDescriptions(t *testing.T) {
 	}
 	if again := view.Entries(); len(again) != len(real) {
 		t.Errorf("each call must return fresh descriptions, got %d", len(again))
+	}
+}
+
+// A description shares no slice, map or pointer with the provider's stream
+// configuration: the framework creates the stream from it after every module
+// has started, so a shared one would let a consumer change the provider's
+// stream.
+func TestCloneStreamConsumerConfigSharesNothing(t *testing.T) {
+	start := time.Unix(1700000000, 0)
+	source := func(name string) *types.StreamSource {
+		return &types.StreamSource{
+			Name:              name,
+			OptStartTime:      &start,
+			SubjectTransforms: []types.SubjectTransformConfig{{Source: "a", Destination: "b"}},
+			External:          &types.ExternalStream{APIPrefix: "api"},
+		}
+	}
+	original := types.StreamConsumerConfig{
+		Stream: types.StreamConfig{
+			Name:             "AUDIT",
+			Subjects:         []string{"services.audit.trail"},
+			Placement:        &types.Placement{Cluster: "c1", Tags: []string{"ssd"}},
+			Mirror:           source("MIRROR"),
+			Sources:          []*types.StreamSource{source("SOURCE"), nil},
+			SubjectTransform: &types.SubjectTransformConfig{Source: "a", Destination: "b"},
+			RePublish:        &types.RePublish{Source: "a", Destination: "b"},
+			Metadata:         map[string]string{"owner": "audit"},
+		},
+		Consumer: types.ConsumerConfig{
+			OptStartTime:   &start,
+			BackOff:        []time.Duration{time.Second},
+			FilterSubjects: []string{"services.audit.trail"},
+			Metadata:       map[string]string{"owner": "audit"},
+		},
+		Fetch: types.FetchConfig{BatchSize: 7},
+	}
+
+	clone := cloneStreamConsumerConfig(original)
+	if !reflect.DeepEqual(clone, original) {
+		t.Fatalf("clone differs from the original:\n  got  %+v\n  want %+v", clone, original)
+	}
+
+	// Change everything reachable from the clone.
+	later := start.Add(time.Hour)
+	clone.Stream.Subjects[0] = "changed"
+	clone.Stream.Placement.Cluster = "changed"
+	clone.Stream.Placement.Tags[0] = "changed"
+	for _, s := range []*types.StreamSource{clone.Stream.Mirror, clone.Stream.Sources[0]} {
+		s.Name = "changed"
+		*s.OptStartTime = later
+		s.SubjectTransforms[0].Source = "changed"
+		s.External.APIPrefix = "changed"
+	}
+	clone.Stream.SubjectTransform.Source = "changed"
+	clone.Stream.RePublish.Source = "changed"
+	clone.Stream.Metadata["owner"] = "changed"
+	*clone.Consumer.OptStartTime = later
+	clone.Consumer.BackOff[0] = time.Hour
+	clone.Consumer.FilterSubjects[0] = "changed"
+	clone.Consumer.Metadata["owner"] = "changed"
+
+	want := types.StreamConsumerConfig{
+		Stream: types.StreamConfig{
+			Name:             "AUDIT",
+			Subjects:         []string{"services.audit.trail"},
+			Placement:        &types.Placement{Cluster: "c1", Tags: []string{"ssd"}},
+			Mirror:           source("MIRROR"),
+			Sources:          []*types.StreamSource{source("SOURCE"), nil},
+			SubjectTransform: &types.SubjectTransformConfig{Source: "a", Destination: "b"},
+			RePublish:        &types.RePublish{Source: "a", Destination: "b"},
+			Metadata:         map[string]string{"owner": "audit"},
+		},
+		Consumer: types.ConsumerConfig{
+			OptStartTime:   &start,
+			BackOff:        []time.Duration{time.Second},
+			FilterSubjects: []string{"services.audit.trail"},
+			Metadata:       map[string]string{"owner": "audit"},
+		},
+		Fetch: types.FetchConfig{BatchSize: 7},
+	}
+	if !time.Unix(1700000000, 0).Equal(start) {
+		t.Errorf("a start time of the original was changed through the clone: %v", start)
+	}
+	if !reflect.DeepEqual(original, want) {
+		t.Errorf("the original was changed through the clone:\n  got  %+v\n  want %+v", original, want)
+	}
+
+	// Nil slices, maps and pointers stay nil.
+	if empty := cloneStreamConsumerConfig(types.StreamConsumerConfig{}); !reflect.DeepEqual(empty, types.StreamConsumerConfig{}) {
+		t.Errorf("clone of the zero value = %+v", empty)
+	}
+}
+
+// fillReferences sets every slice, map and pointer reachable from v through
+// exported fields to a non-empty value, so that a field added to the
+// configuration types later is covered without this test being edited.
+func fillReferences(v reflect.Value) {
+	switch v.Kind() {
+	case reflect.Pointer:
+		v.Set(reflect.New(v.Type().Elem()))
+		fillReferences(v.Elem())
+	case reflect.Slice:
+		s := reflect.MakeSlice(v.Type(), 1, 1)
+		fillReferences(s.Index(0))
+		v.Set(s)
+	case reflect.Map:
+		m := reflect.MakeMap(v.Type())
+		value := reflect.New(v.Type().Elem()).Elem()
+		fillReferences(value)
+		m.SetMapIndex(reflect.New(v.Type().Key()).Elem(), value)
+		v.Set(m)
+	case reflect.Struct:
+		for i := 0; i < v.NumField(); i++ {
+			if v.Type().Field(i).IsExported() {
+				fillReferences(v.Field(i))
+			}
+		}
+	}
+}
+
+// sharedReferences returns the paths of the slices, maps and pointers that a
+// and b, two values of the same type, have in common.
+func sharedReferences(path string, a, b reflect.Value) []string {
+	var shared []string
+	switch a.Kind() {
+	case reflect.Pointer:
+		if a.IsNil() || b.IsNil() {
+			return nil
+		}
+		if a.Pointer() == b.Pointer() {
+			shared = append(shared, path)
+		}
+		shared = append(shared, sharedReferences("*"+path, a.Elem(), b.Elem())...)
+	case reflect.Slice:
+		if a.Len() > 0 && b.Len() > 0 && a.Pointer() == b.Pointer() {
+			shared = append(shared, path)
+		}
+		for i := 0; i < a.Len() && i < b.Len(); i++ {
+			shared = append(shared, sharedReferences(path+"[]", a.Index(i), b.Index(i))...)
+		}
+	case reflect.Map:
+		if !a.IsNil() && a.Pointer() == b.Pointer() {
+			shared = append(shared, path)
+		}
+		for _, key := range a.MapKeys() {
+			if other := b.MapIndex(key); other.IsValid() {
+				shared = append(shared, sharedReferences(path+"[key]", a.MapIndex(key), other)...)
+			}
+		}
+	case reflect.Struct:
+		for i := 0; i < a.NumField(); i++ {
+			if field := a.Type().Field(i); field.IsExported() {
+				shared = append(shared, sharedReferences(path+"."+field.Name, a.Field(i), b.Field(i))...)
+			}
+		}
+	}
+	return shared
+}
+
+// Whatever reference-typed field the configuration types have, now or later,
+// the clone must not share it with the original.
+func TestCloneStreamConsumerConfigCoversEveryReferenceField(t *testing.T) {
+	var original types.StreamConsumerConfig
+	fillReferences(reflect.ValueOf(&original).Elem())
+	if original.Stream.Mirror == nil || original.Stream.Mirror.External == nil || len(original.Stream.Sources) != 1 ||
+		original.Stream.Sources[0] == nil || original.Consumer.Metadata == nil {
+		t.Fatalf("the configuration was not filled: %+v", original)
+	}
+
+	// The walk finds what a shallow copy shares.
+	if shared := sharedReferences("config", reflect.ValueOf(original), reflect.ValueOf(original)); len(shared) == 0 {
+		t.Fatal("sharedReferences found nothing shared between a value and itself")
+	}
+
+	clone := cloneStreamConsumerConfig(original)
+	if !reflect.DeepEqual(clone, original) {
+		t.Fatalf("clone differs from the original:\n  got  %+v\n  want %+v", clone, original)
+	}
+	if shared := sharedReferences("config", reflect.ValueOf(clone), reflect.ValueOf(original)); len(shared) != 0 {
+		t.Errorf("the clone shares with the original (cloneStreamConsumerConfig must copy them): %q", shared)
 	}
 }

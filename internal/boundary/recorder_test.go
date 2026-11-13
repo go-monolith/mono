@@ -1,6 +1,8 @@
 package boundary_test
 
 import (
+	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 	"sync"
@@ -148,8 +150,17 @@ func TestRecorderReportIsSnapshot(t *testing.T) {
 	if r.Report().Declared[0] != "inventory" {
 		t.Error("Report must copy Declared")
 	}
-	if rep.Observed == nil || rep.UnusedDependencies == nil || rep.Violations == nil {
+	if rep.Observed == nil || rep.UnusedDependencies == nil || rep.UnusedContracts == nil || rep.Violations == nil {
 		t.Error("slices must be non-nil for JSON consumers")
+	}
+	encoded, err := json.Marshal(rep)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	for _, want := range []string{`"observed":[]`, `"unused_dependencies":[`, `"unused_contracts":[]`, `"violations":[]`} {
+		if !strings.Contains(string(encoded), want) {
+			t.Errorf("JSON report should contain %s: %s", want, encoded)
+		}
 	}
 }
 
@@ -282,4 +293,151 @@ func TestRecorderViolationConcurrent(t *testing.T) {
 	if logger.count() != 1 {
 		t.Errorf("expected exactly one warning, got %d", logger.count())
 	}
+}
+
+// A repeated undeclared use is on the request path of a non-strict module
+// with an incomplete ConsumeServices(): it must not build the subject again.
+func TestRecorderCheckUseRepeatedDoesNotAllocate(t *testing.T) {
+	r := boundary.New("order", []string{"inventory"}, nil, nil, false, nil).EnforceConsumed()
+	if err := r.CheckUse("inventory", "reserve", types.ServiceTypeRequestReply); err != nil {
+		t.Fatalf("CheckUse = %v", err)
+	}
+	allocs := testing.AllocsPerRun(100, func() {
+		if err := r.CheckUse("inventory", "reserve", types.ServiceTypeRequestReply); err != nil {
+			t.Errorf("CheckUse = %v", err)
+		}
+	})
+	if allocs != 0 {
+		t.Errorf("a repeated undeclared use allocated %.0f time(s) per call, want 0", allocs)
+	}
+	// The same name with another kind is the same violation (same subject).
+	if err := r.CheckUse("inventory", "reserve", types.ServiceTypeQueueGroup); err != nil {
+		t.Fatalf("CheckUse = %v", err)
+	}
+	got := r.Report().Violations
+	if len(got) != 1 || got[0].Subject != "services.inventory.reserve" || got[0].Count != 103 {
+		t.Fatalf("Violations = %+v, want one with count 103 (AllocsPerRun adds a warm-up call)", got)
+	}
+}
+
+// An undeclared use and the same violation reported directly are one entry.
+func TestRecorderCheckUseSharesTheEntryWithViolation(t *testing.T) {
+	logger := &recLogger{}
+	r := boundary.New("order", []string{"inventory"}, nil, nil, false, logger).EnforceConsumed()
+	if err := r.Violation(types.BoundaryViolationUndeclaredServiceUse, "inventory", "services.inventory.reserve"); err != nil {
+		t.Fatalf("Violation = %v", err)
+	}
+	for i := 0; i < 2; i++ {
+		if err := r.CheckUse("inventory", "reserve", types.ServiceTypeRequestReply); err != nil {
+			t.Fatalf("CheckUse = %v", err)
+		}
+	}
+	got := r.Report().Violations
+	if len(got) != 1 || got[0].Count != 3 {
+		t.Fatalf("Violations = %+v, want one with count 3", got)
+	}
+	if logger.count() != 1 {
+		t.Errorf("expected one warning, got %d", logger.count())
+	}
+}
+
+func BenchmarkCheckUseRepeatedUndeclared(b *testing.B) {
+	r := boundary.New("order", []string{"inventory"}, nil, nil, false, nil).EnforceConsumed()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		if err := r.CheckUse("inventory", "reserve", types.ServiceTypeRequestReply); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+// plainModule implements types.Module only.
+type plainModule struct{ name string }
+
+func (m *plainModule) Name() string                { return m.name }
+func (m *plainModule) Start(context.Context) error { return nil }
+func (m *plainModule) Stop(context.Context) error  { return nil }
+
+// dependentModule declares dependencies but not what it consumes.
+type dependentModule struct {
+	plainModule
+	deps []string
+}
+
+func (m *dependentModule) Dependencies() []string                                       { return m.deps }
+func (m *dependentModule) SetDependencyServiceContainer(string, types.ServiceContainer) {}
+
+// consumerModule declares dependencies and the contracts it consumes.
+type consumerModule struct {
+	dependentModule
+	consumed []types.BaseServiceDefinition
+}
+
+func (m *consumerModule) ConsumeServices() []types.BaseServiceDefinition { return m.consumed }
+
+// pluginModule is a plugin known by its module name.
+type pluginModule struct{ plainModule }
+
+func (p *pluginModule) SetContainer(types.ServiceContainer) {}
+func (p *pluginModule) Container() types.ServiceContainer   { return nil }
+
+func TestForModule(t *testing.T) {
+	checkStock := types.BaseServiceDefinition{ModuleName: "inventory", Name: "check-stock", Type: types.ServiceTypeRequestReply}
+	// Plugins are registered under an alias; the module name is what counts.
+	plugins := map[string]types.PluginModule{"storage": &pluginModule{plainModule{name: "kv-store"}}}
+
+	t.Run("a module without dependencies", func(t *testing.T) {
+		r := boundary.ForModule(&plainModule{name: "order"}, nil, false, nil)
+		rep := r.Report()
+		if r.Module() != "order" || r.Strict() || len(rep.Declared) != 0 || len(rep.Consumed) != 0 {
+			t.Errorf("recorder: module %q strict %v, report %+v", r.Module(), r.Strict(), rep)
+		}
+		if r.Allowed("inventory") {
+			t.Error("an undeclared module must not be allowed")
+		}
+	})
+
+	t.Run("dependencies and plugins are allowed; lookups are not checked", func(t *testing.T) {
+		r := boundary.ForModule(&dependentModule{plainModule{name: "order"}, []string{"inventory", "payment", "inventory"}}, plugins, true, nil)
+		if !r.Strict() {
+			t.Error("strict must be passed on")
+		}
+		if got := r.Report().Declared; len(got) != 2 || got[0] != "inventory" || got[1] != "payment" {
+			t.Errorf("Declared = %v", got)
+		}
+		for _, name := range []string{"order", "inventory", "payment", "kv-store"} {
+			if !r.Allowed(name) {
+				t.Errorf("%s should be allowed", name)
+			}
+		}
+		if r.Allowed("storage") {
+			t.Error("a plugin alias is not a module name")
+		}
+		// The module does not implement ServiceConsumerModule.
+		if err := r.CheckUse("inventory", "reserve", types.ServiceTypeRequestReply); err != nil {
+			t.Errorf("CheckUse = %v", err)
+		}
+	})
+
+	t.Run("a module that declares what it consumes is held to the list", func(t *testing.T) {
+		m := &consumerModule{dependentModule{plainModule{name: "order"}, []string{"inventory"}}, []types.BaseServiceDefinition{checkStock}}
+		r := boundary.ForModule(m, plugins, true, nil)
+		if got := r.Report().Consumed; len(got) != 1 || got[0] != checkStock {
+			t.Errorf("Consumed = %v", got)
+		}
+		if err := r.CheckUse("inventory", "check-stock", types.ServiceTypeRequestReply); err != nil {
+			t.Errorf("declared contract: CheckUse = %v", err)
+		}
+		if err := r.CheckUse("inventory", "reserve", types.ServiceTypeRequestReply); !errors.Is(err, monoerrors.ErrModuleBoundaryViolation) {
+			t.Errorf("expected ErrModuleBoundaryViolation, got %v", err)
+		}
+	})
+
+	t.Run("an empty list is a complete list", func(t *testing.T) {
+		m := &consumerModule{dependentModule{plainModule{name: "order"}, []string{"inventory"}}, nil}
+		r := boundary.ForModule(m, nil, true, nil)
+		if err := r.CheckUse("inventory", "check-stock", types.ServiceTypeRequestReply); !errors.Is(err, monoerrors.ErrModuleBoundaryViolation) {
+			t.Errorf("expected ErrModuleBoundaryViolation, got %v", err)
+		}
+	})
 }

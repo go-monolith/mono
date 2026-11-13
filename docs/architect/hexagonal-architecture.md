@@ -479,14 +479,15 @@ func TestImportRules(t *testing.T) {
 }
 ```
 
-A test placed elsewhere, such as beside `cmd/app/main.go`, points the check at the root with `monotest.WithImportDir("../..")`. The check fails when the patterns match no package, or only `package main` and host packages, so a wrong directory cannot pass by accident.
+A test placed elsewhere, such as beside `cmd/app/main.go`, points the check at the root with `monotest.WithImportDir("../..")`. The check fails when the patterns match no package, or only `package main` and host packages, when the application has no module at all, and when `./...` matches no package of a module (a `cmd/app` directory with helper packages of its own), so a wrong directory cannot pass by accident.
 
 | Option | Use |
 |--------|-----|
 | `WithHostPackages(paths...)` | A composition root that is not `package main` |
 | `WithModuleRoots(paths...)` | A module without a `contract` sub-package |
+| `WithNonContractPackages(paths...)` | A package named `contract` that is not a module's contract (`legal/contract`, `order/internal/contract`) |
 | `WithAllowedContractImports(paths...)` | Extra imports for contract packages, such as a Protobuf runtime or a shared value type |
-| `WithImportDir(dir)`, `WithImportPatterns(patterns...)` | Where to run and what to check (default `./...` in the test's directory) |
+| `WithImportDir(dir)`, `WithImportPatterns(patterns...)` | Where to run and what to check (default `./...` in the test's directory). Naming the patterns accepts a set without a package of a module |
 
 Imports of test files are not checked, so an integration test may wire real modules together. Packages are listed for the default build context, so files behind build tags are not checked. `monotest.ImportViolations(ctx, opts...)` returns the same findings without a test.
 

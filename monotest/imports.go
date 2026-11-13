@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"os/exec"
+	"path"
 	"sort"
 	"strings"
 	"testing"
@@ -71,7 +72,11 @@ type importConfig struct {
 	hosts           []string
 	moduleRoots     []string
 	contractAllowed []string
+	nonContracts    []string
 }
+
+// defaultImportPattern is what is checked when WithImportPatterns is not used.
+const defaultImportPattern = "./..."
 
 // importListTimeout bounds the "go list" runs of one check, on top of the
 // caller's context.
@@ -89,6 +94,11 @@ func WithImportDir(dir string) ImportOption {
 // "go list" (default "./..."). Only the matched packages have their imports
 // checked; the modules of the whole application are still known, so a check
 // limited to one module ("./order/...") reports its imports of any other.
+//
+// Naming the patterns also says that these packages are the ones meant, so
+// the check accepts patterns that match no package of a module (a package of
+// reports that reads several modules, say). Without the option that is taken
+// for a test in the wrong directory and fails.
 func WithImportPatterns(patterns ...string) ImportOption {
 	return func(c *importConfig) {
 		if len(patterns) > 0 {
@@ -111,6 +121,23 @@ func WithHostPackages(importPaths ...string) ImportOption {
 // found without it.
 func WithModuleRoots(importPaths ...string) ImportOption {
 	return func(c *importConfig) { c.moduleRoots = append(c.moduleRoots, importPaths...) }
+}
+
+// WithNonContractPackages names, by import path, packages that are called
+// "contract" but are not the contract package of a module: a domain package
+// about customer contracts ("app/legal/contract"), or a helper package inside
+// a module ("app/order/internal/contract"). Such a directory then does not
+// make its parent a module, and the package (with the packages below it) is
+// not held to the contract import rule; when it lies in a module for another
+// reason (the parent has a real contract package elsewhere or is named with
+// WithModuleRoots, or the directory is below a real contract package), it is
+// an ordinary package of that module. Every path must end in "/contract".
+func WithNonContractPackages(importPaths ...string) ImportOption {
+	return func(c *importConfig) {
+		for _, importPath := range importPaths {
+			c.nonContracts = append(c.nonContracts, strings.TrimSuffix(importPath, "/"))
+		}
+	}
 }
 
 // WithAllowedContractImports lets contract packages import more than the
@@ -137,8 +164,10 @@ func WithAllowedContractImports(importPaths ...string) ImportOption {
 //
 // A module is a package with a contract sub-package (or one named with
 // WithModuleRoots), together with every package below it; packages of the same
-// module may import each other freely. Imports of test files are not checked,
-// so an integration test may wire real modules together.
+// module may import each other freely. A directory named contract that is not
+// a module's contract package is excluded with WithNonContractPackages.
+// Imports of test files are not checked, so an integration test may wire real
+// modules together.
 //
 // The runtime checks (the boundary report, strict mode, CheckModule) see what a
 // module does through the container and the bus it is handed; they cannot see
@@ -153,7 +182,9 @@ func WithAllowedContractImports(importPaths ...string) ImportOption {
 // A test in another directory (for example beside a cmd/<app>/main.go) points
 // the check at the root with WithImportDir. The check fails, rather than
 // passing with nothing checked, when the patterns match no package or only
-// exempt ones.
+// exempt ones, when the application has no module at all, and when "./..."
+// matches no package of a module (a directory beside the modules instead of
+// above them; WithImportPatterns says that such packages are meant).
 //
 // It runs "go list", so the go command must be on PATH (it is under "go
 // test"). Packages are listed for the default build context: files behind
@@ -176,13 +207,28 @@ func CheckImports(tb testing.TB, opts ...ImportOption) {
 // break the contract import rule, sorted by package and import, for use in a
 // command or a CI step. ctx bounds the "go list" runs (two minutes at most).
 //
-// The error reports that the check could not be done, never a violation: the
-// packages could not be listed, ctx ended, or no package was checked (the
-// patterns matched nothing, or only package main and host packages).
+// The error reports that the check could not be done, never a violation: an
+// option is invalid, the packages could not be listed, ctx ended, no package
+// was checked (the patterns matched nothing, or only package main and host
+// packages), the application has no module (no contract package and no
+// WithModuleRoots), so that no import could break a rule, or the default
+// "./..." matched no package of a module.
 func ImportViolations(ctx context.Context, opts ...ImportOption) ([]ImportViolation, error) {
-	cfg := importConfig{patterns: []string{"./..."}}
+	var cfg importConfig
 	for _, opt := range opts {
 		opt(&cfg)
+	}
+	for _, importPath := range cfg.nonContracts {
+		if path.Base(importPath) != contractSegment || importPath == contractSegment {
+			return nil, fmt.Errorf("monotest.WithNonContractPackages: %q does not end in \"/%s\": "+
+				"the option names a package called %s that is not the contract package of a module", importPath, contractSegment, contractSegment)
+		}
+	}
+	// Without WithImportPatterns the packages checked were not chosen, so a
+	// set that touches no module is a test in the wrong directory.
+	defaultPatterns := len(cfg.patterns) == 0
+	if defaultPatterns {
+		cfg.patterns = []string{defaultImportPattern}
 	}
 	ctx, cancel := context.WithTimeout(ctx, importListTimeout)
 	defer cancel()
@@ -198,16 +244,41 @@ func ImportViolations(ctx context.Context, opts ...ImportOption) ([]ImportViolat
 	if err != nil {
 		return nil, err
 	}
-	violations, checked := findImportViolations(append(pkgs, siblings...), cfg)
-	if checked == 0 {
-		dir := cfg.dir
-		if dir == "" {
-			dir = "the current directory"
-		}
+	found := findImportViolations(append(pkgs, siblings...), cfg)
+	dir := cfg.dir
+	if dir == "" {
+		dir = "the current directory"
+	}
+	if found.checked == 0 {
 		return nil, fmt.Errorf("no package was checked: the patterns %q in %s match no package, or only package main and host packages, which are exempt; "+
 			"run the check in the root directory of the application or point it there with monotest.WithImportDir", cfg.patterns, dir)
 	}
-	return violations, nil
+	if len(found.modules) == 0 {
+		// Without a module no import can break a rule: the check would pass
+		// whatever the packages import.
+		return nil, fmt.Errorf("no module was found: no package of the application around %s has a %s sub-package, so there is nothing the import rules protect; "+
+			"run the check in the root directory of the application or point it there with monotest.WithImportDir, "+
+			"and name modules that have no %s package with monotest.WithModuleRoots", dir, contractSegment, contractSegment)
+	}
+	if defaultPatterns && found.inModules == 0 {
+		// Beside a cmd/<app>/main.go that has helper packages of its own, for
+		// example: they import no module, so the check would pass whatever
+		// the modules import.
+		return nil, fmt.Errorf("no package of a module was checked: %q in %s matches %d package(s) to check, none of them in a module (%s); "+
+			"run the check in the root directory of the application or point it there with monotest.WithImportDir, "+
+			"or name the packages with monotest.WithImportPatterns if they are the ones to check",
+			defaultImportPattern, dir, found.checked, describeModules(found.modules))
+	}
+	return found.violations, nil
+}
+
+// describeModules names up to three of the modules found, for an error.
+func describeModules(modules []string) string {
+	const shown = 3
+	if len(modules) <= shown {
+		return "the modules found: " + strings.Join(modules, ", ")
+	}
+	return fmt.Sprintf("the modules found: %s and %d more", strings.Join(modules[:shown], ", "), len(modules)-shown)
 }
 
 // listedPackage is the part of "go list -json" output the check needs.
@@ -303,12 +374,32 @@ func goList[T any](ctx context.Context, dir string, args ...string) ([]T, error)
 	return values, nil
 }
 
-// findImportViolations applies both rules to the listed packages and returns
-// the violations with the number of packages a rule was applied to. Module
-// roots are taken from every listed package of the application (dependencies
-// included); imports are checked for the matched packages only, those not
-// marked DepOnly. Package main and host packages are exempt and not counted.
-func findImportViolations(pkgs []listedPackage, cfg importConfig) (violations []ImportViolation, checked int) {
+// importFindings is what findImportViolations returns: the violations and
+// what the check covered, which tells a clean application from a check that
+// looked at nothing.
+type importFindings struct {
+	// violations are sorted by package and import.
+	violations []ImportViolation
+	// checked is the number of packages a rule was applied to. Package main
+	// and host packages are exempt and not counted.
+	checked int
+	// inModules is how many of the checked packages belong to a module.
+	inModules int
+	// modules are the module roots with at least one package of the
+	// application in them, sorted, so that a mistyped WithModuleRoots path is
+	// not taken for a module.
+	modules []string
+}
+
+// findImportViolations applies both rules to the listed packages. Module roots
+// are taken from every listed package of the application (dependencies
+// included) and from WithModuleRoots; imports are checked for the matched
+// packages only, those not marked DepOnly.
+func findImportViolations(pkgs []listedPackage, cfg importConfig) importFindings {
+	var (
+		violations []ImportViolation
+		found      importFindings
+	)
 	standard := make(map[string]bool, len(pkgs))
 	rootSet := make(map[string]struct{})
 	for _, root := range cfg.moduleRoots {
@@ -323,7 +414,7 @@ func findImportViolations(pkgs []listedPackage, cfg importConfig) (violations []
 		if pkg.Standard || pkg.Module == nil || !pkg.Module.Main {
 			continue
 		}
-		if root, ok := contractRoot(pkg.ImportPath, pkg.Module.Path); ok {
+		if root, ok := contractRoot(pkg.ImportPath, pkg.Module.Path, cfg.nonContracts); ok {
 			rootSet[root] = struct{}{}
 		}
 	}
@@ -345,18 +436,22 @@ func findImportViolations(pkgs []listedPackage, cfg importConfig) (violations []
 			continue
 		}
 		owner, owned := owningModule(pkg.ImportPath, roots)
-		if owned && isContractPackage(pkg.ImportPath, owner) {
-			checked++
+		if owned && isContractPackage(pkg.ImportPath, owner, cfg.nonContracts) {
+			found.checked++
+			found.inModules++
 			violations = append(violations, contractViolations(pkg, owner, roots, standard, cfg)...)
 			continue
 		}
 		if pkg.Name == "main" || matchesAny(pkg.ImportPath, cfg.hosts) {
 			continue
 		}
-		checked++
+		found.checked++
+		if owned {
+			found.inModules++
+		}
 		for _, imp := range pkg.Imports {
 			target, ok := owningModule(imp, roots)
-			if !ok || isContractPackage(imp, target) || inTree(pkg.ImportPath, target) {
+			if !ok || isContractPackage(imp, target, cfg.nonContracts) || inTree(pkg.ImportPath, target) {
 				continue
 			}
 			violations = append(violations, ImportViolation{
@@ -378,7 +473,19 @@ func findImportViolations(pkgs []listedPackage, cfg importConfig) (violations []
 		}
 		return a.Import < b.Import
 	})
-	return violations, checked
+	found.violations = violations
+	// A module counts when a package of the application is in it, so that a
+	// mistyped WithModuleRoots path is not taken for a module.
+	for _, root := range roots {
+		for _, pkg := range pkgs {
+			if !pkg.Standard && pkg.Module != nil && pkg.Module.Main && inTree(pkg.ImportPath, root) {
+				found.modules = append(found.modules, root)
+				break
+			}
+		}
+	}
+	sort.Strings(found.modules)
+	return found
 }
 
 // contractViolations checks the imports of one contract package of module
@@ -391,7 +498,7 @@ func contractViolations(pkg listedPackage, owner string, roots []string, standar
 			continue
 		}
 		target, owned := owningModule(imp, roots)
-		if owned && isContractPackage(imp, target) {
+		if owned && isContractPackage(imp, target, cfg.nonContracts) {
 			continue
 		}
 		var reason string
@@ -411,22 +518,40 @@ func contractViolations(pkg listedPackage, owner string, roots []string, standar
 
 // contractRoot returns the module a contract package belongs to:
 // "app/order" for "app/order/contract" and for "app/order/contract/v2". The
-// last "contract" path element decides. Only the elements below goModule, the
+// last "contract" path element that is not one of nonContracts
+// (WithNonContractPackages) decides. Only the elements below goModule, the
 // path of the Go module the package is in, are looked at, so a Go module that
 // happens to be named ".../contract" does not turn every package into a
 // contract package; a contract directory at the root of the Go module makes
 // the whole Go module one module.
-func contractRoot(importPath, goModule string) (string, bool) {
+func contractRoot(importPath, goModule string, nonContracts []string) (string, bool) {
 	if !inTree(importPath, goModule) || importPath == goModule {
 		return "", false
 	}
 	segments := strings.Split(strings.TrimPrefix(importPath, goModule+"/"), "/")
 	for i := len(segments) - 1; i >= 0; i-- {
-		if segments[i] == contractSegment {
-			return strings.Join(append([]string{goModule}, segments[:i]...), "/"), true
+		if segments[i] != contractSegment {
+			continue
 		}
+		root := strings.Join(append([]string{goModule}, segments[:i]...), "/")
+		if isNonContract(root, nonContracts) {
+			continue
+		}
+		return root, true
 	}
 	return "", false
+}
+
+// isNonContract reports whether the contract directory of root was named
+// with WithNonContractPackages.
+func isNonContract(root string, nonContracts []string) bool {
+	dir := root + "/" + contractSegment
+	for _, excluded := range nonContracts {
+		if excluded == dir {
+			return true
+		}
+	}
+	return false
 }
 
 // owningModule returns the innermost module root whose tree contains
@@ -441,9 +566,21 @@ func owningModule(importPath string, roots []string) (string, bool) {
 }
 
 // isContractPackage reports whether importPath is the contract package of
-// module root or a package below it.
-func isContractPackage(importPath, root string) bool {
-	return inTree(importPath, root+"/"+contractSegment)
+// module root or a package below it. A directory named with
+// WithNonContractPackages, whether it is the contract directory of root or a
+// directory below it, is an ordinary package of the module, with the packages
+// below it.
+func isContractPackage(importPath, root string, nonContracts []string) bool {
+	dir := root + "/" + contractSegment
+	if !inTree(importPath, dir) {
+		return false
+	}
+	for _, excluded := range nonContracts {
+		if inTree(excluded, dir) && inTree(importPath, excluded) {
+			return false
+		}
+	}
+	return true
 }
 
 // inTree reports whether importPath is root or a package below it.

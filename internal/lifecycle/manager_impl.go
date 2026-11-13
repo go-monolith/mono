@@ -152,29 +152,15 @@ func (lm *lifecycleManager) ModuleEventBus(moduleName string) types.EventBus {
 // it for ModuleBoundaries. It is removed again when the module's start fails
 // (rollback) and when the application stops.
 func (lm *lifecycleManager) newBoundaryRecorder(module types.Module, plugins map[string]types.PluginModule) *boundary.Recorder {
-	var declared []string
-	if depMod, ok := module.(types.DependentModule); ok {
-		declared = depMod.Dependencies()
-	}
-	var consumed []types.BaseServiceDefinition
-	consumer, declaresConsumed := module.(types.ServiceConsumerModule)
-	if declaresConsumed {
-		consumed = consumer.ConsumeServices()
-	}
-	pluginNames := make([]string, 0, len(plugins))
-	for _, p := range plugins {
-		pluginNames = append(pluginNames, p.Name())
-	}
+	lm.mu.RLock()
+	strict := lm.strictBoundaries
+	lm.mu.RUnlock()
+	// The module's methods are called without the lock held.
+	rec := boundary.ForModule(module, plugins, strict, lm.logger)
 
 	lm.mu.Lock()
 	defer lm.mu.Unlock()
-	rec := boundary.New(module.Name(), declared, pluginNames, consumed, lm.strictBoundaries, lm.logger)
-	if declaresConsumed {
-		// A module that declares what it consumes declares all of it: a
-		// lookup outside the list is an undeclared-service-use violation.
-		rec.EnforceConsumed()
-	}
-	lm.boundaries[module.Name()] = rec
+	lm.boundaries[rec.Module()] = rec
 	return rec
 }
 
