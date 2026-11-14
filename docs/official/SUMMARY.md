@@ -47,7 +47,7 @@
 * [🐛 Error Handling](guides/error-handling.md)
 * [🧪 Testing](guides/testing.md)
 * [🧱 Module Boundaries](guides/module-boundaries.md)
-* [⬆️ Upgrading to v0.1.0](guides/upgrading.md)
+* [⬆️ Upgrading to v0.1.0 and v0.1.2](guides/upgrading.md)
 * [📃 Logging](guides/logging.md)
 * [💾 Storage Backends](guides/storage-backends.md)
 

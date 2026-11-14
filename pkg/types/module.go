@@ -159,16 +159,33 @@ type ServiceProviderModule interface {
 // Each entry is the contract of a service provided by one of the module's
 // dependencies (or by a registered plugin), typically the ToBase() of a typed
 // definition imported from the provider's contract package. The framework
-// validates the list when the module starts, after its dependency containers
-// have been set and before RegisterServices: every contract must name a module
-// listed in Dependencies() (or a plugin), that module must have registered the
-// service, and the registered service must be of the contract's type. A
-// mismatch fails the start of the module (fail fast) instead of surfacing as a
-// "service not found" error on the first call at runtime.
+// calls ConsumeServices once per start, after the module's dependency
+// containers have been set and before RegisterServices (so the list may be
+// built from what the module was wired with), and validates it: every
+// contract must name a module listed in Dependencies() (or a plugin), that
+// module must have registered the service, and the registered service must be
+// of the contract's type. A mismatch fails the start of the module (fail
+// fast) instead of surfacing as a "service not found" error on the first call
+// at runtime.
+//
+// The list is complete: implementing the interface, even with an empty list,
+// says that the module calls nothing else. A lookup of a request-reply, queue
+// group or stream consumer service of a dependency that is not in the list is
+// an undeclared-service-use boundary violation, and so is a publish or a
+// request the module sends on its event bus to the subject of such a service
+// (services.<dependency>.<service>): recorded and let through by default,
+// rejected with ErrModuleBoundaryViolation under WithStrictModuleBoundaries.
+// By default a lookup counts once it succeeded, so a module may ask for an
+// optional service and fall back when the dependency does not provide it. A
+// service the module looks up in SetDependencyServiceContainer, before the
+// list is read, is checked when it is: under WithStrictModuleBoundaries one
+// that is not in the list fails the start of the module. Channel services
+// (they have no contract type) and services of plugins are not checked, and
+// neither is a module that does not implement the interface.
 //
 // The declaration is also reported in the module's ModuleBoundaryReport, next
-// to the services the module was observed to use, so an undeclared use stands
-// out.
+// to the services the module was observed to use and the contracts it has not
+// used so far.
 //
 // Example:
 //

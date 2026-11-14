@@ -371,3 +371,91 @@ func TestServiceDefinitionNilCodecsAreIgnored(t *testing.T) {
 		t.Errorf("Result = %q", resp.Result)
 	}
 }
+
+// lookupOnly implements types.ServiceLookup and nothing else: what a driven
+// adapter holds for a dependency. It has no Register* method, so the consumer
+// side of a contract must not need one.
+type lookupOnly struct {
+	requested []string
+}
+
+var _ types.ServiceLookup = (*lookupOnly)(nil)
+
+func (l *lookupOnly) GetChannelService(string, string) (chan *types.Msg, chan *types.Msg, error) {
+	return nil, nil, monoerrors.ErrServiceNotFound
+}
+
+func (l *lookupOnly) MustGetChannelService(string, string) (chan *types.Msg, chan *types.Msg) {
+	return nil, nil
+}
+
+func (l *lookupOnly) GetRequestReplyService(name string) (types.RequestReplyServiceClient, error) {
+	l.requested = append(l.requested, "request-reply:"+name)
+	return &mockRequestReplyServiceClient{callFunc: func(context.Context, []byte) (*types.Msg, error) {
+		return &types.Msg{Data: []byte(`{"result":"ok"}`)}, nil
+	}}, nil
+}
+
+func (l *lookupOnly) GetQueueGroupService(name string) (types.QueueGroupServiceClient, error) {
+	l.requested = append(l.requested, "queue-group:"+name)
+	return &mockQueueGroupServiceClient{}, nil
+}
+
+func (l *lookupOnly) GetStreamConsumerService(name string) (types.StreamConsumerServiceClient, error) {
+	l.requested = append(l.requested, "stream-consumer:"+name)
+	return &mockStreamConsumerServiceClient{}, nil
+}
+
+func (l *lookupOnly) Has(string) bool { return true }
+
+// The consumer side of every contract, and the untyped helpers under it, need
+// only the lookup side of a container.
+func TestServiceDefinitionConsumerSideNeedsOnlyServiceLookup(t *testing.T) {
+	ctx := context.Background()
+	services := &lookupOnly{}
+
+	resp, err := helper.RequestReplyService[cReq, cResp]("inventory", "check-stock").Call(ctx, services, cReq{Value: "v"})
+	if err != nil {
+		t.Fatalf("Call: %v", err)
+	}
+	if resp.Result != "ok" {
+		t.Errorf("response = %+v", resp)
+	}
+	if err := helper.QueueGroupService[cReq]("notification", "on-order-created").Send(ctx, services, cReq{Value: "s"}); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	if _, err := helper.StreamConsumerService[cReq]("audit", "trail").Publish(ctx, services, cReq{Value: "p"}); err != nil {
+		t.Fatalf("Publish: %v", err)
+	}
+
+	var raw cResp
+	if err := helper.CallRequestReplyService(ctx, services, "raw-call", json.Marshal, json.Unmarshal, cReq{Value: "r"}, &raw); err != nil {
+		t.Fatalf("CallRequestReplyService: %v", err)
+	}
+	if err := helper.SendQueueGroupService(ctx, services, "raw-send", json.Marshal, cReq{Value: "r"}); err != nil {
+		t.Fatalf("SendQueueGroupService: %v", err)
+	}
+	if _, err := helper.PublishStreamConsumerService(ctx, services, "raw-publish", json.Marshal, cReq{Value: "r"}); err != nil {
+		t.Fatalf("PublishStreamConsumerService: %v", err)
+	}
+
+	want := []string{
+		"request-reply:check-stock", "queue-group:on-order-created", "stream-consumer:trail",
+		"request-reply:raw-call", "queue-group:raw-send", "stream-consumer:raw-publish",
+	}
+	if strings.Join(services.requested, ",") != strings.Join(want, ",") {
+		t.Errorf("lookups = %v, want %v", services.requested, want)
+	}
+
+	// A ServiceContainer is a ServiceLookup, so callers that pass one are
+	// unaffected.
+	var container types.ServiceContainer = &mockContainerWithClients{
+		requestReplyClient: &mockRequestReplyServiceClient{callFunc: func(context.Context, []byte) (*types.Msg, error) {
+			return &types.Msg{Data: []byte(`{"result":"from container"}`)}, nil
+		}},
+	}
+	resp, err = helper.RequestReplyService[cReq, cResp]("inventory", "check-stock").Call(ctx, container, cReq{Value: "v"})
+	if err != nil || resp.Result != "from container" {
+		t.Errorf("Call through a ServiceContainer: resp=%+v err=%v", resp, err)
+	}
+}

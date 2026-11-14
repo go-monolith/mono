@@ -4,11 +4,13 @@
 // wildcards, queue groups, request-reply), a Container that is the framework's
 // real ServiceContainer bound to a module and dispatching its handlers on that
 // bus, a Harness that starts one module through the documented lifecycle order
-// (plugins, dependency containers, event bus, RegisterServices,
-// RegisterEventConsumers, Start) with the same read-only dependency views and
-// module-scoped event bus the framework uses, and CheckModule, which runs the
+// (plugins, dependency containers, consumed contracts, event bus,
+// RegisterServices, RegisterEventConsumers, Start) with the same read-only
+// dependency views, consumed-contract step and module-scoped event bus the
+// framework uses, CheckModule, which runs the
 // harness and asserts that the module follows the Ports and Adapters rules the
-// framework can observe.
+// framework can observe, and CheckImports, which checks the contract package
+// import rule on the import graph of the application.
 //
 // A typical module test:
 //
@@ -33,6 +35,14 @@
 //	            _, err := contract.PlaceOrder.Call(ctx, h.Container(), contract.CreateOrderRequest{ProductID: "a", Quantity: 1, Amount: 10})
 //	            return err
 //	        }))
+//	}
+//
+// And the import rule, once for the application, in a test in its root
+// directory (so that "./..." covers every module). It reads
+// the import graph, which is the one thing the runtime checks cannot see:
+//
+//	func TestImportRules(t *testing.T) {
+//	    monotest.CheckImports(t)
 //	}
 //
 // JetStream is not emulated: stream consumer, event stream consumer and cron

@@ -118,6 +118,12 @@ type MsgPubAck = types.MsgPubAck
 // ServiceContainer manages service registration and discovery.
 type ServiceContainer = types.ServiceContainer
 
+// ServiceLookup is the read side of a ServiceContainer: the Get* methods and
+// Has. Code that only calls a dependency's services, such as a driven adapter,
+// holds the container it is handed as a ServiceLookup, so that registering on
+// the dependency is a compile error.
+type ServiceLookup = types.ServiceLookup
+
 // ServiceEntry represents a registered service.
 type ServiceEntry = types.ServiceEntry
 

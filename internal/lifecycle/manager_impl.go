@@ -147,27 +147,19 @@ func (lm *lifecycleManager) ModuleEventBus(moduleName string) types.EventBus {
 }
 
 // newBoundaryRecorder builds the boundary recorder of module from its declared
-// dependencies, the registered plugins and its consumed contracts, and stores
-// it for ModuleBoundaries. It is removed again when the module's start fails
+// dependencies and the registered plugins, and stores it for ModuleBoundaries.
+// Its consumed contracts are declared at step 1.5 (ResolveConsumed). It is removed again when the module's start fails
 // (rollback) and when the application stops.
 func (lm *lifecycleManager) newBoundaryRecorder(module types.Module, plugins map[string]types.PluginModule) *boundary.Recorder {
-	var declared []string
-	if depMod, ok := module.(types.DependentModule); ok {
-		declared = depMod.Dependencies()
-	}
-	var consumed []types.BaseServiceDefinition
-	if consumer, ok := module.(types.ServiceConsumerModule); ok {
-		consumed = consumer.ConsumeServices()
-	}
-	pluginNames := make([]string, 0, len(plugins))
-	for _, p := range plugins {
-		pluginNames = append(pluginNames, p.Name())
-	}
+	lm.mu.RLock()
+	strict := lm.strictBoundaries
+	lm.mu.RUnlock()
+	// The module's methods are called without the lock held.
+	rec := boundary.ForModule(module, plugins, strict, lm.logger)
 
 	lm.mu.Lock()
 	defer lm.mu.Unlock()
-	rec := boundary.New(module.Name(), declared, pluginNames, consumed, lm.strictBoundaries, lm.logger)
-	lm.boundaries[module.Name()] = rec
+	lm.boundaries[rec.Module()] = rec
 	return rec
 }
 
@@ -181,8 +173,9 @@ func (lm *lifecycleManager) forgetBoundaries(moduleName string) {
 }
 
 // logBoundarySummary writes, at Stop, one Warn line per module and violation
-// kind and one Info line per declared dependency that was never looked up. A
-// dependency declared only for start ordering is legitimate, hence Info.
+// kind and one Info line per declared dependency, and per consumed contract,
+// that was never looked up. A dependency declared only for start ordering and
+// a contract not called during this run are legitimate, hence Info.
 func (lm *lifecycleManager) logBoundarySummary() {
 	for _, report := range lm.ModuleBoundaries() {
 		for _, v := range report.Violations {
@@ -194,6 +187,10 @@ func (lm *lifecycleManager) logBoundarySummary() {
 		}
 		for _, dep := range report.UnusedDependencies {
 			lm.logger.Info("Declared dependency never used (start ordering only?)", "module", report.Module, "dependency", dep)
+		}
+		for _, def := range report.UnusedContracts {
+			lm.logger.Info("Consumed service contract never used during this run",
+				"module", report.Module, "provider", def.ModuleName, "service", def.Name, "type", types.FormatServiceType(def.Type))
 		}
 	}
 }
@@ -782,96 +779,25 @@ func (lm *lifecycleManager) Start(ctx context.Context) error {
 	return nil
 }
 
-// validateConsumedServices checks the contracts a ServiceConsumerModule
-// declares against what its dependencies actually registered, so that a
-// missing or mistyped service fails the module start instead of the first call
-// at runtime. For each contract: the providing module must be one of the
-// module's declared dependencies or a registered plugin (plugins are injected
-// into every UsePluginModule and are not part of the dependency graph), that
-// provider must have registered the service, and the registered service must
-// be of the contract's type. Dependencies and plugins start before the module,
-// so their registrations are complete here.
-func (lm *lifecycleManager) validateConsumedServices(module types.Module, contracts []types.BaseServiceDefinition) error {
-	if len(contracts) == 0 {
-		return nil
-	}
-	moduleName := module.Name()
-
-	declared := make(map[string]struct{})
-	if depMod, ok := module.(types.DependentModule); ok {
-		for _, dep := range depMod.Dependencies() {
-			declared[dep] = struct{}{}
-		}
-	}
-
-	// Snapshot the provider containers under the lock, then validate without it.
-	plugins := lm.pluginRegistry.All()
-	lm.mu.RLock()
-	containers := make(map[string]types.ServiceContainer, len(declared))
-	for dep := range declared {
-		if c, ok := lm.containers[dep]; ok {
-			containers[dep] = c
-		}
-	}
-	// Plugin containers are keyed by alias; index them by module name here.
-	pluginContainers := make(map[string]types.ServiceContainer, len(plugins))
-	for alias, plugin := range plugins {
-		if c, ok := lm.pluginContainers[alias]; ok {
-			pluginContainers[plugin.Name()] = c
-		}
-	}
-	lm.mu.RUnlock()
-
-	for _, def := range contracts {
-		if def.ModuleName == "" || def.Name == "" {
-			return fmt.Errorf("consumed service contract %s is incomplete (module and service name are required)", def)
-		}
-		if def.ModuleName == moduleName {
-			return fmt.Errorf("consumed service contract %s names the module itself", def)
-		}
-
-		provider, isPlugin := pluginContainers[def.ModuleName]
-		if !isPlugin {
-			if _, ok := declared[def.ModuleName]; !ok {
-				return fmt.Errorf("%w: consumed service contract %s requires module '%s' in Dependencies()",
-					monoerrors.ErrMissingDependency, def, def.ModuleName)
+// consumedProviders returns the lookup ResolveConsumed uses to find the
+// container of the module that provides a consumed contract: a registered
+// plugin (plugin containers are kept by alias, the contract names the module)
+// or another module. The lock is taken per lookup and never held while the
+// module's own methods run.
+func (lm *lifecycleManager) consumedProviders(plugins map[string]types.PluginModule) boundary.ProviderLookup {
+	return func(moduleName string) (types.ServiceContainer, bool, error) {
+		lm.mu.RLock()
+		defer lm.mu.RUnlock()
+		for alias, plugin := range plugins {
+			if plugin.Name() != moduleName {
+				continue
 			}
-			var exists bool
-			provider, exists = containers[def.ModuleName]
-			if !exists {
-				return fmt.Errorf("%w: consumed service contract %s: dependency '%s' has no container",
-					monoerrors.ErrMissingDependency, def, def.ModuleName)
+			if c, ok := lm.pluginContainers[alias]; ok {
+				return c, true, nil
 			}
 		}
-
-		entry := findServiceEntry(provider, def.Name)
-		if entry == nil {
-			return fmt.Errorf("consumed service contract %s: %w", def, &monoerrors.ServiceError{
-				ServiceName: def.Name, ModuleName: def.ModuleName, ServiceType: def.Type,
-				Err: monoerrors.ErrServiceNotFound,
-			})
-		}
-		if entry.Type != def.Type {
-			return monoerrors.WrapServiceContractMismatch(def, def.ModuleName, entry.Type)
-		}
-		lm.logger.Debug("Consumed service contract validated",
-			"module", moduleName, "provider", def.ModuleName, "service", def.Name,
-			"type", types.FormatServiceType(def.Type), "contract_backed", entry.Contract != nil)
+		return lm.containers[moduleName], false, nil
 	}
-	return nil
-}
-
-// findServiceEntry returns the entry of the named service in container, or nil.
-func findServiceEntry(container types.ServiceContainer, name string) *types.ServiceEntry {
-	if container == nil {
-		return nil
-	}
-	for _, entry := range container.Entries() {
-		if entry.Name == name {
-			return entry
-		}
-	}
-	return nil
 }
 
 // startModule executes the initialization sequence for a single module
@@ -952,11 +878,11 @@ func (lm *lifecycleManager) startModule(ctx context.Context, module types.Module
 		lm.mu.RUnlock()
 	}
 
-	// Step 1.5: Validate declared service contracts (fail fast)
-	if consumer, ok := module.(types.ServiceConsumerModule); ok {
-		if err := lm.validateConsumedServices(module, consumer.ConsumeServices()); err != nil {
-			return monoerrors.WrapModuleStartFailed(moduleName, err)
-		}
+	// Step 1.5: Validate declared service contracts (fail fast) and make them
+	// the list the module's lookups are checked against. ConsumeServices() is
+	// called once, here, after the dependency containers are set.
+	if err := rec.ResolveConsumed(module, lm.consumedProviders(plugins)); err != nil {
+		return monoerrors.WrapModuleStartFailed(moduleName, err)
 	}
 
 	// Step 2: Set EventBus if NATS-aware (scoped to the module's boundaries)

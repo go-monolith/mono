@@ -665,8 +665,33 @@ All three have `WithMarshaler`, `WithUnmarshaler` (JSON by default), `ToBase()` 
 `Register` records the contract in `ServiceEntry.Contract`. It returns `ErrServiceContractMismatch` when the container belongs to a different module than the contract names.
 
 {% hint style="info" %}
-**Dependency containers are read-only views.** The container a module receives in `SetDependencyServiceContainer` allows lookups only. Mutating calls are recorded as boundary violations, and fail with `ErrModuleBoundaryViolation` under `WithStrictModuleBoundaries`. See the [Module Boundaries Guide](../guides/module-boundaries.md).
+**Dependency containers are read-only views.** The container a module receives in `SetDependencyServiceContainer` allows lookups only. Mutating calls are recorded as boundary violations, and fail with `ErrModuleBoundaryViolation` under `WithStrictModuleBoundaries`. Since v0.1.2, so is a lookup of a service missing from the module's `ConsumeServices()`, when the module implements it (by default only when the service exists: a lookup of a service the dependency does not provide fails with `ErrServiceNotFound`), and `Entries()` on the view returns descriptions of the services: copies without the provider's handlers and channels, in both modes, with one warning logged for the first call per dependency. Changing one, including its stream or consumer configuration, has no effect on the provider. See the [Module Boundaries Guide](../guides/module-boundaries.md).
 {% endhint %}
+
+### ServiceLookup
+
+```go
+type ServiceLookup interface {
+    GetChannelService(serviceName string, consumerModule string) (in chan *Msg, out chan *Msg, err error)
+    MustGetChannelService(serviceName string, consumerModule string) (in chan *Msg, out chan *Msg)
+    GetRequestReplyService(name string) (RequestReplyServiceClient, error)
+    GetQueueGroupService(name string) (QueueGroupServiceClient, error)
+    GetStreamConsumerService(name string) (StreamConsumerServiceClient, error)
+    Has(name string) bool
+}
+```
+
+`mono.ServiceLookup` (v0.1.2+) is the read side of `ServiceContainer`, which embeds it. Hold a dependency's container as a `ServiceLookup` in code that only calls services, such as a driven adapter: registering on it is then a compile error. `Call`, `Send`, `Publish` and the `helper.Call*` / `Send*` / `Publish*` functions accept it.
+
+```go
+type inventoryAdapter struct{ services mono.ServiceLookup }
+
+func (m *OrderModule) SetDependencyServiceContainer(dependency string, container mono.ServiceContainer) {
+    if dependency == "inventory" {
+        m.inventory = inventoryAdapter{services: container}
+    }
+}
+```
 
 ## Handler Concurrency (Worker Pools)
 

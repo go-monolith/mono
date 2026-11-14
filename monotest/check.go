@@ -23,9 +23,13 @@ import (
 //     valid services.<module>.<service> subject.
 //  4. Every ConsumeServices() contract names a declared dependency (or a
 //     plugin) whose stand-in registered the service with the same type.
-//  5. The module neither mutates a dependency's container nor addresses the
-//     service subject of an undeclared module on the event bus (no boundary
-//     violations recorded).
+//  5. The module neither mutates a dependency's container, nor addresses the
+//     service subject of an undeclared module on the event bus, nor, when it
+//     implements ServiceConsumerModule, uses a dependency service that is
+//     missing from ConsumeServices(), by looking it up on the dependency's
+//     container or by sending to its subject on the event bus (no boundary
+//     violations recorded). Asking for a service the stand-in does not
+//     provide fails the lookup and is not a violation.
 //  6. Every declared dependency is looked up at least once during Start or the
 //     exercise, unless excluded with WithOrderingOnlyDependency.
 //  7. An EventEmitterModule declares events with valid subjects, and every
@@ -33,6 +37,13 @@ import (
 //     declared (publishes by stand-ins or by the exercise do not count).
 //  8. Start then Stop succeed, and Stop returns within WithStopTimeout
 //     (default 5s) when given a context with that deadline.
+//  9. Every ConsumeServices() contract of a declared dependency is used at
+//     least once during Start or the exercise (looked up, or reached on the
+//     event bus), unless excluded with WithUnexercisedContract. With rule 5
+//     this makes the list exact for what the module does through the
+//     container and the bus it is handed: nothing used is undeclared and
+//     nothing declared is unused. JetStream publishes through EventStream()
+//     are not observed.
 //
 // Rules 2, 4 and 8 fail the test at once (the module could not be started or
 // stopped); the others are collected so one run shows every deviation. The
@@ -143,6 +154,16 @@ func CheckModule(tb testing.TB, module types.Module, opts ...Option) {
 		tb.Errorf("rule 6: dependency %q is declared but no service of it was looked up; "+hint, dep, dep)
 	}
 
+	// Rule 9: consumed contracts never looked up.
+	for _, def := range report.UnusedContracts {
+		if h.unexercised[def] {
+			continue
+		}
+		tb.Errorf("rule 9: consumed contract %s is in ConsumeServices() but was never used; "+
+			"call it from monotest.WithExercise, remove it from ConsumeServices() if the module no longer uses it, "+
+			"or exclude it with monotest.WithUnexercisedContract", def)
+	}
+
 	// Rule 7b: the events the module itself published are declared.
 	if declaredEvents != nil {
 		reported := make(map[string]struct{})
@@ -187,6 +208,9 @@ func violationHint(kind types.BoundaryViolationKind) string {
 		return "call the service through the dependency container received in SetDependencyServiceContainer (declare the dependency) instead of the raw event bus"
 	case types.BoundaryViolationForeignServiceSubscription:
 		return "a module must not subscribe to another module's service subject"
+	case types.BoundaryViolationUndeclaredServiceUse:
+		return "add the service's contract to ConsumeServices(): a module that declares what it consumes must declare all of it, " +
+			"whether it reaches the service through the dependency container or the event bus"
 	default:
 		return fmt.Sprintf("unknown violation kind %q", kind)
 	}

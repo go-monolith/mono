@@ -390,6 +390,9 @@ func TestCheckModuleRuleFourAndStopErrors(t *testing.T) {
 	if !rec.fatal || !rec.has("rule 4:") || !rec.has("consumed service contract rejected") {
 		t.Fatalf("expected a fatal rule 4 failure, got %v", rec.errors)
 	}
+	if !rec.has("register it on the stand-in container") {
+		t.Errorf("a missing service should say where to register it: %v", rec.errors)
+	}
 
 	rec = runCheck(t, &stopFailModule{}, monotest.WithStopTimeout(time.Second))
 	if !rec.has("rule 8: Stop failed") {

@@ -14,14 +14,14 @@ my-mono-app/
 │
 ├── modules/                         # Application modules
 │   ├── order/
-│   │   ├── contract/               # Published port: the only package other modules import
+│   │   ├── contract/               # Published contract: the only package other modules import
 │   │   │   ├── contract.go         # DTOs + typed service contracts
 │   │   │   └── events.go           # Events this module emits
 │   │   ├── module.go               # Module implementation, ConsumeServices()
 │   │   ├── module_test.go          # monotest.CheckModule conformance test
-│   │   ├── ports.go                # Driven ports this module needs
-│   │   ├── adapter.go              # Adapters over other modules' contracts
-│   │   ├── service.go              # Business logic
+│   │   ├── ports.go                # Driven ports this module needs, in its own types
+│   │   ├── adapter.go              # Adapters translating the ports to other modules' contracts
+│   │   ├── service.go              # Business logic: plain Go over ports.go
 │   │   └── types.go                # Internal domain types
 │   │
 │   ├── payment/
@@ -318,10 +318,10 @@ func (s *Service) validateOrder(order *Order) error
 
 ### Import Only Contract Packages
 
-A module imports another module's `contract` package and nothing else of it. A `contract` package imports only the standard library, `mono/pkg/types` and `mono/pkg/helper`.
+A module imports another module's `contract` package and nothing else of it. A `contract` package imports only the standard library, `mono/pkg/types`, `mono/pkg/helper` and other contract packages. `monotest.CheckImports(t)` in one test in the root directory of the application checks both rules. It takes every directory named `contract` as a module's contract package, so keep that name for contracts, or name the exceptions with `monotest.WithNonContractPackages`.
 
 ```go
-// ✓ order imports the published port
+// ✓ order imports the published contract
 import inventorycontract "my-mono-app/modules/inventory/contract"
 
 // ❌ order imports the module package

@@ -7,39 +7,90 @@ import (
 	"github.com/go-monolith/mono"
 	inventorycontract "github.com/go-monolith/mono/examples/multi-module/inventory/contract"
 	notificationcontract "github.com/go-monolith/mono/examples/multi-module/notification/contract"
+	"github.com/go-monolith/mono/examples/multi-module/order/contract"
 	paymentcontract "github.com/go-monolith/mono/examples/multi-module/payment/contract"
 )
 
-// The driven adapters: each implements one port of ports.go over the
-// provider's contract, using the provider's ServiceContainer received in
-// SetDependencyServiceContainer. This is the only place in the module that
-// knows the calls go over NATS.
+// The driven adapters: each implements one port of ports.go over a provider's
+// contract and translates between the order module's own terms and the
+// provider's DTOs. This file is the only place in the module that knows which
+// module answers a port, what its DTOs look like, and that the call goes over
+// NATS: when a provider changes its contract, the change stops here.
+//
+// An adapter holds its dependency as a mono.ServiceLookup, the read side of
+// the container received in SetDependencyServiceContainer: it can look
+// services up and nothing else.
 
-type inventoryAdapter struct{ container mono.ServiceContainer }
+// Compile-time checks that the adapters implement the ports.
+var (
+	_ InventoryPort    = inventoryAdapter{}
+	_ PaymentPort      = paymentAdapter{}
+	_ NotificationPort = notificationAdapter{}
+	_ EventsPort       = eventsAdapter{}
+)
 
-func (a inventoryAdapter) CheckStock(ctx context.Context, req inventorycontract.CheckStockRequest) (inventorycontract.CheckStockResponse, error) {
-	resp, err := inventorycontract.CheckStock.Call(ctx, a.container, req)
+// inventoryAdapter implements InventoryPort over the inventory module's
+// check-stock contract.
+type inventoryAdapter struct{ services mono.ServiceLookup }
+
+func (a inventoryAdapter) Available(ctx context.Context, productID string, quantity int) (bool, error) {
+	resp, err := inventorycontract.CheckStock.Call(ctx, a.services, inventorycontract.CheckStockRequest{
+		ProductID: productID,
+		Quantity:  quantity,
+	})
 	if err != nil {
-		return inventorycontract.CheckStockResponse{}, fmt.Errorf("inventory check failed: %w", err)
+		return false, fmt.Errorf("inventory check failed: %w", err)
 	}
-	return resp, nil
+	return resp.Available, nil
 }
 
-type paymentAdapter struct{ container mono.ServiceContainer }
+// paymentAdapter implements PaymentPort over the payment module's process
+// contract.
+type paymentAdapter struct{ services mono.ServiceLookup }
 
-func (a paymentAdapter) Process(ctx context.Context, req paymentcontract.ProcessPaymentRequest) (paymentcontract.ProcessPaymentResponse, error) {
-	resp, err := paymentcontract.Process.Call(ctx, a.container, req)
+func (a paymentAdapter) Charge(ctx context.Context, orderID string, amount float64, currency string) (bool, error) {
+	resp, err := paymentcontract.Process.Call(ctx, a.services, paymentcontract.ProcessPaymentRequest{
+		OrderID:  orderID,
+		Amount:   amount,
+		Currency: currency,
+	})
 	if err != nil {
-		return paymentcontract.ProcessPaymentResponse{}, fmt.Errorf("payment processing failed: %w", err)
+		return false, fmt.Errorf("payment processing failed: %w", err)
 	}
-	return resp, nil
+	return resp.Success, nil
 }
 
-type notificationAdapter struct{ container mono.ServiceContainer }
+// notificationAdapter implements NotificationPort over the notification
+// module's on-order-created queue group contract (fire-and-forget with an
+// acceptance ACK).
+type notificationAdapter struct{ services mono.ServiceLookup }
 
-func (a notificationAdapter) OrderCreated(ctx context.Context, notification notificationcontract.OrderCreatedNotification) error {
-	if err := notificationcontract.OnOrderCreated.Send(ctx, a.container, notification); err != nil {
+func (a notificationAdapter) OrderPlaced(ctx context.Context, order PlacedOrder) error {
+	err := notificationcontract.OnOrderCreated.Send(ctx, a.services, notificationcontract.OrderCreatedNotification{
+		OrderID:   order.OrderID,
+		ProductID: order.ProductID,
+		Amount:    order.Amount,
+		Timestamp: order.PlacedAt,
+	})
+	if err != nil {
 		return fmt.Errorf("notification send failed: %w", err)
+	}
+	return nil
+}
+
+// eventsAdapter implements EventsPort by publishing the events the order
+// module declares in its own contract package on the event bus.
+type eventsAdapter struct{ bus mono.EventBus }
+
+func (a eventsAdapter) OrderPlaced(_ context.Context, order PlacedOrder) error {
+	err := contract.OrderCreatedV1.Publish(a.bus, contract.OrderCreatedEvent{
+		OrderID:   order.OrderID,
+		ProductID: order.ProductID,
+		Amount:    order.Amount,
+		Timestamp: order.PlacedAt,
+	}, nil)
+	if err != nil {
+		return fmt.Errorf("publish %s failed: %w", contract.OrderCreatedV1.Name, err)
 	}
 	return nil
 }

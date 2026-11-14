@@ -57,9 +57,11 @@ type MonoFramework interface {
 
 	// ModuleBoundaries returns, for every started module, how it used its
 	// declared boundaries: the dependency services it looked up, the declared
-	// dependencies it never used, and the boundary crossings it attempted
-	// (mutating a dependency's container, addressing the service subject of
-	// an undeclared module). It returns nil before Start and after Stop.
+	// dependencies it never used, the consumed contracts it has not used so
+	// far, and the boundary crossings it attempted (mutating a dependency's
+	// container, addressing the service subject of an undeclared module,
+	// looking up a dependency service missing from its ConsumeServices()).
+	// It returns nil before Start and after Stop.
 	// With WithStrictModuleBoundaries the crossings fail instead and the
 	// report lists none.
 	ModuleBoundaries() []ModuleBoundaryReport

@@ -79,9 +79,10 @@ var (
 	// ErrModuleBoundaryViolation is returned, when strict module boundaries
 	// are enabled (WithStrictModuleBoundaries), by an operation that crosses a
 	// boundary the module did not declare: registering on or otherwise
-	// mutating a dependency's ServiceContainer, or publishing to, requesting
+	// mutating a dependency's ServiceContainer, publishing to, requesting
 	// or subscribing to the service subject of a module that is not a declared
-	// dependency. Without strict mode the operation goes through and is
+	// dependency, or, for a ServiceConsumerModule, looking up a dependency
+	// service that is not in its ConsumeServices() list. Without strict mode the operation goes through and is
 	// recorded in the module's ModuleBoundaryReport instead.
 	ErrModuleBoundaryViolation = errors.New("module boundary violation")
 )

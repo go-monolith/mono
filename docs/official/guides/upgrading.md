@@ -1,6 +1,6 @@
-# Upgrading to v0.1.0
+# Upgrading to v0.1.0 and v0.1.2
 
-This page lists what changes when you upgrade to **v0.1.0**, including the breaking changes that shipped in v0.0.15 to v0.0.19 without a minor version bump.
+This page lists what changes when you upgrade to **v0.1.0**, including the breaking changes that shipped in v0.0.15 to v0.0.19 without a minor version bump, and what changes in **v0.1.2** (see [Upgrading to v0.1.2](#upgrading-to-v012)).
 
 ## Who Is Affected
 
@@ -14,6 +14,9 @@ This page lists what changes when you upgrade to **v0.1.0**, including the break
 | Polyglot clients, or middleware that inspects message headers | "Request-reply handlers receive the caller's deadline" below |
 | Request-reply services that receive bursts faster than they dispatch | "Request-reply client buffer is bounded" below |
 | Alerts or log parsing on framework messages | "Handler panics are recovered" and "NATS client errors go to the framework logger" below |
+| `WithStrictModuleBoundaries()` together with modules that implement `ConsumeServices()` | "`ConsumeServices()` is a complete list" (v0.1.2) |
+| Module code that reads handlers or channels from a dependency's `Entries()` | "`Entries()` on a dependency container returns descriptions" (v0.1.2) |
+| `monotest.CheckModule` tests | "`monotest.CheckModule` has a rule 9" (v0.1.2) |
 
 ## Compile-Time Changes
 
@@ -124,13 +127,70 @@ Calls that cross a boundary still succeed by default, but now log a warning and 
 
 `errors.Is(err, ErrServiceNotFound)` and similar checks (sentinels from `github.com/go-monolith/mono/pkg/errors`) now work on the error returned by `app.Start`. The message text is unchanged.
 
+## Upgrading to v0.1.2
+
+v0.1.2 tightens the module boundary checks introduced in v0.1.0 and adds an import rule check. One change applies to every application: `Entries()` on a dependency container returns descriptions (below). Applications whose modules do not read a dependency's entries and that do not use `ConsumeServices()`, strict mode or `monotest.CheckModule` are not affected.
+
+### `ConsumeServices()` is a complete list
+
+A module that implements `ConsumeServices()` and uses a request-reply, queue group or stream consumer service of a dependency that is **not** in the list now commits an `undeclared-service-use` boundary violation. A use is a lookup on the dependency's container, or a publish or request on the module's event bus to the service subject `services.<dependency>.<service>`.
+
+| Mode | Effect |
+|------|--------|
+| Default | The call goes through. One warning is logged, and the use appears in `app.ModuleBoundaries()` |
+| `WithStrictModuleBoundaries()` | The lookup, publish or request fails with `ErrModuleBoundaryViolation` |
+
+Lookups happen when a module makes the call, so in strict mode an incomplete list fails on the first call at runtime, not at startup. The exception is a service the module looks up in `SetDependencyServiceContainer`: in strict mode one that is not in the list fails the start of the module. Before enabling or keeping strict mode, run in the default mode, read the report, and add every contract the module calls to `ConsumeServices()`. Modules that do not implement the interface, channel services and plugin services are not checked.
+
+A lookup of a service the dependency does not provide:
+
+| Mode | Effect |
+|------|--------|
+| Default | `ErrServiceNotFound`, as before. It is not a violation, so a module may ask for an optional service and fall back |
+| `WithStrictModuleBoundaries()` | `ErrModuleBoundaryViolation` instead of `ErrServiceNotFound`: the module asked for something it did not declare |
+
+`ConsumeServices()` is called once per start, after the module's dependency containers are set, and that one list is both validated and enforced. A module may build it from what it was wired with.
+
+### `Entries()` on a dependency container returns descriptions
+
+`Entries()` on the container passed to `SetDependencyServiceContainer` returns copies that describe the dependency's services (name, type, subject, queue groups, options, stream and cron configuration, contract). The handlers and channels are left out (nil), in the default mode as well as in strict mode. The copies are deep, so changing one, including the subjects or metadata of its stream configuration, has no effect on the provider. `app.Services(name).Entries()` in the host program is unchanged.
+
+A module that read `RequestHandler`, `QueueHandlers[i].Handler`, `InChannel` or `OutChannel` from a dependency's entry now finds nil: calling the handler panics and a send on the channel blocks. Reach the service through `GetRequestReplyService`, `GetQueueGroupService`, `GetStreamConsumerService` or `GetChannelService` instead. Reading the entries is not a boundary violation, so it is not in the boundary report. The framework logs one warning for the first `Entries()` call of a module on each dependency:
+
+```text
+Entries() of a dependency container returns descriptions without handlers and channels; reach its services through Get* (the host reads the real entries with MonoFramework.Services) module=order dependency=inventory
+```
+
+### `monotest.CheckModule` has a rule 9
+
+A `ConsumeServices()` contract that is never used during `Start` or the exercise (looked up on the dependency's container, or reached on the event bus) fails the conformance test. Call it from `WithExercise`, remove it from the list, or exempt it with `monotest.WithUnexercisedContract(def)`.
+
+### `ServiceLookup`
+
+`mono.ServiceLookup` is the read side of `ServiceContainer` (`Get*` and `Has`), and `ServiceContainer` embeds it. The method set of `ServiceContainer` is unchanged, so implementations and fakes still compile. `helper.CallRequestReplyService`, `SendQueueGroupService`, `PublishStreamConsumerService` and the typed contracts' `Call` / `Send` / `Publish` accept a `ServiceLookup`; callers that pass a `ServiceContainer` are unaffected.
+
+### More in the boundary report
+
+`ModuleBoundaryReport` gains `UnusedContracts`: the consumed contracts not used so far. `Stop` logs one Info line for each. Like `Observed`, `UnusedDependencies` and `Violations` it is an empty list when there is nothing to list, so `unused_contracts` is always present in the JSON form.
+
+### New: `monotest.CheckImports`
+
+`monotest.CheckImports(t)` checks the contract package import rule on the import graph of the application. Nothing changes until you add the test.
+
+Two things to know when you add it:
+
+- Put the test in the root directory of the application. The check fails, instead of passing with nothing checked, when it finds no package to check, no module, or no package of a module.
+- Every directory named `contract` marks its parent as a module. If you have a package with that name that is something else, such as `legal/contract` for customer contracts or a helper `order/internal/contract`, name it with `monotest.WithNonContractPackages`.
+
+See [Checking Imports](module-boundaries.md#checking-imports).
+
 ## Recommended Next Steps
 
 Nothing below is required to upgrade. It is the recommended path for new and existing modules:
 
 1. Move each module's DTOs and event definitions into a `contract` sub-package and declare typed service contracts.
 2. Implement `ConsumeServices()` on modules that call other modules.
-3. Add a `monotest.CheckModule` test per module.
+3. Add a `monotest.CheckModule` test per module, and one `monotest.CheckImports` test for the application (v0.1.2+).
 4. Read `app.ModuleBoundaries()`, fix what it reports, then enable `mono.WithStrictModuleBoundaries()`.
 
 See the [Module Boundaries Guide](module-boundaries.md).

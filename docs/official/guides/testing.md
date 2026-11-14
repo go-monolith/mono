@@ -363,7 +363,40 @@ func TestOrderModuleConformance(t *testing.T) {
 }
 ```
 
-It checks the module name, the dependency list, the registered services, the consumed contracts, boundary violations, unused dependencies, emitted events, and `Start`/`Stop`. The full rule list and options are in the [Module Boundaries Guide](module-boundaries.md#testing-with-monotest).
+It checks the module name, the dependency list, the registered services, the consumed contracts (provided, and each one used), boundary violations, unused dependencies, emitted events, and `Start`/`Stop`. The full rule list and options are in the [Module Boundaries Guide](module-boundaries.md#testing-with-monotest).
+
+### Import Rule Test
+
+Since v0.1.2. Add one for the application, in its root directory, so that `./...` covers every module. `CheckImports` runs `go list` and reports every contract package that imports more than it may, and every package that imports another module's package instead of its `contract`:
+
+```go
+func TestImportRules(t *testing.T) {
+    monotest.CheckImports(t)
+}
+```
+
+A test placed elsewhere, such as beside `cmd/app/main.go`, points the check at the root with `monotest.WithImportDir("../..")`. The check fails when it matched no package to check, when the application has no module at all, or when `./...` matched no package of a module, so a wrong directory cannot pass by accident. A package named `contract` that is not a module's contract is excluded with `monotest.WithNonContractPackages`. Options are in the [Module Boundaries Guide](module-boundaries.md#checking-imports).
+
+### Domain Tests with Fake Ports
+
+A module that keeps its rules in a plain Go service over its own ports (`service.go`, `ports.go`) is tested with fakes and nothing else: no framework, no NATS, no other module.
+
+```go
+type fakeInventory struct{ available bool }
+
+func (f fakeInventory) Available(context.Context, string, int) (bool, error) { return f.available, nil }
+
+func TestPlaceOrderOutOfStock(t *testing.T) {
+    service, err := order.NewService(fakeInventory{available: false}, fakePayment{}, fakeEvents{})
+    if err != nil {
+        t.Fatal(err)
+    }
+    result, err := service.PlaceOrder(context.Background(), order.NewOrder{ProductID: "laptop", Quantity: 1, Amount: 10})
+    if err != nil || result.Status != order.StatusOutOfStock {
+        t.Fatalf("result = %+v, err = %v", result, err)
+    }
+}
+```
 
 ### Driving a Module
 
@@ -600,6 +633,7 @@ When writing tests for a module, ensure you cover:
 - [ ] Timeout scenarios (if applicable)
 - [ ] Integration with other modules (integration tests)
 - [ ] Module boundaries (`monotest.CheckModule`)
+- [ ] Import rule (`monotest.CheckImports`)
 
 ## Best Practices Summary
 

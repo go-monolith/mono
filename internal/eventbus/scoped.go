@@ -16,8 +16,13 @@ import (
 // publish or request to a module that is neither itself, a declared dependency
 // nor a plugin bypasses the port (the dependency container) and is a boundary
 // violation; a subscription to another module's service subject would
-// intercept that module's requests and is one too. Event subjects (events.*)
-// and any other subject pass through untouched.
+// intercept that module's requests and is one too. A publish or request to a
+// service subject of a declared dependency is allowed, and for a module that
+// implements ServiceConsumerModule it is held to ConsumeServices() like a
+// lookup on the dependency's container: counted as a use of the contract when
+// the service is in the list, an undeclared-service-use violation when it is
+// not (see boundary.Recorder.SubjectUse). Event subjects (events.*) and any
+// other subject pass through untouched.
 //
 // In strict mode a violation fails the call with ErrModuleBoundaryViolation;
 // otherwise it is recorded, warned once, and the call goes through.
@@ -53,13 +58,15 @@ var (
 )
 
 // target returns the module a service subject addresses, or ok=false for any
-// other subject. Wildcard subjects under services.* ("services.>",
-// "services.*.x") address every module and are treated as a foreign target.
-func target(subject string) (module string, ok bool) {
+// other subject. service is the service addressed when the subject is exactly
+// services.<module>.<service>, and empty otherwise. Wildcard subjects under
+// services.* ("services.>", "services.*.x") address every module and are
+// treated as a foreign target.
+func target(subject string) (module, service string, ok bool) {
 	if !strings.HasPrefix(subject, "services.") {
-		return "", false
+		return "", "", false
 	}
-	module, _, ok = parseServiceSubject(subject)
+	module, service, ok = parseServiceSubject(subject)
 	if !ok {
 		// services.> or services.*.*.* : not one module, but still the
 		// service tree; report it under the wildcard token.
@@ -67,24 +74,32 @@ func target(subject string) (module string, ok bool) {
 		if i := strings.IndexByte(rest, '.'); i >= 0 {
 			rest = rest[:i]
 		}
-		return rest, rest != ""
+		return rest, "", rest != ""
 	}
-	return module, true
+	return module, service, true
 }
 
-// checkSend validates a publish or request subject.
+// checkSend validates a publish or request subject: the module addressed must
+// be the module itself, a declared dependency or a plugin, and a service of a
+// declared dependency must be one the module consumes (SubjectUse).
 func (s *scopedEventBus) checkSend(subject string) error {
-	module, ok := target(subject)
-	if !ok || s.rec.Allowed(module) {
+	module, service, ok := target(subject)
+	if !ok {
 		return nil
 	}
-	return s.rec.Violation(types.BoundaryViolationUndeclaredServiceSubject, module, subject)
+	if !s.rec.Allowed(module) {
+		return s.rec.Violation(types.BoundaryViolationUndeclaredServiceSubject, module, subject)
+	}
+	if service == "" {
+		return nil
+	}
+	return s.rec.SubjectUse(module, service, subject)
 }
 
 // checkSubscribe validates a subscription subject: only the module's own
 // service subjects may be subscribed to.
 func (s *scopedEventBus) checkSubscribe(subject string) error {
-	module, ok := target(subject)
+	module, _, ok := target(subject)
 	if !ok || module == s.rec.Module() {
 		return nil
 	}

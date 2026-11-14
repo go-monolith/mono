@@ -2,6 +2,9 @@ package container
 
 import (
 	"context"
+	"maps"
+	"slices"
+	"sync/atomic"
 	"time"
 
 	"github.com/go-monolith/mono/internal/boundary"
@@ -14,6 +17,11 @@ import (
 //
 //   - every successful lookup (Get*) is attributed to the consumer through the
 //     boundary recorder, which is what MonoFramework.ModuleBoundaries reports;
+//   - a lookup of a request-reply, queue group or stream consumer service that
+//     a ServiceConsumerModule did not list in ConsumeServices is an
+//     undeclared-service-use violation (channel services have no contract and
+//     are not checked). Without strict mode it is recorded when the lookup
+//     succeeded, so probing for a service that does not exist is not one;
 //   - a GetChannelService call that passes a consumerModule other than the
 //     consumer's own name is a channel-consumer-mismatch violation (the
 //     consumer channel would be registered under a name targeted replies do
@@ -27,12 +35,21 @@ import (
 // on a missing service); without it the call is recorded, warned once, and
 // delegated unchanged so that existing applications keep working.
 //
-// Entries() hands out the dependency's *ServiceEntry values as the real
-// container does; the view does not copy them.
+// Entries() returns descriptions of the dependency's services, not its
+// entries: copies without the handlers and channels (see describeEntry), so a
+// consumer can inspect what a dependency provides but cannot run or replace
+// the provider's handlers or change its registrations. That holds in both
+// modes, and inspecting is not a violation, so the first call is logged once
+// at Warn: a module that expects a handler or a channel in an entry would
+// otherwise find nil with nothing pointing at the cause.
 type dependencyView struct {
 	inner      types.ServiceContainer
 	dependency string
 	rec        *boundary.Recorder
+	// entriesNoted makes the note about described entries appear once. It is
+	// a flag, not a sync.Once: the note goes to the application's logger,
+	// which must not be called with a lock held.
+	entriesNoted atomic.Bool
 }
 
 // NewDependencyView wraps dependency's container for the consumer module whose
@@ -172,6 +189,9 @@ func (v *dependencyView) MustGetChannelService(serviceName string, consumerModul
 }
 
 func (v *dependencyView) GetRequestReplyService(name string) (types.RequestReplyServiceClient, error) {
+	if err := v.rec.CheckUse(v.dependency, name, types.ServiceTypeRequestReply); err != nil {
+		return nil, err
+	}
 	client, err := v.inner.GetRequestReplyService(name)
 	if err == nil {
 		v.rec.Lookup(v.dependency, name, types.ServiceTypeRequestReply)
@@ -180,6 +200,9 @@ func (v *dependencyView) GetRequestReplyService(name string) (types.RequestReply
 }
 
 func (v *dependencyView) GetQueueGroupService(name string) (types.QueueGroupServiceClient, error) {
+	if err := v.rec.CheckUse(v.dependency, name, types.ServiceTypeQueueGroup); err != nil {
+		return nil, err
+	}
 	client, err := v.inner.GetQueueGroupService(name)
 	if err == nil {
 		v.rec.Lookup(v.dependency, name, types.ServiceTypeQueueGroup)
@@ -188,6 +211,9 @@ func (v *dependencyView) GetQueueGroupService(name string) (types.QueueGroupServ
 }
 
 func (v *dependencyView) GetStreamConsumerService(name string) (types.StreamConsumerServiceClient, error) {
+	if err := v.rec.CheckUse(v.dependency, name, types.ServiceTypeStreamConsumer); err != nil {
+		return nil, err
+	}
 	client, err := v.inner.GetStreamConsumerService(name)
 	if err == nil {
 		v.rec.Lookup(v.dependency, name, types.ServiceTypeStreamConsumer)
@@ -199,4 +225,114 @@ func (v *dependencyView) GetStreamConsumerService(name string) (types.StreamCons
 
 func (v *dependencyView) Has(name string) bool { return v.inner.Has(name) }
 
-func (v *dependencyView) Entries() []*types.ServiceEntry { return v.inner.Entries() }
+// Entries returns one description per service of the dependency, in the
+// order of the real container. Each call returns fresh copies. The first call
+// is logged (see dependencyView).
+func (v *dependencyView) Entries() []*types.ServiceEntry {
+	if v.entriesNoted.CompareAndSwap(false, true) {
+		v.rec.EntriesDescribed(v.dependency)
+	}
+	entries := v.inner.Entries()
+	described := make([]*types.ServiceEntry, 0, len(entries))
+	for _, entry := range entries {
+		if entry != nil {
+			described = append(described, describeEntry(entry))
+		}
+	}
+	return described
+}
+
+// describeEntry copies what identifies and configures a service (name, type,
+// subject, module, queue groups, options, stream and cron configuration,
+// contract) and leaves out what runs it: the handlers and the channels. The
+// stream and cron configurations are deep copies: the framework reads the
+// provider's configuration when it sets the stream up, after every module has
+// started, so a slice or map shared with a description would let a consumer
+// change the provider's stream. Channel services are reached through
+// GetChannelService, never through the entry.
+func describeEntry(entry *types.ServiceEntry) *types.ServiceEntry {
+	described := &types.ServiceEntry{
+		Name:            entry.Name,
+		Type:            entry.Type,
+		Options:         entry.Options,
+		QueueGroup:      entry.QueueGroup,
+		ScheduleSubject: entry.ScheduleSubject,
+		ModuleName:      entry.ModuleName,
+		Subject:         entry.Subject,
+		Created:         entry.Created,
+	}
+	if len(entry.QueueHandlers) > 0 {
+		described.QueueHandlers = make([]types.QGHP, len(entry.QueueHandlers))
+		for i, pair := range entry.QueueHandlers {
+			described.QueueHandlers[i] = types.QGHP{QueueGroup: pair.QueueGroup, Options: pair.Options}
+		}
+	}
+	if entry.StreamConsumerConfig != nil {
+		config := cloneStreamConsumerConfig(*entry.StreamConsumerConfig)
+		described.StreamConsumerConfig = &config
+	}
+	if entry.CronConfig != nil {
+		config := *entry.CronConfig
+		config.Payload = slices.Clone(config.Payload)
+		described.CronConfig = &config
+	}
+	if entry.Contract != nil {
+		contract := *entry.Contract
+		described.Contract = &contract
+	}
+	return described
+}
+
+// cloneStreamConsumerConfig returns config with every slice, map and pointer
+// of its stream and consumer configuration copied, so that nothing in the
+// result is shared with config.
+func cloneStreamConsumerConfig(config types.StreamConsumerConfig) types.StreamConsumerConfig {
+	stream := &config.Stream
+	stream.Subjects = slices.Clone(stream.Subjects)
+	if stream.Placement != nil {
+		placement := *stream.Placement
+		placement.Tags = slices.Clone(placement.Tags)
+		stream.Placement = &placement
+	}
+	stream.Mirror = cloneStreamSource(stream.Mirror)
+	if stream.Sources != nil {
+		sources := make([]*types.StreamSource, len(stream.Sources))
+		for i, source := range stream.Sources {
+			sources[i] = cloneStreamSource(source)
+		}
+		stream.Sources = sources
+	}
+	stream.SubjectTransform = clonePointer(stream.SubjectTransform)
+	stream.RePublish = clonePointer(stream.RePublish)
+	stream.Metadata = maps.Clone(stream.Metadata)
+
+	consumer := &config.Consumer
+	consumer.OptStartTime = clonePointer(consumer.OptStartTime)
+	consumer.BackOff = slices.Clone(consumer.BackOff)
+	consumer.FilterSubjects = slices.Clone(consumer.FilterSubjects)
+	consumer.Metadata = maps.Clone(consumer.Metadata)
+	return config
+}
+
+// cloneStreamSource returns a deep copy of source, or nil for nil.
+func cloneStreamSource(source *types.StreamSource) *types.StreamSource {
+	if source == nil {
+		return nil
+	}
+	cloned := *source
+	cloned.OptStartTime = clonePointer(source.OptStartTime)
+	cloned.SubjectTransforms = slices.Clone(source.SubjectTransforms)
+	cloned.External = clonePointer(source.External)
+	return &cloned
+}
+
+// clonePointer returns a pointer to a copy of *p, or nil for nil. It is a
+// shallow copy, for values that hold no mutable state of their own behind a
+// slice, map or pointer.
+func clonePointer[T any](p *T) *T {
+	if p == nil {
+		return nil
+	}
+	v := *p
+	return &v
+}

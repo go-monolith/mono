@@ -39,6 +39,10 @@ type orderModule struct {
 	bypass     bool // publish around the port
 	mutate     bool // register on the dependency
 	undeclared bool // emit an undeclared event
+	extraUse   bool // call a dependency service missing from ConsumeServices
+	noRestock  bool // never call the restock contract it declares
+	busUse     bool // request a dependency service missing from ConsumeServices on the bus
+	probe      bool // look up an optional service the dependency does not provide
 	mu         sync.Mutex
 }
 
@@ -66,6 +70,10 @@ func (m *orderModule) Stop(context.Context) error {
 
 var placeOrder = helper.RequestReplyService[stockReq, stockResp]("order", "place")
 
+// reserveStock is provided by the inventory stand-in but is not in the order
+// module's ConsumeServices().
+var reserveStock = helper.RequestReplyService[stockReq, stockResp]("inventory", "reserve")
+
 func (m *orderModule) RegisterServices(c types.ServiceContainer) error {
 	return placeOrder.Register(c, func(ctx context.Context, req stockReq, _ *types.Msg) (stockResp, error) {
 		if req.ProductID == "fail" {
@@ -81,8 +89,27 @@ func (m *orderModule) RegisterServices(c types.ServiceContainer) error {
 		if err != nil {
 			return stockResp{}, err
 		}
-		if err := restock.Send(ctx, m.inventory, req); err != nil {
-			return stockResp{}, err
+		if !m.noRestock {
+			if err := restock.Send(ctx, m.inventory, req); err != nil {
+				return stockResp{}, err
+			}
+		}
+		if m.extraUse {
+			if _, err := reserveStock.Call(ctx, m.inventory, req); err != nil {
+				return stockResp{}, err
+			}
+		}
+		if m.busUse {
+			if _, err := m.bus.Request("services.inventory.reserve", []byte(`{"product_id":"x"}`), time.Second); err != nil {
+				return stockResp{}, err
+			}
+		}
+		if m.probe {
+			for _, name := range []string{"check-stock-v2", "check-stock-v3"} {
+				if _, err := m.inventory.GetRequestReplyService(name); !errors.Is(err, monoerrors.ErrServiceNotFound) {
+					return stockResp{}, fmt.Errorf("probe %s: expected ErrServiceNotFound, got %w", name, err)
+				}
+			}
 		}
 		if m.undeclared {
 			_ = m.bus.Publish("events.order.v1.shadow", nil)
@@ -101,6 +128,11 @@ func newInventory(t *testing.T, bus *monotest.EventBus) *monotest.Container {
 		t.Fatal(err)
 	}
 	if err := restock.Register(inv, types.TypedQGHP[stockReq]{QueueGroup: "w", Handler: func(context.Context, stockReq, *types.Msg) error { return nil }}); err != nil {
+		t.Fatal(err)
+	}
+	if err := reserveStock.Register(inv, func(_ context.Context, req stockReq, _ *types.Msg) (stockResp, error) {
+		return stockResp{Stock: 1}, nil
+	}); err != nil {
 		t.Fatal(err)
 	}
 	return inv
@@ -295,3 +327,127 @@ func TestNewContainerPanicsOnEmptyName(t *testing.T) {
 
 func jsonM(v any) ([]byte, error) { return jsonMarshal(v) }
 func jsonU(d []byte, v any) error { return jsonUnmarshal(d, v) }
+
+// wiredModule builds what it declares from what it was handed: its
+// dependencies are known once its plugin is injected, and its consumed list
+// once its dependency containers are set.
+type wiredModule struct {
+	plugin       types.PluginModule
+	inventory    types.ServiceContainer
+	bus          types.EventBus
+	consumeCalls int
+}
+
+func (m *wiredModule) Name() string                             { return "wired" }
+func (m *wiredModule) SetPlugin(_ string, p types.PluginModule) { m.plugin = p }
+func (m *wiredModule) SetEventBus(bus types.EventBus)           { m.bus = bus }
+func (m *wiredModule) Dependencies() []string {
+	if m.plugin == nil {
+		return nil
+	}
+	return []string{"inventory"}
+}
+func (m *wiredModule) SetDependencyServiceContainer(_ string, c types.ServiceContainer) {
+	m.inventory = c
+}
+func (m *wiredModule) ConsumeServices() []types.BaseServiceDefinition {
+	m.consumeCalls++
+	if m.inventory == nil {
+		return nil
+	}
+	return []types.BaseServiceDefinition{checkStock.ToBase()}
+}
+func (m *wiredModule) Start(context.Context) error { return nil }
+func (m *wiredModule) Stop(context.Context) error  { return nil }
+
+// The harness builds the recorder after the plugins are injected and reads
+// ConsumeServices() once, after the dependency containers are set, as the
+// framework does, so a module is held to the same lists in both.
+func TestHarnessReadsDeclarationsWhenTheFrameworkDoes(t *testing.T) {
+	bus := monotest.NewEventBus()
+	plugin := &pluginWithService{}
+	plugin.SetContainer(monotest.NewContainer("kv-store", bus))
+	m := &wiredModule{}
+	h := monotest.New(t, m, monotest.Strict(), monotest.WithPlugin("kv", plugin), monotest.WithDependency("inventory", newInventory(t, bus)))
+	if err := h.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() { _ = h.Stop(context.Background()) }()
+
+	if m.consumeCalls != 1 {
+		t.Errorf("ConsumeServices() was called %d time(s), want 1", m.consumeCalls)
+	}
+	rep := h.Report()
+	if len(rep.Declared) != 1 || rep.Declared[0] != "inventory" {
+		t.Errorf("Declared = %v: Dependencies() must be read after SetPlugin", rep.Declared)
+	}
+	if len(rep.Consumed) != 1 || rep.Consumed[0] != checkStock.ToBase() {
+		t.Errorf("Consumed = %v: ConsumeServices() must be read after the containers are set", rep.Consumed)
+	}
+	// Strict: the declared contract passes on the container and on the bus,
+	// anything else of the dependency is rejected on both.
+	if _, err := checkStock.Call(context.Background(), m.inventory, stockReq{ProductID: "ab"}); err != nil {
+		t.Errorf("declared contract: %v", err)
+	}
+	if _, err := m.bus.Request("services.inventory.check-stock", []byte(`{"product_id":"ab"}`), time.Second); err != nil {
+		t.Errorf("declared contract on the bus: %v", err)
+	}
+	if _, err := reserveStock.Call(context.Background(), m.inventory, stockReq{}); !errors.Is(err, monoerrors.ErrModuleBoundaryViolation) {
+		t.Errorf("undeclared lookup: expected ErrModuleBoundaryViolation, got %v", err)
+	}
+	if _, err := m.bus.Request("services.inventory.reserve", nil, time.Second); !errors.Is(err, monoerrors.ErrModuleBoundaryViolation) {
+		t.Errorf("undeclared request on the bus: expected ErrModuleBoundaryViolation, got %v", err)
+	}
+}
+
+// eagerModule looks a service up while it is being wired, before its consumed
+// list can be known.
+type eagerModule struct{ declared []types.BaseServiceDefinition }
+
+func (m *eagerModule) Name() string           { return "eager-consumer" }
+func (m *eagerModule) Dependencies() []string { return []string{"inventory"} }
+func (m *eagerModule) SetDependencyServiceContainer(_ string, c types.ServiceContainer) {
+	_, _ = c.GetRequestReplyService("reserve") // the client is not used
+}
+func (m *eagerModule) ConsumeServices() []types.BaseServiceDefinition { return m.declared }
+func (m *eagerModule) Start(context.Context) error                    { return nil }
+func (m *eagerModule) Stop(context.Context) error                     { return nil }
+
+func TestHarnessChecksLookupsMadeWhileWired(t *testing.T) {
+	t.Run("strict: Start fails", func(t *testing.T) {
+		bus := monotest.NewEventBus()
+		h := monotest.New(t, &eagerModule{}, monotest.Strict(), monotest.WithDependency("inventory", newInventory(t, bus)))
+		err := h.Start(context.Background())
+		defer func() { _ = h.Stop(context.Background()) }()
+		if !errors.Is(err, monoerrors.ErrModuleBoundaryViolation) || !strings.Contains(err.Error(), "services.inventory.reserve") {
+			t.Fatalf("expected ErrModuleBoundaryViolation naming the service, got %v", err)
+		}
+		if strings.Contains(err.Error(), "consumed service contract rejected") {
+			t.Errorf("a boundary violation is not a rejected contract: %v", err)
+		}
+	})
+	t.Run("non-strict: recorded", func(t *testing.T) {
+		bus := monotest.NewEventBus()
+		h := monotest.New(t, &eagerModule{}, monotest.WithDependency("inventory", newInventory(t, bus)))
+		if err := h.Start(context.Background()); err != nil {
+			t.Fatalf("Start: %v", err)
+		}
+		defer func() { _ = h.Stop(context.Background()) }()
+		got := h.Report().Violations
+		if len(got) != 1 || got[0].Kind != types.BoundaryViolationUndeclaredServiceUse || got[0].Subject != "services.inventory.reserve" {
+			t.Errorf("Violations = %+v", got)
+		}
+	})
+	t.Run("declared: accepted", func(t *testing.T) {
+		bus := monotest.NewEventBus()
+		m := &eagerModule{declared: []types.BaseServiceDefinition{reserveStock.ToBase()}}
+		h := monotest.New(t, m, monotest.Strict(), monotest.WithDependency("inventory", newInventory(t, bus)))
+		if err := h.Start(context.Background()); err != nil {
+			t.Fatalf("Start: %v", err)
+		}
+		defer func() { _ = h.Stop(context.Background()) }()
+		if rep := h.Report(); len(rep.UnusedContracts) != 0 {
+			t.Errorf("UnusedContracts = %+v", rep.UnusedContracts)
+		}
+	})
+}

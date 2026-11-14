@@ -179,11 +179,12 @@ func (d RequestReplyDefinition[Req, Resp]) Register(container types.ServiceConta
 
 // Call sends req to the service through container, the provider's container as
 // received in SetDependencyServiceContainer, and returns the deserialized
-// response. The caller's context deadline is propagated to the handler (see
+// response. Only the lookup side of the container is needed, so an adapter can
+// hold it as a types.ServiceLookup. The caller's context deadline is propagated to the handler (see
 // "Request Deadlines" in docs/spec/foundation.md). Errors are wrapped with the
 // contract identity; ErrServiceNotFound means the provider has not registered
 // the service on that container.
-func (d RequestReplyDefinition[Req, Resp]) Call(ctx context.Context, container types.ServiceContainer, req Req) (Resp, error) {
+func (d RequestReplyDefinition[Req, Resp]) Call(ctx context.Context, container types.ServiceLookup, req Req) (Resp, error) {
 	var resp Resp
 	if err := d.check(); err != nil {
 		return resp, err
@@ -245,7 +246,7 @@ func (d QueueGroupDefinition[T]) Register(container types.ServiceContainer, pair
 // container and waits for the acceptance ACK (or publishes optimistically when
 // the queue group optimistic window is enabled). Errors are wrapped with the
 // contract identity.
-func (d QueueGroupDefinition[T]) Send(ctx context.Context, container types.ServiceContainer, payload T) error {
+func (d QueueGroupDefinition[T]) Send(ctx context.Context, container types.ServiceLookup, payload T) error {
 	if err := d.check(); err != nil {
 		return err
 	}
@@ -307,7 +308,7 @@ func (d StreamConsumerDefinition[T]) Register(container types.ServiceContainer, 
 // Publish publishes payload to the stream behind the service through the
 // provider's container and returns the JetStream acknowledgement. Errors are
 // wrapped with the contract identity.
-func (d StreamConsumerDefinition[T]) Publish(ctx context.Context, container types.ServiceContainer, payload T) (types.MsgPubAck, error) {
+func (d StreamConsumerDefinition[T]) Publish(ctx context.Context, container types.ServiceLookup, payload T) (types.MsgPubAck, error) {
 	if err := d.check(); err != nil {
 		return nil, err
 	}
