@@ -1,6 +1,6 @@
-# Upgrading to v0.1.0 and v0.2.0
+# Upgrading to v0.1.0 and v0.1.2
 
-This page lists what changes when you upgrade to **v0.1.0**, including the breaking changes that shipped in v0.0.15 to v0.0.19 without a minor version bump, and what changes in **v0.2.0** (see [Upgrading to v0.2.0](#upgrading-to-v020)).
+This page lists what changes when you upgrade to **v0.1.0**, including the breaking changes that shipped in v0.0.15 to v0.0.19 without a minor version bump, and what changes in **v0.1.2** (see [Upgrading to v0.1.2](#upgrading-to-v012)).
 
 ## Who Is Affected
 
@@ -14,9 +14,9 @@ This page lists what changes when you upgrade to **v0.1.0**, including the break
 | Polyglot clients, or middleware that inspects message headers | "Request-reply handlers receive the caller's deadline" below |
 | Request-reply services that receive bursts faster than they dispatch | "Request-reply client buffer is bounded" below |
 | Alerts or log parsing on framework messages | "Handler panics are recovered" and "NATS client errors go to the framework logger" below |
-| `WithStrictModuleBoundaries()` together with modules that implement `ConsumeServices()` | "`ConsumeServices()` is a complete list" (v0.2.0) |
-| Module code that reads handlers or channels from a dependency's `Entries()` | "`Entries()` on a dependency container returns descriptions" (v0.2.0) |
-| `monotest.CheckModule` tests | "`monotest.CheckModule` has a rule 9" (v0.2.0) |
+| `WithStrictModuleBoundaries()` together with modules that implement `ConsumeServices()` | "`ConsumeServices()` is a complete list" (v0.1.2) |
+| Module code that reads handlers or channels from a dependency's `Entries()` | "`Entries()` on a dependency container returns descriptions" (v0.1.2) |
+| `monotest.CheckModule` tests | "`monotest.CheckModule` has a rule 9" (v0.1.2) |
 
 ## Compile-Time Changes
 
@@ -127,9 +127,9 @@ Calls that cross a boundary still succeed by default, but now log a warning and 
 
 `errors.Is(err, ErrServiceNotFound)` and similar checks (sentinels from `github.com/go-monolith/mono/pkg/errors`) now work on the error returned by `app.Start`. The message text is unchanged.
 
-## Upgrading to v0.2.0
+## Upgrading to v0.1.2
 
-v0.2.0 tightens the module boundary checks introduced in v0.1.0 and adds an import rule check. One change applies to every application: `Entries()` on a dependency container returns descriptions (below). Applications whose modules do not read a dependency's entries and that do not use `ConsumeServices()`, strict mode or `monotest.CheckModule` are not affected.
+v0.1.2 tightens the module boundary checks introduced in v0.1.0 and adds an import rule check. One change applies to every application: `Entries()` on a dependency container returns descriptions (below). Applications whose modules do not read a dependency's entries and that do not use `ConsumeServices()`, strict mode or `monotest.CheckModule` are not affected.
 
 ### `ConsumeServices()` is a complete list
 
@@ -190,7 +190,7 @@ Nothing below is required to upgrade. It is the recommended path for new and exi
 
 1. Move each module's DTOs and event definitions into a `contract` sub-package and declare typed service contracts.
 2. Implement `ConsumeServices()` on modules that call other modules.
-3. Add a `monotest.CheckModule` test per module, and one `monotest.CheckImports` test for the application (v0.2.0+).
+3. Add a `monotest.CheckModule` test per module, and one `monotest.CheckImports` test for the application (v0.1.2+).
 4. Read `app.ModuleBoundaries()`, fix what it reports, then enable `mono.WithStrictModuleBoundaries()`.
 
 See the [Module Boundaries Guide](module-boundaries.md).

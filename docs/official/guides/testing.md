@@ -367,7 +367,7 @@ It checks the module name, the dependency list, the registered services, the con
 
 ### Import Rule Test
 
-Since v0.2.0. Add one for the application, in its root directory, so that `./...` covers every module. `CheckImports` runs `go list` and reports every contract package that imports more than it may, and every package that imports another module's package instead of its `contract`:
+Since v0.1.2. Add one for the application, in its root directory, so that `./...` covers every module. `CheckImports` runs `go list` and reports every contract package that imports more than it may, and every package that imports another module's package instead of its `contract`:
 
 ```go
 func TestImportRules(t *testing.T) {

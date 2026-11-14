@@ -1,6 +1,6 @@
 # Module Boundaries Guide
 
-This guide shows the recommended way to connect modules since **v0.1.0**, with the checks added in **v0.2.0** (the import rule check, the complete `ConsumeServices()` list and `mono.ServiceLookup`). It makes the hexagonal (Ports and Adapters) pattern checkable: a typed port both sides share, startup validation of what a module consumes, a runtime report of how modules really use their boundaries, and a NATS-free conformance test per module.
+This guide shows the recommended way to connect modules since **v0.1.0**, with the checks added in **v0.1.2** (the import rule check, the complete `ConsumeServices()` list and `mono.ServiceLookup`). It makes the hexagonal (Ports and Adapters) pattern checkable: a typed port both sides share, startup validation of what a module consumes, a runtime report of how modules really use their boundaries, and a NATS-free conformance test per module.
 
 **Time to complete:** 25 minutes
 
@@ -145,7 +145,7 @@ func (m *Module) Start(context.Context) error {
 ```
 
 - **Ports use the module's own types.** When the provider changes its DTO, only the adapter changes. A port may use the provider's DTOs directly when the two models are the same; the adapter is then a pass-through, and a DTO change reaches the domain.
-- **Adapters hold a `mono.ServiceLookup` (v0.2.0+).** It is the read side of a `ServiceContainer` (`Get*` and `Has`). Registering on a dependency is then a compile error. `Call`, `Send` and `Publish` accept it, and any `ServiceContainer` is one.
+- **Adapters hold a `mono.ServiceLookup` (v0.1.2+).** It is the read side of a `ServiceContainer` (`Get*` and `Has`). Registering on a dependency is then a compile error. `Call`, `Send` and `Publish` accept it, and any `ServiceContainer` is one.
 - **Events go behind a port too.** The domain calls `events.OrderPlaced(...)`; an adapter over the event bus calls `contract.OrderCreatedV1.Publish(...)`.
 - **Build the domain in `Start`.** The framework has set every dependency container and the event bus by then.
 
@@ -174,7 +174,7 @@ A failure stops startup with `ErrModuleStartFailed` wrapping `ErrMissingDependen
 
 `ConsumeServices()` is called once per start, after the dependency containers are set, so a module may build the list from what it was wired with.
 
-**The list is complete (v0.2.0+).** A module that implements `ConsumeServices()` and uses a request-reply, queue group or stream consumer service of a dependency that is not in the list commits an `undeclared-service-use` violation (see below). Both ways of reaching a service count:
+**The list is complete (v0.1.2+).** A module that implements `ConsumeServices()` and uses a request-reply, queue group or stream consumer service of a dependency that is not in the list commits an `undeclared-service-use` violation (see below). Both ways of reaching a service count:
 
 - a lookup on the dependency's container (`Get*`, which every `Call` / `Send` / `Publish` does);
 - a publish or request on the module's event bus to `services.<dependency>.<service>`.
@@ -296,7 +296,7 @@ Limits: no JetStream (stream consumer, event stream consumer, cron, `EventStream
 
 ## Checking Imports
 
-Since v0.2.0. The runtime checks see what a module does through the container and the bus it is handed. A module that imports another module's package and calls it directly uses neither, so `monotest.CheckImports` reads the import graph instead (it runs `go list`):
+Since v0.1.2. The runtime checks see what a module does through the container and the bus it is handed. A module that imports another module's package and calls it directly uses neither, so `monotest.CheckImports` reads the import graph instead (it runs `go list`):
 
 ```go
 // One test for the whole application, in its root directory,
@@ -355,7 +355,7 @@ Limits:
 7. Add one `CheckImports` test in the root directory of the application.
 8. Where a module has real rules, move them into `service.go` behind ports in its own types.
 
-Interface changes that custom containers and test fakes must follow are listed in [Upgrading to v0.1.0 and v0.2.0](upgrading.md).
+Interface changes that custom containers and test fakes must follow are listed in [Upgrading to v0.1.0 and v0.1.2](upgrading.md).
 
 ## Best Practices
 
@@ -383,7 +383,7 @@ Interface changes that custom containers and test fakes must follow are listed i
 ## Related Documentation
 
 - [Testing Guide](testing.md)
-- [Upgrading to v0.1.0 and v0.2.0](upgrading.md)
+- [Upgrading to v0.1.0 and v0.1.2](upgrading.md)
 - [API Reference - Modules](../api/module.md#serviceconsumermodule)
 - [API Reference - Framework](../api/framework.md) (`ModuleBoundaries`, `WithStrictModuleBoundaries`)
 - [API Reference - Service Container](../api/container.md#typed-service-contracts)

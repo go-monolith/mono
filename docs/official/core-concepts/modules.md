@@ -116,7 +116,7 @@ func (m *MyModule) SetDependencyServiceContainer(
 **When to use**: When you need to call services provided by other modules.
 
 {% hint style="info" %}
-**Since v0.1.0** this container is a read-only view of the dependency's container. Look services up on it; do not register on it. Code that only calls services can hold it as a `mono.ServiceLookup` (v0.2.0+). The bus from `SetEventBus` is scoped to the module in the same way. See the [Module Boundaries Guide](../guides/module-boundaries.md).
+**Since v0.1.0** this container is a read-only view of the dependency's container. Look services up on it; do not register on it. Code that only calls services can hold it as a `mono.ServiceLookup` (v0.1.2+). The bus from `SetEventBus` is scoped to the module in the same way. See the [Module Boundaries Guide](../guides/module-boundaries.md).
 {% endhint %}
 
 ### ServiceConsumerModule
@@ -134,7 +134,7 @@ func (m *OrderModule) ConsumeServices() []types.BaseServiceDefinition {
 }
 ```
 
-The framework validates the list when the module starts. A contract that no declared dependency provides fails startup instead of the first call. List every contract the module calls: since v0.2.0 a call to a dependency service that is not in the list is reported as a boundary violation, whether it goes through the dependency's container or over the event bus.
+The framework validates the list when the module starts. A contract that no declared dependency provides fails startup instead of the first call. List every contract the module calls: since v0.1.2 a call to a dependency service that is not in the list is reported as a boundary violation, whether it goes through the dependency's container or over the event bus.
 
 **When to use**: When your module calls other modules through typed service contracts.
 
