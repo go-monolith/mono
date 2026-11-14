@@ -4,9 +4,10 @@
 // wildcards, queue groups, request-reply), a Container that is the framework's
 // real ServiceContainer bound to a module and dispatching its handlers on that
 // bus, a Harness that starts one module through the documented lifecycle order
-// (plugins, dependency containers, event bus, RegisterServices,
-// RegisterEventConsumers, Start) with the same read-only dependency views and
-// module-scoped event bus the framework uses, CheckModule, which runs the
+// (plugins, dependency containers, consumed contracts, event bus,
+// RegisterServices, RegisterEventConsumers, Start) with the same read-only
+// dependency views, consumed-contract step and module-scoped event bus the
+// framework uses, CheckModule, which runs the
 // harness and asserts that the module follows the Ports and Adapters rules the
 // framework can observe, and CheckImports, which checks the contract package
 // import rule on the import graph of the application.

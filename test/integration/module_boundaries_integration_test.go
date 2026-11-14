@@ -345,3 +345,71 @@ func TestModuleBoundaries_DependencyEntriesCarryNoHandlers(t *testing.T) {
 		}
 	}
 }
+
+// ConsumeServices() covers the module's event bus as well as the dependency's
+// container: a request to the subject of a declared contract counts as a use
+// of it, and a publish to another service of the dependency is an undeclared
+// use (recorded and delivered without strict mode).
+func TestModuleBoundaries_ConsumedListCoversTheEventBus(t *testing.T) {
+	fw, stock, _ := newDeclaringApp(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	bus := fw.EventBus("shop")
+
+	if _, err := bus.RequestWithContext(ctx, "services.stock.check", []byte(`{"product_id":"a"}`)); err != nil {
+		t.Fatalf("request to a declared contract over the bus: %v", err)
+	}
+	if err := bus.Publish("services.stock.restock", []byte(`{"product_id":"mouse"}`)); err != nil {
+		t.Fatalf("non-strict publish must go through: %v", err)
+	}
+	select {
+	case got := <-stock.restocked:
+		if got != "mouse" {
+			t.Errorf("restocked %q", got)
+		}
+	case <-ctx.Done():
+		t.Fatal("the undeclared publish was not delivered")
+	}
+
+	r := shopReport(t, fw)
+	if len(r.UnusedContracts) != 0 || len(r.UnusedDependencies) != 0 {
+		t.Errorf("a contract reached over the bus is used: unused contracts %+v, unused dependencies %v", r.UnusedContracts, r.UnusedDependencies)
+	}
+	if len(r.Violations) != 1 || r.Violations[0].Kind != types.BoundaryViolationUndeclaredServiceUse ||
+		r.Violations[0].Dependency != "stock" || r.Violations[0].Subject != "services.stock.restock" {
+		t.Fatalf("Violations = %+v", r.Violations)
+	}
+}
+
+func TestModuleBoundaries_ConsumedListCoversTheEventBusStrict(t *testing.T) {
+	fw, stock, _ := newDeclaringApp(t, mono.WithStrictModuleBoundaries())
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	bus := fw.EventBus("shop")
+
+	if _, err := bus.RequestWithContext(ctx, "services.stock.check", []byte(`{"product_id":"a"}`)); err != nil {
+		t.Fatalf("request to a declared contract over the bus: %v", err)
+	}
+	if err := bus.Publish("services.stock.restock", []byte(`{"product_id":"mouse"}`)); !errors.Is(err, monoerrors.ErrModuleBoundaryViolation) {
+		t.Fatalf("expected ErrModuleBoundaryViolation, got %v", err)
+	}
+	select {
+	case got := <-stock.restocked:
+		t.Fatalf("strict mode must not deliver the undeclared publish, got %q", got)
+	case <-time.After(200 * time.Millisecond):
+	}
+}
+
+// Asking a dependency for a service it does not provide is not an undeclared
+// use: the module gets ErrServiceNotFound and may fall back.
+func TestModuleBoundaries_MissingServiceProbeIsNotAViolation(t *testing.T) {
+	fw, _, shop := newDeclaringApp(t)
+	for _, name := range []string{"check-v2", "check-v3"} {
+		if _, err := shop.stock.GetRequestReplyService(name); !errors.Is(err, monoerrors.ErrServiceNotFound) {
+			t.Fatalf("GetRequestReplyService(%s): expected ErrServiceNotFound, got %v", name, err)
+		}
+	}
+	if r := shopReport(t, fw); len(r.Violations) != 0 || len(r.Observed) != 0 {
+		t.Errorf("a failed lookup must leave no trace: violations %+v, observed %+v", r.Violations, r.Observed)
+	}
+}

@@ -52,6 +52,19 @@ func (m *mockLogger) hasWarnedAbout(substring string) bool {
 	return false
 }
 
+// warnCount returns the number of warnings whose message contains substring.
+func (m *mockLogger) warnCount(substring string) int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	count := 0
+	for _, warn := range m.warnings {
+		if strings.Contains(warn, substring) {
+			count++
+		}
+	}
+	return count
+}
+
 func TestNewServiceContainer(t *testing.T) {
 	logger := &mockLogger{}
 	container := NewServiceContainer(logger)

@@ -20,7 +20,7 @@ func newScopedForTest(t *testing.T, strict bool) (types.EventBus, *boundary.Reco
 	if err != nil {
 		t.Fatalf("NewEventBus: %v", err)
 	}
-	rec := boundary.New("order", []string{"inventory"}, []string{"kv-store"}, nil, strict, logger.NewDefaultLogger())
+	rec := boundary.New("order", []string{"inventory"}, []string{"kv-store"}, strict, logger.NewDefaultLogger())
 	return NewScoped(inner, rec), rec
 }
 
@@ -28,21 +28,22 @@ func TestScopedTarget(t *testing.T) {
 	cases := []struct {
 		subject string
 		module  string
+		service string
 		ok      bool
 	}{
-		{"services.inventory.check-stock", "inventory", true},
-		{"services.inventory.check-stock.extra", "inventory", true},
-		{"services.>", ">", true},
-		{"services.*.check", "*", true},
-		{"services.", "", false},
-		{"events.order.v1.created", "", false},
-		{"_mono.x.y", "", false},
-		{"anything", "", false},
+		{"services.inventory.check-stock", "inventory", "check-stock", true},
+		{"services.inventory.check-stock.extra", "inventory", "", true},
+		{"services.>", ">", "", true},
+		{"services.*.check", "*", "check", true},
+		{"services.", "", "", false},
+		{"events.order.v1.created", "", "", false},
+		{"_mono.x.y", "", "", false},
+		{"anything", "", "", false},
 	}
 	for _, tc := range cases {
-		module, ok := target(tc.subject)
-		if module != tc.module || ok != tc.ok {
-			t.Errorf("target(%q) = (%q, %v), want (%q, %v)", tc.subject, module, ok, tc.module, tc.ok)
+		module, service, ok := target(tc.subject)
+		if module != tc.module || service != tc.service || ok != tc.ok {
+			t.Errorf("target(%q) = (%q, %q, %v), want (%q, %q, %v)", tc.subject, module, service, ok, tc.module, tc.service, tc.ok)
 		}
 	}
 }
@@ -78,6 +79,85 @@ func TestScopedAllowsOwnDeclaredPluginAndEvents(t *testing.T) {
 	if len(rec.Report().Violations) != 0 {
 		t.Errorf("no violations expected: %+v", rec.Report().Violations)
 	}
+}
+
+// A module that implements ServiceConsumerModule is held to ConsumeServices()
+// on the bus as on the dependency's container: a send to a service subject of
+// a declared dependency is a use of the contract, or an undeclared use.
+func TestScopedHoldsServiceSubjectsToTheConsumedList(t *testing.T) {
+	reserve := types.BaseServiceDefinition{ModuleName: "inventory", Name: "reserve", Type: types.ServiceTypeQueueGroup}
+	checkStock := types.BaseServiceDefinition{ModuleName: "inventory", Name: "check-stock", Type: types.ServiceTypeRequestReply}
+	ctx := context.Background()
+
+	t.Run("non-strict: attributed or recorded, and sent", func(t *testing.T) {
+		bus, rec := newScopedForTest(t, false)
+		if err := rec.DeclareConsumed([]types.BaseServiceDefinition{reserve, checkStock}); err != nil {
+			t.Fatal(err)
+		}
+		// Declared: counted as a use of the contract, so it is not unused.
+		if err := bus.Publish("services.inventory.reserve", []byte("x")); err != nil {
+			t.Fatalf("Publish: %v", err)
+		}
+		if err := bus.PublishMsg(&types.Msg{Subject: "services.inventory.reserve"}); err != nil {
+			t.Fatalf("PublishMsg: %v", err)
+		}
+		// Not declared: recorded, and the publish still goes through.
+		if err := bus.Publish("services.inventory.restock", []byte("x")); err != nil {
+			t.Fatalf("non-strict publish must pass through: %v", err)
+		}
+		// The module's own subjects, plugins and sub-subjects are not held to
+		// the list.
+		for _, subject := range []string{"services.order.place", "services.kv-store.get", "services.inventory.reserve.control"} {
+			if err := bus.Publish(subject, []byte("x")); err != nil {
+				t.Fatalf("Publish(%s): %v", subject, err)
+			}
+		}
+
+		rep := rec.Report()
+		if len(rep.Observed) != 1 || rep.Observed[0].Service != "reserve" || rep.Observed[0].Lookups != 2 || rep.Observed[0].Type != types.ServiceTypeQueueGroup {
+			t.Errorf("Observed = %+v", rep.Observed)
+		}
+		if len(rep.UnusedContracts) != 1 || rep.UnusedContracts[0] != checkStock {
+			t.Errorf("UnusedContracts = %+v", rep.UnusedContracts)
+		}
+		if len(rep.Violations) != 1 || rep.Violations[0].Kind != types.BoundaryViolationUndeclaredServiceUse ||
+			rep.Violations[0].Dependency != "inventory" || rep.Violations[0].Subject != "services.inventory.restock" {
+			t.Errorf("Violations = %+v", rep.Violations)
+		}
+	})
+
+	t.Run("strict: an undeclared service is rejected on every send path", func(t *testing.T) {
+		bus, rec := newScopedForTest(t, true)
+		if err := rec.DeclareConsumed([]types.BaseServiceDefinition{reserve}); err != nil {
+			t.Fatal(err)
+		}
+		if err := bus.Publish("services.inventory.reserve", []byte("x")); err != nil {
+			t.Fatalf("declared contract: %v", err)
+		}
+		msg := &types.Msg{Subject: "services.inventory.restock"}
+		checks := map[string]func() error{
+			"Publish":               func() error { return bus.Publish("services.inventory.restock", nil) },
+			"PublishMsg":            func() error { return bus.PublishMsg(msg) },
+			"Request":               func() error { _, err := bus.Request("services.inventory.restock", nil, time.Second); return err },
+			"RequestWithContext":    func() error { _, err := bus.RequestWithContext(ctx, "services.inventory.restock", nil); return err },
+			"RequestMsgWithContext": func() error { _, err := bus.RequestMsgWithContext(ctx, msg); return err },
+		}
+		for name, call := range checks {
+			if err := call(); !errors.Is(err, monoerrors.ErrModuleBoundaryViolation) {
+				t.Errorf("%s: expected ErrModuleBoundaryViolation, got %v", name, err)
+			}
+		}
+	})
+
+	t.Run("a module that declares nothing is not held to a list", func(t *testing.T) {
+		bus, rec := newScopedForTest(t, true)
+		if err := bus.Publish("services.inventory.restock", []byte("x")); err != nil {
+			t.Fatalf("Publish: %v", err)
+		}
+		if rep := rec.Report(); len(rep.Observed) != 0 || len(rep.Violations) != 0 {
+			t.Errorf("report = %+v", rep)
+		}
+	})
 }
 
 func TestScopedRejectsUndeclaredInStrictMode(t *testing.T) {
@@ -151,7 +231,7 @@ func TestScopedKeepsConnAndPassthroughs(t *testing.T) {
 	}
 
 	// A bus without Conn() yields a scoped bus without Conn().
-	plain := NewScoped(&noConnBus{}, boundary.New("m", nil, nil, nil, false, nil))
+	plain := NewScoped(&noConnBus{}, boundary.New("m", nil, nil, false, nil))
 	if _, ok := plain.(types.EventBusWithConn[*nats.Conn]); ok {
 		t.Error("scoped bus must not claim Conn() the inner bus lacks")
 	}

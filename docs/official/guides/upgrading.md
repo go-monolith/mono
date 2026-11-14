@@ -129,34 +129,49 @@ Calls that cross a boundary still succeed by default, but now log a warning and 
 
 ## Upgrading to v0.2.0
 
-v0.2.0 tightens the module boundary checks introduced in v0.1.0 and adds an import rule check. Applications that do not use `ConsumeServices()`, strict mode or `monotest.CheckModule` are not affected.
+v0.2.0 tightens the module boundary checks introduced in v0.1.0 and adds an import rule check. One change applies to every application: `Entries()` on a dependency container returns descriptions (below). Applications whose modules do not read a dependency's entries and that do not use `ConsumeServices()`, strict mode or `monotest.CheckModule` are not affected.
 
 ### `ConsumeServices()` is a complete list
 
-A module that implements `ConsumeServices()` and looks up a request-reply, queue group or stream consumer service of a dependency that is **not** in the list now commits an `undeclared-service-use` boundary violation.
+A module that implements `ConsumeServices()` and uses a request-reply, queue group or stream consumer service of a dependency that is **not** in the list now commits an `undeclared-service-use` boundary violation. A use is a lookup on the dependency's container, or a publish or request on the module's event bus to the service subject `services.<dependency>.<service>`.
 
 | Mode | Effect |
 |------|--------|
 | Default | The call goes through. One warning is logged, and the use appears in `app.ModuleBoundaries()` |
-| `WithStrictModuleBoundaries()` | The lookup fails with `ErrModuleBoundaryViolation` |
+| `WithStrictModuleBoundaries()` | The lookup, publish or request fails with `ErrModuleBoundaryViolation` |
 
-Lookups happen when a module makes the call, so in strict mode an incomplete list fails on the first call at runtime, not at startup. The lookup of a service that does not exist is reported as undeclared too, instead of `ErrServiceNotFound`. Before enabling or keeping strict mode, run in the default mode, read the report, and add every contract the module calls to `ConsumeServices()`. Modules that do not implement the interface, channel services and plugin services are not checked.
+Lookups happen when a module makes the call, so in strict mode an incomplete list fails on the first call at runtime, not at startup. The exception is a service the module looks up in `SetDependencyServiceContainer`: in strict mode one that is not in the list fails the start of the module. Before enabling or keeping strict mode, run in the default mode, read the report, and add every contract the module calls to `ConsumeServices()`. Modules that do not implement the interface, channel services and plugin services are not checked.
+
+A lookup of a service the dependency does not provide:
+
+| Mode | Effect |
+|------|--------|
+| Default | `ErrServiceNotFound`, as before. It is not a violation, so a module may ask for an optional service and fall back |
+| `WithStrictModuleBoundaries()` | `ErrModuleBoundaryViolation` instead of `ErrServiceNotFound`: the module asked for something it did not declare |
+
+`ConsumeServices()` is called once per start, after the module's dependency containers are set, and that one list is both validated and enforced. A module may build it from what it was wired with.
 
 ### `Entries()` on a dependency container returns descriptions
 
-`Entries()` on the container passed to `SetDependencyServiceContainer` returns copies that describe the dependency's services (name, type, subject, queue groups, options, stream and cron configuration, contract). The handlers and channels are left out. The copies are deep, so changing one, including the subjects or metadata of its stream configuration, has no effect on the provider. `app.Services(name).Entries()` in the host program is unchanged.
+`Entries()` on the container passed to `SetDependencyServiceContainer` returns copies that describe the dependency's services (name, type, subject, queue groups, options, stream and cron configuration, contract). The handlers and channels are left out (nil), in the default mode as well as in strict mode. The copies are deep, so changing one, including the subjects or metadata of its stream configuration, has no effect on the provider. `app.Services(name).Entries()` in the host program is unchanged.
+
+A module that read `RequestHandler`, `QueueHandlers[i].Handler`, `InChannel` or `OutChannel` from a dependency's entry now finds nil: calling the handler panics and a send on the channel blocks. Reach the service through `GetRequestReplyService`, `GetQueueGroupService`, `GetStreamConsumerService` or `GetChannelService` instead. Reading the entries is not a boundary violation, so it is not in the boundary report. The framework logs one warning for the first `Entries()` call of a module on each dependency:
+
+```text
+Entries() of a dependency container returns descriptions without handlers and channels; reach its services through Get* (the host reads the real entries with MonoFramework.Services) module=order dependency=inventory
+```
 
 ### `monotest.CheckModule` has a rule 9
 
-A `ConsumeServices()` contract that is never looked up during `Start` or the exercise fails the conformance test. Call it from `WithExercise`, remove it from the list, or exempt it with `monotest.WithUnexercisedContract(def)`.
+A `ConsumeServices()` contract that is never used during `Start` or the exercise (looked up on the dependency's container, or reached on the event bus) fails the conformance test. Call it from `WithExercise`, remove it from the list, or exempt it with `monotest.WithUnexercisedContract(def)`.
 
 ### `ServiceLookup`
 
-`types.ServiceLookup` is the read side of `ServiceContainer` (`Get*` and `Has`), and `ServiceContainer` embeds it. The method set of `ServiceContainer` is unchanged, so implementations and fakes still compile. `helper.CallRequestReplyService`, `SendQueueGroupService`, `PublishStreamConsumerService` and the typed contracts' `Call` / `Send` / `Publish` accept a `ServiceLookup`; callers that pass a `ServiceContainer` are unaffected.
+`mono.ServiceLookup` is the read side of `ServiceContainer` (`Get*` and `Has`), and `ServiceContainer` embeds it. The method set of `ServiceContainer` is unchanged, so implementations and fakes still compile. `helper.CallRequestReplyService`, `SendQueueGroupService`, `PublishStreamConsumerService` and the typed contracts' `Call` / `Send` / `Publish` accept a `ServiceLookup`; callers that pass a `ServiceContainer` are unaffected.
 
 ### More in the boundary report
 
-`ModuleBoundaryReport` gains `UnusedContracts`: the consumed contracts not looked up so far. `Stop` logs one Info line for each. Like `Observed`, `UnusedDependencies` and `Violations` it is an empty list when there is nothing to list, so `unused_contracts` is always present in the JSON form.
+`ModuleBoundaryReport` gains `UnusedContracts`: the consumed contracts not used so far. `Stop` logs one Info line for each. Like `Observed`, `UnusedDependencies` and `Violations` it is an empty list when there is nothing to list, so `unused_contracts` is always present in the JSON form.
 
 ### New: `monotest.CheckImports`
 

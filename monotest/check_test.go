@@ -204,7 +204,7 @@ func TestCheckModuleUnusedContract(t *testing.T) {
 	// The module declares inventory/restock but the exercise never reaches it.
 	rec := runCheck(t, &orderModule{noRestock: true},
 		monotest.WithDependency("inventory", newInventory(t, bus)), monotest.WithExercise(exercise))
-	if !rec.has("rule 9: consumed contract inventory/restock (queue_group) is in ConsumeServices() but was never looked up") {
+	if !rec.has("rule 9: consumed contract inventory/restock (queue_group) is in ConsumeServices() but was never used") {
 		t.Fatalf("expected the unused-contract failure, got %v", rec.errors)
 	}
 	if len(rec.errors) != 1 {
@@ -235,5 +235,57 @@ func TestHarnessStrictRejectsUndeclaredServiceUse(t *testing.T) {
 	_, err := placeOrder.Call(ctx, h.Container(), stockReq{ProductID: "ab"})
 	if err == nil || !strings.Contains(err.Error(), "undeclared-service-use") {
 		t.Fatalf("expected the handler to fail on the undeclared lookup, got %v", err)
+	}
+}
+
+// A lookup of a service the dependency does not provide fails with
+// ErrServiceNotFound and is not a boundary violation: a module may probe for
+// an optional service it could not declare.
+func TestCheckModuleAllowsProbingForAMissingService(t *testing.T) {
+	bus := monotest.NewEventBus()
+	rec := runCheck(t, &orderModule{probe: true}, monotest.WithDependency("inventory", newInventory(t, bus)), monotest.WithExercise(exercise))
+	if len(rec.errors) != 0 {
+		t.Fatalf("unexpected failures: %v", rec.errors)
+	}
+}
+
+// ConsumeServices() is exact on the event bus too: a request to a service
+// subject of a dependency that is not in the list fails rule 5.
+func TestCheckModuleReportsUndeclaredUseOnTheBus(t *testing.T) {
+	bus := monotest.NewEventBus()
+	rec := runCheck(t, &orderModule{busUse: true}, monotest.WithDependency("inventory", newInventory(t, bus)), monotest.WithExercise(exercise))
+	if !rec.has("rule 5: boundary violation undeclared-service-use on inventory (services.inventory.reserve)") {
+		t.Fatalf("expected an undeclared-service-use failure, got %v", rec.errors)
+	}
+	if len(rec.errors) != 1 {
+		t.Errorf("only rule 5 should fail: %v", rec.errors)
+	}
+}
+
+// busCaller reaches the contract it declares over the event bus only.
+type busCaller struct{ bus types.EventBus }
+
+func (m *busCaller) Name() string                                                 { return "bus-caller" }
+func (m *busCaller) Dependencies() []string                                       { return []string{"inventory"} }
+func (m *busCaller) SetDependencyServiceContainer(string, types.ServiceContainer) {}
+func (m *busCaller) SetEventBus(bus types.EventBus)                               { m.bus = bus }
+func (m *busCaller) ConsumeServices() []types.BaseServiceDefinition {
+	return []types.BaseServiceDefinition{checkStock.ToBase()}
+}
+func (m *busCaller) Start(context.Context) error { return nil }
+func (m *busCaller) Stop(context.Context) error  { return nil }
+
+// A contract reached over the bus is used: neither the contract (rule 9) nor
+// the dependency (rule 6) is reported as unused.
+func TestCheckModuleCountsAContractReachedOverTheBus(t *testing.T) {
+	bus := monotest.NewEventBus()
+	m := &busCaller{}
+	rec := runCheck(t, m, monotest.WithDependency("inventory", newInventory(t, bus)),
+		monotest.WithExercise(func(context.Context, *monotest.Harness) error {
+			_, err := m.bus.Request("services.inventory.check-stock", []byte(`{"product_id":"ab"}`), time.Second)
+			return err
+		}))
+	if len(rec.errors) != 0 {
+		t.Fatalf("unexpected failures: %v", rec.errors)
 	}
 }

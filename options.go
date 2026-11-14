@@ -720,9 +720,11 @@ func WithDefaultServiceConcurrency(n int) MonoFrameworkOption {
 // of its Dependencies() nor a plugin (which bypasses the port, the dependency
 // container, altogether), or, for a module that implements
 // ServiceConsumerModule, looking up a dependency service that is not in its
-// ConsumeServices() list. With this option such a call returns
-// ErrModuleBoundaryViolation (void container methods become no-ops). An
-// undeclared lookup fails when the module makes the call, not at startup, so
+// ConsumeServices() list or sending to that service's subject on the event
+// bus. With this option such a call returns ErrModuleBoundaryViolation (void
+// container methods become no-ops). An undeclared use fails when the module
+// makes the call, not at startup (except for a lookup made in
+// SetDependencyServiceContainer, which fails the start of the module), so
 // complete every ConsumeServices() list (the default mode reports what is
 // missing) before turning the option on.
 //

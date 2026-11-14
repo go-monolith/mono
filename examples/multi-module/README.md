@@ -158,7 +158,7 @@ func (s *Service) PlaceOrder(ctx context.Context, order NewOrder) (Result, error
 
 // order/adapter.go — the port implemented over the provider's contract,
 // translating between the order module's terms and the provider's DTOs
-type inventoryAdapter struct{ services types.ServiceLookup }
+type inventoryAdapter struct{ services mono.ServiceLookup }
 
 func (a inventoryAdapter) Available(ctx context.Context, productID string, quantity int) (bool, error) {
     resp, err := inventorycontract.CheckStock.Call(ctx, a.services,

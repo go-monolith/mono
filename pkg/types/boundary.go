@@ -32,19 +32,26 @@ const (
 	BoundaryViolationForeignServiceSubscription BoundaryViolationKind = "foreign-service-subscription"
 
 	// BoundaryViolationUndeclaredServiceUse: the module implements
-	// ServiceConsumerModule and looked up, on a dependency's container, a
-	// request-reply, queue group or stream consumer service that is not in
-	// its ConsumeServices() list (same module, name and type). A module that
+	// ServiceConsumerModule and used a request-reply, queue group or stream
+	// consumer service of a dependency that is not in its ConsumeServices()
+	// list: it looked the service up on the dependency's container (same
+	// module, name and type), or published or sent a request to its subject
+	// services.<dependency>.<service> on its event bus (a contract of any
+	// type with that module and name declares the subject). A module that
 	// declares what it consumes declares all of it, so the list can be
 	// trusted. The service subject is reported in BoundaryViolation.Subject.
-	// Channel services have no contract type and are not checked, and a
-	// module that does not implement ServiceConsumerModule is not checked.
+	// Without WithStrictModuleBoundaries a lookup counts once it succeeded,
+	// so asking for a service the dependency does not provide is not a
+	// violation; with it the lookup is rejected whether or not the service
+	// exists. Channel services have no contract type and are not checked,
+	// and a module that does not implement ServiceConsumerModule is not
+	// checked.
 	BoundaryViolationUndeclaredServiceUse BoundaryViolationKind = "undeclared-service-use"
 )
 
-// ServiceUse is one dependency service a module looked up at runtime, with
-// how many times it did so (every helper.Call* / contract Call looks the
-// service up once).
+// ServiceUse is one dependency service a module used at runtime, with how
+// many times it did so (every helper.Call* / contract Call looks the service
+// up once).
 type ServiceUse struct {
 	// Module is the dependency that provides the service.
 	Module string `json:"module"`
@@ -52,7 +59,10 @@ type ServiceUse struct {
 	Service string `json:"service"`
 	// Type is the kind of service.
 	Type ServiceType `json:"type"`
-	// Lookups is the number of successful Get* calls for the service.
+	// Lookups is the number of successful Get* calls for the service, plus,
+	// for a module that implements ServiceConsumerModule, the publishes and
+	// requests it sent to the subject of a consumed contract on its event
+	// bus.
 	Lookups int64 `json:"lookups"`
 }
 
@@ -89,21 +99,26 @@ type ModuleBoundaryReport struct {
 	// Consumed lists the contracts the module declared through
 	// ServiceConsumerModule.ConsumeServices, if any.
 	Consumed []BaseServiceDefinition `json:"consumed,omitempty"`
-	// Observed lists the dependency services the module looked up, sorted by
-	// module then service.
+	// Observed lists the dependency services the module looked up (or, for a
+	// consumed contract, reached on its event bus), sorted by module then
+	// service.
 	Observed []ServiceUse `json:"observed"`
 	// UnusedDependencies lists declared dependencies on which the module
 	// looked nothing up. A dependency declared only for start ordering is
 	// legitimate; this is information, not an error.
 	UnusedDependencies []string `json:"unused_dependencies"`
 	// UnusedContracts lists the Consumed contracts of declared dependencies
-	// the module has not looked up so far. Adapters look services up at call
+	// the module has not used so far (neither looked up nor reached on its
+	// event bus). Adapters look services up at call
 	// time, so a contract stays here until its first call; this is
 	// information, not an error. Contracts of plugins are not listed:
 	// plugin containers are not observed. Like the other lists of
 	// observations it is empty, not nil, when there is nothing to list.
 	UnusedContracts []BaseServiceDefinition `json:"unused_contracts"`
 	// Violations lists the boundary crossings observed, sorted by kind,
-	// dependency and subject.
+	// dependency and subject. At most 1024 distinct ones (kind, dependency,
+	// subject) are kept per module; a module that goes on crossing with new
+	// subjects has the rest counted in one entry per kind whose Dependency
+	// and Subject are "*".
 	Violations []BoundaryViolation `json:"violations"`
 }

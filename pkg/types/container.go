@@ -76,7 +76,12 @@ type ServiceContainer interface {
 	// Unregister removes a service from the container
 	Unregister(name string) error
 
-	// Entries returns all registered ServiceEntry pointers
+	// Entries returns all registered ServiceEntry pointers.
+	//
+	// On the container a module receives for a dependency in
+	// SetDependencyServiceContainer it returns descriptions instead: fresh
+	// copies without the handlers and the channels (nil), in strict mode and
+	// without it. The first such call per dependency is logged at Warn.
 	Entries() []*ServiceEntry
 
 	// StartChannelRouters starts router goroutines for all registered channel services.

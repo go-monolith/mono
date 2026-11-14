@@ -221,7 +221,7 @@ A driven adapter implements one port by calling the provider's contract, and tra
 // order/adapter.go
 package order
 
-type inventoryAdapter struct{ services types.ServiceLookup }
+type inventoryAdapter struct{ services mono.ServiceLookup }
 
 func (a inventoryAdapter) Available(ctx context.Context, productID string, quantity int) (bool, error) {
     resp, err := inventorycontract.CheckStock.Call(ctx, a.services, inventorycontract.CheckStockRequest{
@@ -239,7 +239,7 @@ func (a inventoryAdapter) Available(ctx context.Context, productID string, quant
 
 ### Hold a dependency as a `ServiceLookup`
 
-`types.ServiceLookup` is the read side of a `ServiceContainer`: the `Get*` methods and `Has`. An adapter only looks services up, so it stores the container it is handed as a `ServiceLookup`. Registering on a dependency's container is then a compile error instead of a `register-on-dependency` violation at runtime. `Call`, `Send` and `Publish` accept a `ServiceLookup`, and any `ServiceContainer` is one.
+`mono.ServiceLookup` is the read side of a `ServiceContainer`: the `Get*` methods and `Has`. An adapter only looks services up, so it stores the container it is handed as a `ServiceLookup`. Registering on a dependency's container is then a compile error instead of a `register-on-dependency` violation at runtime. `Call`, `Send` and `Publish` accept a `ServiceLookup`, and any `ServiceContainer` is one.
 
 ## Consuming Dependencies
 
@@ -423,7 +423,9 @@ When a module implements `ConsumeServices()`, the framework validates the list w
 
 A violation fails the module start (`ErrModuleStartFailed` wrapping `ErrMissingDependency`, `ErrServiceNotFound` or `ErrServiceContractMismatch`) and rolls back the modules already started. A renamed service or a forgotten dependency is therefore caught the moment the process starts, not on the first call in production.
 
-The list is also **complete**: a module that implements `ConsumeServices()` and looks up a dependency service that is not in it commits an `undeclared-service-use` violation (see the table below). A module that does not implement the interface is not checked. Channel services have no contract type and are not checked either.
+The framework calls `ConsumeServices()` once per start, after the dependency containers are set, and checks the module against that same list afterwards, so the list may be built from what the module was wired with.
+
+The list is also **complete**: a module that implements `ConsumeServices()` and uses a dependency service that is not in it commits an `undeclared-service-use` violation (see the table below), whether it looks the service up on the dependency's container or sends to its subject on the event bus. By default a lookup counts once it succeeded, so asking for an optional service the dependency does not provide is not a violation. A module that does not implement the interface is not checked. Channel services have no contract type and are not checked either.
 
 ### At registration: contract recording
 
@@ -443,7 +445,7 @@ The `ServiceContainer` a module receives for a dependency is a read-only view th
 | `channel-consumer-mismatch` | Asked for a channel service under another module's name |
 | `undeclared-service-subject` | Published to or requested `services.<module>.<service>` of a module that is not itself, a declared dependency or a plugin — bypassing the port |
 | `foreign-service-subscription` | Subscribed to another module's service subject |
-| `undeclared-service-use` | Implements `ConsumeServices()` and looked up a request-reply, queue group or stream consumer service of a dependency that is not in the list |
+| `undeclared-service-use` | Implements `ConsumeServices()` and looked up a request-reply, queue group or stream consumer service of a dependency that is not in the list, or published to or requested its subject `services.<dependency>.<service>` on the event bus |
 
 By default a crossing is counted, warned once, and let through, so existing applications keep working. `MonoApplication.ModuleBoundaries()` returns, per module, the declared dependencies, the consumed contracts, the services actually looked up (with counts), the declared dependencies never used, the consumed contracts not used so far, and the crossings. The same summary is logged at `Stop`.
 
@@ -453,7 +455,7 @@ for _, r := range app.ModuleBoundaries() {
 }
 ```
 
-`Entries()` on a dependency's view returns descriptions of the provider's services (name, type, subject, queue groups, options, contract), not the provider's entries: the handlers and channels are left out, so a consumer cannot run or replace them.
+`Entries()` on a dependency's view returns descriptions of the provider's services (name, type, subject, queue groups, options, contract), not the provider's entries: the handlers and channels are left out (in the default mode too; the first call per dependency is logged once at Warn), so a consumer cannot run or replace them.
 
 With `mono.WithStrictModuleBoundaries()` a crossing fails instead with `ErrModuleBoundaryViolation`. The intended path: run non-strict, read the report, fix the modules, then turn strict on, and keep it on in tests.
 

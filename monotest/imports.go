@@ -7,10 +7,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"path"
+	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -233,16 +237,27 @@ func ImportViolations(ctx context.Context, opts ...ImportOption) ([]ImportViolat
 	ctx, cancel := context.WithTimeout(ctx, importListTimeout)
 	defer cancel()
 
+	// The matched packages and their dependencies do not show a module nobody
+	// in that set imports the contract of, so every package of the
+	// application is listed too, for its path only. The two listings do not
+	// depend on each other and run side by side.
+	var (
+		wg         sync.WaitGroup
+		siblings   []listedPackage
+		siblingErr error
+	)
+	wg.Go(func() { siblings, siblingErr = listApplicationPackages(ctx, cfg.dir, cfg.patterns) })
 	pkgs, err := listPackages(ctx, cfg.dir, cfg.patterns)
+	if err != nil {
+		// Its error is the one reported: the other listing need not finish.
+		cancel()
+	}
+	wg.Wait()
 	if err != nil {
 		return nil, err
 	}
-	// The matched packages and their dependencies do not show a module nobody
-	// in that set imports the contract of, so every package of the
-	// application is listed too, for its path only.
-	siblings, err := listApplicationPackages(ctx, cfg.dir)
-	if err != nil {
-		return nil, err
+	if siblingErr != nil {
+		return nil, siblingErr
 	}
 	found := findImportViolations(append(pkgs, siblings...), cfg)
 	dir := cfg.dir
@@ -307,12 +322,19 @@ func listPackages(ctx context.Context, dir string, patterns []string) ([]listedP
 	return goList[listedPackage](ctx, dir, args...)
 }
 
-// listApplicationPackages returns every package of the application: of the
-// main Go module dir is in, or of every module of the workspace. They carry
-// the import path and the module only, and are marked DepOnly: they are there
-// so that every contract package, and with it every module, is known, not to
-// have their imports checked.
-func listApplicationPackages(ctx context.Context, dir string) ([]listedPackage, error) {
+// listApplicationPackages returns every package of the application that the
+// listing of patterns in dir (listPackages) does not already contain: the
+// packages of the main Go module dir is in, or of every module of the
+// workspace. They carry the import path and the module only, and are marked
+// DepOnly: they are there so that every contract package, and with it every
+// module, is known, not to have their imports checked.
+//
+// A Go module whose root is dir is skipped when the patterns include "./...":
+// that pattern, resolved there, matches every package of the module, so the
+// other listing has them all. This is the documented setup (one test in the
+// root directory of the application), which then costs one package listing
+// instead of two.
+func listApplicationPackages(ctx context.Context, dir string, patterns []string) ([]listedPackage, error) {
 	modules, err := goList[listedModule](ctx, dir, "list", "-m", "-json")
 	if err != nil {
 		return nil, err
@@ -320,6 +342,9 @@ func listApplicationPackages(ctx context.Context, dir string) ([]listedPackage, 
 	var all []listedPackage
 	for _, module := range modules {
 		if !module.Main || module.Dir == "" {
+			continue
+		}
+		if patternsCoverModule(dir, patterns, module.Dir) {
 			continue
 		}
 		// -find skips resolving imports and -e tolerates a package that does
@@ -334,6 +359,46 @@ func listApplicationPackages(ctx context.Context, dir string) ([]listedPackage, 
 		all = append(all, pkgs...)
 	}
 	return all, nil
+}
+
+// patternsCoverModule reports whether listing patterns in dir matches every
+// package of the Go module rooted at moduleDir: the patterns include "./..."
+// and dir (the current directory when empty) is that root. A directory that
+// cannot be resolved is not covered, so the module is listed.
+func patternsCoverModule(dir string, patterns []string, moduleDir string) bool {
+	if !slices.Contains(patterns, defaultImportPattern) {
+		return false
+	}
+	if dir == "" {
+		wd, err := os.Getwd()
+		if err != nil {
+			return false
+		}
+		dir = wd
+	}
+	resolvedDir, err := resolveDir(dir)
+	if err != nil {
+		return false
+	}
+	resolvedModule, err := resolveDir(moduleDir)
+	if err != nil {
+		return false
+	}
+	return resolvedDir == resolvedModule
+}
+
+// resolveDir returns dir as an absolute path without symbolic links, so that
+// two names of one directory compare equal.
+func resolveDir(dir string) (string, error) {
+	abs, err := filepath.Abs(dir)
+	if err != nil {
+		return "", fmt.Errorf("resolve directory %s: %w", dir, err)
+	}
+	resolved, err := filepath.EvalSymlinks(abs)
+	if err != nil {
+		return "", fmt.Errorf("resolve directory %s: %w", dir, err)
+	}
+	return resolved, nil
 }
 
 // goList runs the go command with args in dir and decodes its output, a

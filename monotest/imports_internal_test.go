@@ -1,6 +1,10 @@
 package monotest
 
-import "testing"
+import (
+	"os"
+	"path/filepath"
+	"testing"
+)
 
 // app builds a main-module package for findImportViolations.
 func app(importPath, name string, imports ...string) listedPackage {
@@ -347,5 +351,111 @@ func TestDescribeModules(t *testing.T) {
 	}
 	if got := describeModules([]string{"app/a", "app/b", "app/c", "app/d", "app/e"}); got != "the modules found: app/a, app/b, app/c and 2 more" {
 		t.Errorf("describeModules = %q", got)
+	}
+}
+
+func TestPatternsCoverModule(t *testing.T) {
+	root := t.TempDir()
+	sub := filepath.Join(root, "order")
+	if err := os.Mkdir(sub, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(t.TempDir(), "link")
+	linked := os.Symlink(root, link) == nil
+
+	cases := []struct {
+		name     string
+		dir      string
+		patterns []string
+		want     bool
+	}{
+		{"the default pattern in the module root", root, []string{"./..."}, true},
+		{"the default pattern among others", root, []string{"./order/...", "./..."}, true},
+		{"a trailing separator names the same directory", root + string(filepath.Separator), []string{"./..."}, true},
+		{"a narrower pattern in the module root", root, []string{"./order/..."}, false},
+		{"the default pattern below the module root", sub, []string{"./..."}, false},
+		{"a directory that does not exist", filepath.Join(root, "missing"), []string{"./..."}, false},
+	}
+	if linked {
+		cases = append(cases, struct {
+			name     string
+			dir      string
+			patterns []string
+			want     bool
+		}{"a symbolic link to the module root", link, []string{"./..."}, true})
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := patternsCoverModule(tc.dir, tc.patterns, root); got != tc.want {
+				t.Errorf("patternsCoverModule(%q, %v, %q) = %v, want %v", tc.dir, tc.patterns, root, got, tc.want)
+			}
+		})
+	}
+
+	t.Run("an empty dir is the current directory", func(t *testing.T) {
+		t.Chdir(root)
+		if !patternsCoverModule("", []string{"./..."}, root) {
+			t.Error("the current directory is the module root")
+		}
+		if patternsCoverModule("", []string{"./..."}, sub) {
+			t.Error("the current directory is not that module's root")
+		}
+	})
+}
+
+// With the default pattern in the root of the application the sibling listing
+// is skipped, and a module nothing imports the contract of is still known:
+// the result is the one a full listing gives.
+func TestListApplicationPackagesSkipsACoveredModule(t *testing.T) {
+	ctx := t.Context()
+	root := filepath.Join("testdata", "imports")
+	// The fixture is its own Go module: absent when this package is tested
+	// from the module cache, and not to be redirected by a go.work file or by
+	// flags from the environment.
+	if _, err := os.Stat(filepath.Join(root, "go.mod")); err != nil {
+		t.Skipf("fixture application not available: %v", err)
+	}
+	t.Setenv("GOWORK", "off")
+	t.Setenv("GOFLAGS", "")
+
+	covered, err := listApplicationPackages(ctx, root, []string{"./..."})
+	if err != nil {
+		t.Fatalf("listApplicationPackages: %v", err)
+	}
+	if len(covered) != 0 {
+		t.Errorf("the module root listing is covered by ./..., got %d package(s)", len(covered))
+	}
+
+	narrow, err := listApplicationPackages(ctx, root, []string{"./order/..."})
+	if err != nil {
+		t.Fatalf("listApplicationPackages: %v", err)
+	}
+	fromSub, err := listApplicationPackages(ctx, filepath.Join(root, "order"), []string{"./..."})
+	if err != nil {
+		t.Fatalf("listApplicationPackages: %v", err)
+	}
+	if len(narrow) == 0 || len(narrow) != len(fromSub) {
+		t.Fatalf("a narrower pattern and a subdirectory both need the full listing: %d and %d package(s)", len(narrow), len(fromSub))
+	}
+	for _, pkg := range narrow {
+		if !pkg.DepOnly {
+			t.Errorf("%s must be marked DepOnly: its imports are not checked", pkg.ImportPath)
+		}
+	}
+
+	// Every package the skipped listing would have added is in the pattern
+	// listing, so nothing is lost by skipping it.
+	matched, err := listPackages(ctx, root, []string{"./..."})
+	if err != nil {
+		t.Fatalf("listPackages: %v", err)
+	}
+	listed := make(map[string]bool, len(matched))
+	for _, pkg := range matched {
+		listed[pkg.ImportPath] = true
+	}
+	for _, pkg := range narrow {
+		if !listed[pkg.ImportPath] {
+			t.Errorf("%s is a package of the application that \"go list -deps ./...\" in its root does not list", pkg.ImportPath)
+		}
 	}
 }

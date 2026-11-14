@@ -241,10 +241,6 @@ func (h *Harness) Start(ctx context.Context) (err error) {
 	}
 	h.container = own
 
-	// Boundary recorder, built by the constructor the framework uses, so the
-	// module is held to the same rules here as in the application.
-	h.rec = boundary.ForModule(h.module, h.plugins, h.strict, h.logger)
-
 	// Step 0.5: plugins.
 	if user, ok := h.module.(types.UsePluginModule); ok {
 		aliases := make([]string, 0, len(h.plugins))
@@ -256,6 +252,11 @@ func (h *Harness) Start(ctx context.Context) (err error) {
 			user.SetPlugin(alias, h.plugins[alias])
 		}
 	}
+
+	// Boundary recorder, built by the constructor the framework uses and, as
+	// there, after the plugins are injected, so the module is held to the same
+	// rules here as in the application.
+	h.rec = boundary.ForModule(h.module, h.plugins, h.strict, h.logger)
 
 	// Step 1: dependency containers, through the framework's read-only views.
 	if depMod, ok := h.module.(types.DependentModule); ok {
@@ -275,19 +276,19 @@ func (h *Harness) Start(ctx context.Context) (err error) {
 		}
 	}
 
-	// Step 1.5: consumed contracts, with the framework's rules.
-	if consumer, ok := h.module.(types.ServiceConsumerModule); ok {
-		var declared []string
-		if depMod, ok := h.module.(types.DependentModule); ok {
-			declared = depMod.Dependencies()
+	// Step 1.5: consumed contracts, validated and declared by the step the
+	// framework runs (one ConsumeServices() call, after the containers are set).
+	if err := h.rec.ResolveConsumed(h.module, h.consumedProviders()); err != nil {
+		if errors.Is(err, monoerrors.ErrModuleBoundaryViolation) {
+			// Strict mode: a service looked up in
+			// SetDependencyServiceContainer is not in the list.
+			return monoerrors.WrapModuleStartFailed(name, err)
 		}
-		pluginByName := make(map[string]types.PluginModule, len(h.plugins))
-		for _, p := range h.plugins {
-			pluginByName[p.Name()] = p
+		if errors.Is(err, monoerrors.ErrServiceNotFound) {
+			err = fmt.Errorf("%w (register it on the stand-in container of the dependency or on the plugin's container, "+
+				"e.g. with the provider's contract or monotest.StubRequestReply)", err)
 		}
-		if err := h.validateConsumed(name, declared, consumer.ConsumeServices(), pluginByName); err != nil {
-			return monoerrors.WrapModuleStartFailed(name, fmt.Errorf("%w: %w", errConsumedContract, err))
-		}
+		return monoerrors.WrapModuleStartFailed(name, fmt.Errorf("%w: %w", errConsumedContract, err))
 	}
 
 	// Step 2: module-scoped event bus, over a recorder of the module's own
@@ -376,60 +377,28 @@ func invokeEventConsumer(ctx context.Context, handler types.EventConsumerHandler
 	return handler(ctx, msg)
 }
 
-// validateConsumed mirrors the framework's step 1.5.
-func (h *Harness) validateConsumed(name string, declared []string, consumed []types.BaseServiceDefinition, plugins map[string]types.PluginModule) error {
-	if len(consumed) == 0 {
-		return nil
-	}
-	declaredSet := make(map[string]struct{}, len(declared))
-	for _, d := range declared {
-		declaredSet[d] = struct{}{}
-	}
-	for _, def := range consumed {
-		if def.ModuleName == "" || def.Name == "" {
-			return fmt.Errorf("consumed service contract %s is incomplete (module and service name are required)", def)
-		}
-		if def.ModuleName == name {
-			return fmt.Errorf("consumed service contract %s names the module itself", def)
-		}
-		var provider types.ServiceContainer
-		var hint string
-		if p, ok := plugins[def.ModuleName]; ok {
-			provider = p.Container()
+// consumedProviders returns the lookup the framework's step 1.5
+// (boundary.Recorder.ResolveConsumed) uses to find the provider of a consumed
+// contract: a plugin given with WithPlugin, by its module name, or the
+// stand-in container of a dependency.
+func (h *Harness) consumedProviders() boundary.ProviderLookup {
+	return func(moduleName string) (types.ServiceContainer, bool, error) {
+		for _, plugin := range h.plugins {
+			if plugin.Name() != moduleName {
+				continue
+			}
+			provider := plugin.Container()
 			if provider == nil {
-				return fmt.Errorf("consumed service contract %s: plugin %q has no container; call plugin.SetContainer(monotest.NewContainer(%q, bus)) and register its services before the harness starts",
-					def, def.ModuleName, def.ModuleName)
+				return nil, true, fmt.Errorf("plugin %q has no container; call plugin.SetContainer(monotest.NewContainer(%q, bus)) and register its services before the harness starts",
+					moduleName, moduleName)
 			}
-			hint = "register it on the plugin's container"
-		} else {
-			if _, ok := declaredSet[def.ModuleName]; !ok {
-				return fmt.Errorf("%w: consumed service contract %s requires module '%s' in Dependencies()",
-					monoerrors.ErrMissingDependency, def, def.ModuleName)
-			}
-			c, ok := h.deps[def.ModuleName]
-			if !ok {
-				return fmt.Errorf("%w: consumed service contract %s: no stand-in container for '%s'",
-					monoerrors.ErrMissingDependency, def, def.ModuleName)
-			}
-			provider = c.ServiceContainer
-			hint = "register it on the stand-in container, e.g. with the provider's contract or monotest.StubRequestReply"
+			return provider, true, nil
 		}
-		var entry *types.ServiceEntry
-		for _, e := range provider.Entries() {
-			if e.Name == def.Name {
-				entry = e
-				break
-			}
+		if c, ok := h.deps[moduleName]; ok {
+			return c.ServiceContainer, false, nil
 		}
-		if entry == nil {
-			return fmt.Errorf("consumed service contract %s: %w (%s)", def,
-				&monoerrors.ServiceError{ServiceName: def.Name, ModuleName: def.ModuleName, ServiceType: def.Type, Err: monoerrors.ErrServiceNotFound}, hint)
-		}
-		if entry.Type != def.Type {
-			return monoerrors.WrapServiceContractMismatch(def, def.ModuleName, entry.Type)
-		}
+		return nil, false, nil
 	}
-	return nil
 }
 
 // Stop drains the subscriptions and waits (up to the stop timeout) for the

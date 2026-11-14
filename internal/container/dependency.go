@@ -4,6 +4,7 @@ import (
 	"context"
 	"maps"
 	"slices"
+	"sync/atomic"
 	"time"
 
 	"github.com/go-monolith/mono/internal/boundary"
@@ -19,7 +20,8 @@ import (
 //   - a lookup of a request-reply, queue group or stream consumer service that
 //     a ServiceConsumerModule did not list in ConsumeServices is an
 //     undeclared-service-use violation (channel services have no contract and
-//     are not checked);
+//     are not checked). Without strict mode it is recorded when the lookup
+//     succeeded, so probing for a service that does not exist is not one;
 //   - a GetChannelService call that passes a consumerModule other than the
 //     consumer's own name is a channel-consumer-mismatch violation (the
 //     consumer channel would be registered under a name targeted replies do
@@ -36,11 +38,18 @@ import (
 // Entries() returns descriptions of the dependency's services, not its
 // entries: copies without the handlers and channels (see describeEntry), so a
 // consumer can inspect what a dependency provides but cannot run or replace
-// the provider's handlers or change its registrations.
+// the provider's handlers or change its registrations. That holds in both
+// modes, and inspecting is not a violation, so the first call is logged once
+// at Warn: a module that expects a handler or a channel in an entry would
+// otherwise find nil with nothing pointing at the cause.
 type dependencyView struct {
 	inner      types.ServiceContainer
 	dependency string
 	rec        *boundary.Recorder
+	// entriesNoted makes the note about described entries appear once. It is
+	// a flag, not a sync.Once: the note goes to the application's logger,
+	// which must not be called with a lock held.
+	entriesNoted atomic.Bool
 }
 
 // NewDependencyView wraps dependency's container for the consumer module whose
@@ -217,8 +226,12 @@ func (v *dependencyView) GetStreamConsumerService(name string) (types.StreamCons
 func (v *dependencyView) Has(name string) bool { return v.inner.Has(name) }
 
 // Entries returns one description per service of the dependency, in the
-// order of the real container. Each call returns fresh copies.
+// order of the real container. Each call returns fresh copies. The first call
+// is logged (see dependencyView).
 func (v *dependencyView) Entries() []*types.ServiceEntry {
+	if v.entriesNoted.CompareAndSwap(false, true) {
+		v.rec.EntriesDescribed(v.dependency)
+	}
 	entries := v.inner.Entries()
 	described := make([]*types.ServiceEntry, 0, len(entries))
 	for _, entry := range entries {

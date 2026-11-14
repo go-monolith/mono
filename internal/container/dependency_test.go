@@ -30,7 +30,7 @@ func newProviderContainer(t *testing.T) types.ServiceContainer {
 }
 
 func TestDependencyViewAttributesLookups(t *testing.T) {
-	rec := boundary.New("order", []string{"inventory"}, nil, nil, false, &mockLogger{})
+	rec := boundary.New("order", []string{"inventory"}, nil, false, &mockLogger{})
 	view := NewDependencyView(newProviderContainer(t), "inventory", rec)
 
 	for i := 0; i < 3; i++ {
@@ -75,7 +75,7 @@ func TestDependencyViewAttributesLookups(t *testing.T) {
 
 func TestDependencyViewChannelConsumerMismatch(t *testing.T) {
 	t.Run("non-strict passes the name through and records it", func(t *testing.T) {
-		rec := boundary.New("order", []string{"inventory"}, nil, nil, false, &mockLogger{})
+		rec := boundary.New("order", []string{"inventory"}, nil, false, &mockLogger{})
 		inner := newProviderContainer(t)
 		view := NewDependencyView(inner, "inventory", rec)
 		if _, _, err := view.GetChannelService("feed", "someone-else"); err != nil {
@@ -97,7 +97,7 @@ func TestDependencyViewChannelConsumerMismatch(t *testing.T) {
 		}
 	})
 	t.Run("strict rejects", func(t *testing.T) {
-		rec := boundary.New("order", []string{"inventory"}, nil, nil, true, &mockLogger{})
+		rec := boundary.New("order", []string{"inventory"}, nil, true, &mockLogger{})
 		view := NewDependencyView(newProviderContainer(t), "inventory", rec)
 		if _, _, err := view.GetChannelService("feed", "someone-else"); !errors.Is(err, monoerrors.ErrModuleBoundaryViolation) {
 			t.Fatalf("expected ErrModuleBoundaryViolation, got %v", err)
@@ -156,7 +156,7 @@ func mutations(view types.ServiceContainer) map[string]func() error {
 }
 
 func TestDependencyViewMutationsStrict(t *testing.T) {
-	rec := boundary.New("order", []string{"inventory"}, nil, nil, true, &mockLogger{})
+	rec := boundary.New("order", []string{"inventory"}, nil, true, &mockLogger{})
 	inner := newProviderContainer(t)
 	view := NewDependencyView(inner, "inventory", rec)
 	before := len(inner.Entries())
@@ -184,7 +184,7 @@ func TestDependencyViewMutationsStrict(t *testing.T) {
 
 func TestDependencyViewMutationsNonStrictDelegate(t *testing.T) {
 	logger := &mockLogger{}
-	rec := boundary.New("order", []string{"inventory"}, nil, nil, false, logger)
+	rec := boundary.New("order", []string{"inventory"}, nil, false, logger)
 	inner := newProviderContainer(t)
 	view := NewDependencyView(inner, "inventory", rec)
 
@@ -223,7 +223,7 @@ func BenchmarkGetRequestReplyService(b *testing.B) {
 	if err := c.RegisterRequestReplyService("check-stock", func(context.Context, *types.Msg) ([]byte, error) { return nil, nil }); err != nil {
 		b.Fatal(err)
 	}
-	view := NewDependencyView(c, "inventory", boundary.New("order", []string{"inventory"}, nil, nil, false, nil))
+	view := NewDependencyView(c, "inventory", boundary.New("order", []string{"inventory"}, nil, false, nil))
 
 	b.ReportAllocs()
 	b.Run("raw", func(b *testing.B) {
@@ -245,7 +245,7 @@ func BenchmarkGetRequestReplyService(b *testing.B) {
 	// A consumer that implements ServiceConsumerModule: the lookup is also
 	// checked against its declared contracts.
 	declaring := NewDependencyView(c, "inventory",
-		boundary.New("order", []string{"inventory"}, nil, consumedCheckStock, false, nil).EnforceConsumed())
+		declaredRecorder(b, false, nil))
 	b.Run("view-declared", func(b *testing.B) {
 		b.ReportAllocs()
 		for i := 0; i < b.N; i++ {
@@ -260,9 +260,20 @@ func BenchmarkGetRequestReplyService(b *testing.B) {
 // undeclared-use tests below.
 var consumedCheckStock = []types.BaseServiceDefinition{{ModuleName: "inventory", Name: "check-stock", Type: types.ServiceTypeRequestReply}}
 
+// declaredRecorder returns the recorder of an "order" module that depends on
+// "inventory" and consumes consumedCheckStock only.
+func declaredRecorder(tb testing.TB, strict bool, logger types.Logger) *boundary.Recorder {
+	tb.Helper()
+	rec := boundary.New("order", []string{"inventory"}, nil, strict, logger)
+	if err := rec.DeclareConsumed(consumedCheckStock); err != nil {
+		tb.Fatalf("DeclareConsumed: %v", err)
+	}
+	return rec
+}
+
 func TestDependencyViewUndeclaredUseNonStrict(t *testing.T) {
 	logger := &mockLogger{}
-	rec := boundary.New("order", []string{"inventory"}, nil, consumedCheckStock, false, logger).EnforceConsumed()
+	rec := declaredRecorder(t, false, logger)
 	view := NewDependencyView(newProviderContainer(t), "inventory", rec)
 
 	if _, err := view.GetRequestReplyService("check-stock"); err != nil {
@@ -297,8 +308,36 @@ func TestDependencyViewUndeclaredUseNonStrict(t *testing.T) {
 	}
 }
 
+// A module may probe for an optional service and fall back when it is not
+// there: without strict mode that is not a violation, however many names it
+// tries, so the report cannot grow with caller-derived names.
+func TestDependencyViewMissingServiceIsNotAnUndeclaredUse(t *testing.T) {
+	logger := &mockLogger{}
+	rec := declaredRecorder(t, false, logger)
+	view := NewDependencyView(newProviderContainer(t), "inventory", rec)
+
+	for _, name := range []string{"check-stock-v2", "check-stock-v3"} {
+		if _, err := view.GetRequestReplyService(name); !errors.Is(err, monoerrors.ErrServiceNotFound) {
+			t.Fatalf("GetRequestReplyService(%s): expected ErrServiceNotFound, got %v", name, err)
+		}
+	}
+	if _, err := view.GetQueueGroupService("missing"); !errors.Is(err, monoerrors.ErrServiceNotFound) {
+		t.Fatalf("GetQueueGroupService: expected ErrServiceNotFound, got %v", err)
+	}
+	if _, err := view.GetStreamConsumerService("missing"); !errors.Is(err, monoerrors.ErrServiceNotFound) {
+		t.Fatalf("GetStreamConsumerService: expected ErrServiceNotFound, got %v", err)
+	}
+	rep := rec.Report()
+	if len(rep.Violations) != 0 || len(rep.Observed) != 0 {
+		t.Errorf("a failed lookup must leave no trace: %+v", rep)
+	}
+	if logger.hasWarnedAbout("boundary violation") {
+		t.Error("a failed lookup must not be warned about")
+	}
+}
+
 func TestDependencyViewUndeclaredUseStrict(t *testing.T) {
-	rec := boundary.New("order", []string{"inventory"}, nil, consumedCheckStock, true, &mockLogger{}).EnforceConsumed()
+	rec := declaredRecorder(t, true, &mockLogger{})
 	view := NewDependencyView(newProviderContainer(t), "inventory", rec)
 
 	if _, err := view.GetRequestReplyService("check-stock"); err != nil {
@@ -324,8 +363,8 @@ func TestDependencyViewUndeclaredUseStrict(t *testing.T) {
 }
 
 func TestDependencyViewWithoutConsumeServicesIsNotChecked(t *testing.T) {
-	// The consumer does not implement ServiceConsumerModule: no EnforceConsumed.
-	rec := boundary.New("order", []string{"inventory"}, nil, nil, true, &mockLogger{})
+	// The consumer does not implement ServiceConsumerModule: no list declared.
+	rec := boundary.New("order", []string{"inventory"}, nil, true, &mockLogger{})
 	view := NewDependencyView(newProviderContainer(t), "inventory", rec)
 	if _, err := view.GetRequestReplyService("check-stock"); err != nil {
 		t.Fatalf("GetRequestReplyService: %v", err)
@@ -348,7 +387,8 @@ func TestDependencyViewEntriesAreDescriptions(t *testing.T) {
 	if err := inner.(types.ContractRegistrar).RegisterContract(consumedCheckStock[0]); err != nil {
 		t.Fatal(err)
 	}
-	rec := boundary.New("order", []string{"inventory"}, nil, nil, false, nil)
+	logger := &mockLogger{}
+	rec := boundary.New("order", []string{"inventory"}, nil, false, logger)
 	view := NewDependencyView(inner, "inventory", rec)
 	if _, err := view.GetStreamConsumerService("audit"); err != nil {
 		t.Fatalf("GetStreamConsumerService: %v", err)
@@ -429,6 +469,15 @@ func TestDependencyViewEntriesAreDescriptions(t *testing.T) {
 	}
 	if again := view.Entries(); len(again) != len(real) {
 		t.Errorf("each call must return fresh descriptions, got %d", len(again))
+	}
+
+	// Handlers and channels are left out in both modes, so the first read is
+	// pointed out once; inspecting a dependency is not a violation.
+	if got := logger.warnCount("descriptions without handlers"); got != 1 {
+		t.Errorf("expected one warning about described entries for two Entries() calls, got %d", got)
+	}
+	if got := rec.Report().Violations; len(got) != 0 {
+		t.Errorf("Entries() is not a violation: %+v", got)
 	}
 }
 

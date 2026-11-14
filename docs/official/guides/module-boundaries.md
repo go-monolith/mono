@@ -1,6 +1,6 @@
 # Module Boundaries Guide
 
-This guide shows the recommended way to connect modules since **v0.1.0**, with the checks added in **v0.2.0** (the import rule check, the complete `ConsumeServices()` list and `types.ServiceLookup`). It makes the hexagonal (Ports and Adapters) pattern checkable: a typed port both sides share, startup validation of what a module consumes, a runtime report of how modules really use their boundaries, and a NATS-free conformance test per module.
+This guide shows the recommended way to connect modules since **v0.1.0**, with the checks added in **v0.2.0** (the import rule check, the complete `ConsumeServices()` list and `mono.ServiceLookup`). It makes the hexagonal (Ports and Adapters) pattern checkable: a typed port both sides share, startup validation of what a module consumes, a runtime report of how modules really use their boundaries, and a NATS-free conformance test per module.
 
 **Time to complete:** 25 minutes
 
@@ -119,7 +119,7 @@ func (s *Service) PlaceOrder(ctx context.Context, order NewOrder) (Result, error
 }
 
 // order/adapter.go: translates the port to the provider's contract
-type inventoryAdapter struct{ services types.ServiceLookup }
+type inventoryAdapter struct{ services mono.ServiceLookup }
 
 func (a inventoryAdapter) Available(ctx context.Context, productID string, quantity int) (bool, error) {
     resp, err := inventorycontract.CheckStock.Call(ctx, a.services,
@@ -145,7 +145,7 @@ func (m *Module) Start(context.Context) error {
 ```
 
 - **Ports use the module's own types.** When the provider changes its DTO, only the adapter changes. A port may use the provider's DTOs directly when the two models are the same; the adapter is then a pass-through, and a DTO change reaches the domain.
-- **Adapters hold a `types.ServiceLookup` (v0.2.0+).** It is the read side of a `ServiceContainer` (`Get*` and `Has`). Registering on a dependency is then a compile error. `Call`, `Send` and `Publish` accept it, and any `ServiceContainer` is one.
+- **Adapters hold a `mono.ServiceLookup` (v0.2.0+).** It is the read side of a `ServiceContainer` (`Get*` and `Has`). Registering on a dependency is then a compile error. `Call`, `Send` and `Publish` accept it, and any `ServiceContainer` is one.
 - **Events go behind a port too.** The domain calls `events.OrderPlaced(...)`; an adapter over the event bus calls `contract.OrderCreatedV1.Publish(...)`.
 - **Build the domain in `Start`.** The framework has set every dependency container and the event bus by then.
 
@@ -172,14 +172,23 @@ At module start, after dependency containers are set and before `RegisterService
 
 A failure stops startup with `ErrModuleStartFailed` wrapping `ErrMissingDependency`, `ErrServiceNotFound` or `ErrServiceContractMismatch` (all inspectable with `errors.Is`), and already-started modules are rolled back.
 
-**The list is complete (v0.2.0+).** A module that implements `ConsumeServices()` and looks up a request-reply, queue group or stream consumer service of a dependency that is not in the list commits an `undeclared-service-use` violation (see below). Not checked: modules that do not implement the interface, channel services (they have no contract type), and plugin services.
+`ConsumeServices()` is called once per start, after the dependency containers are set, so a module may build the list from what it was wired with.
+
+**The list is complete (v0.2.0+).** A module that implements `ConsumeServices()` and uses a request-reply, queue group or stream consumer service of a dependency that is not in the list commits an `undeclared-service-use` violation (see below). Both ways of reaching a service count:
+
+- a lookup on the dependency's container (`Get*`, which every `Call` / `Send` / `Publish` does);
+- a publish or request on the module's event bus to `services.<dependency>.<service>`.
+
+Not checked: modules that do not implement the interface, channel services (they have no contract type), and plugin services.
+
+Asking for a service the dependency does not provide is not a violation in the default mode: the lookup fails with `ErrServiceNotFound`, so a module can probe for an optional service and fall back. In strict mode the lookup of anything outside the list fails with `ErrModuleBoundaryViolation`.
 
 ## Runtime Boundaries
 
 What a module receives is wrapped:
 
-- `SetDependencyServiceContainer` gets a **read-only view** of the provider's container. Every lookup is attributed to the consumer. `Entries()` on the view returns descriptions of the services: copies without the provider's handlers and channels. Changing a description does not change the provider.
-- `SetEventBus` gets a **module-scoped bus**. `events.*` and custom subjects pass untouched.
+- `SetDependencyServiceContainer` gets a **read-only view** of the provider's container. Every lookup is attributed to the consumer. `Entries()` on the view returns descriptions of the services: copies without the provider's handlers and channels (nil, in both modes). Changing a description does not change the provider. Reading them is not a violation; the first call per dependency is logged once at Warn, because code written against the real entries would find nil handlers.
+- `SetEventBus` gets a **module-scoped bus**. `events.*` and custom subjects pass untouched. Service subjects are checked: see the table.
 
 | Violation kind | What the module did |
 |----------------|---------------------|
@@ -187,9 +196,9 @@ What a module receives is wrapped:
 | `channel-consumer-mismatch` | Called `GetChannelService` with a `consumerModule` that is not its own name |
 | `undeclared-service-subject` | Published to or requested `services.<module>.<service>` of a module that is not itself, a declared dependency or a plugin (bypassing the port) |
 | `foreign-service-subscription` | Subscribed to another module's service subject |
-| `undeclared-service-use` | Implements `ConsumeServices()` and looked up a dependency service that is not in the list |
+| `undeclared-service-use` | Implements `ConsumeServices()` and looked up a dependency service that is not in the list, or published to or requested its subject on the event bus |
 
-**Default mode:** the call goes through, is warned once, and is reported.
+**Default mode:** the call goes through, is warned once, and is reported. The report keeps up to 1024 distinct violations per module; beyond that, new ones are counted together per kind in an entry with `*` as dependency and subject.
 
 ```go
 for _, r := range app.ModuleBoundaries() { // nil unless the app is running
@@ -252,11 +261,11 @@ func TestOrderModuleConformance(t *testing.T) {
 2. `Dependencies()` has no self reference or duplicate, and each has a stand-in (`WithDependency`).
 3. A `ServiceProviderModule` registers at least one service with a valid subject.
 4. Every `ConsumeServices()` contract is provided by a declared dependency's stand-in with the same kind.
-5. No boundary violation was recorded. This includes a dependency service called without being in `ConsumeServices()`.
+5. No boundary violation was recorded. This includes a dependency service called without being in `ConsumeServices()`, through the container or over the event bus.
 6. Every declared dependency was looked up at least once.
 7. Emitted events have valid subjects, and every `events.*` subject the module published is in `EmitEvents()`.
 8. `Start` and `Stop` succeed, and `Stop` returns within the stop timeout.
-9. Every `ConsumeServices()` contract of a dependency was looked up at least once. With rule 5 the list is exact: nothing used is undeclared, nothing declared is unused.
+9. Every `ConsumeServices()` contract of a dependency was used at least once (looked up, or reached on the event bus). With rule 5 the list is exact for everything the module does through its container and bus: nothing used is undeclared, nothing declared is unused. JetStream publishes through `EventStream()` are not observed.
 
 | Option | Use |
 |--------|-----|
@@ -355,7 +364,7 @@ Interface changes that custom containers and test fakes must follow are listed i
 - Declare contracts as package-level variables in `<module>/contract`
 - Keep ports small, owned by the consumer and in its own types
 - Keep the domain (`service.go`) on standard-library imports
-- Hold a dependency in an adapter as `types.ServiceLookup`
+- Hold a dependency in an adapter as `mono.ServiceLookup`
 - Call `Register` / `Call` / `Send` / `Publish` on the contract
 - Declare every consumed contract in `ConsumeServices()`
 - Run `monotest.CheckImports` in one test for the application
