@@ -179,15 +179,31 @@ Returns the aggregated health status of the framework and all modules.
   - `Healthy` - Overall framework health (true only if framework + NATS + all modules healthy)
   - `State` - Current framework state
   - `NATSHealthy` - NATS server health
+  - `JetStream` - JetStream state of this server (`*JetStreamHealth`, see below); nil when JetStream is not enabled or the framework is not running
   - `Modules` - Map of individual module health statuses
   - `Timestamp` - When the check was performed
   - `Message` - Error message if unhealthy
+
+`JetStreamHealth` is read locally from the embedded server, without a network request:
+
+| Field | Description |
+|-------|-------------|
+| `Available` | JetStream can serve requests from this server: it is enabled and, in a cluster, the meta group has a leader |
+| `Clustered` | JetStream runs in clustered mode |
+| `MetaLeader` | Server name of the meta group leader in a cluster; empty while there is none (no quorum) |
+| `ClusterSize` | Number of JetStream servers the meta group knows |
+| `Message` | Why JetStream is not available; empty otherwise |
+
+`JetStream` is **not** part of `Healthy`. In a cluster, JetStream is unavailable on every server while the cluster has no quorum, so counting it would mark the surviving servers unhealthy (and have them restarted) when one server is lost. A readiness check that must not route JetStream-dependent traffic to this server can check `JetStream.Available` itself.
 
 **Example:**
 ```go
 health := app.Health(ctx)
 fmt.Printf("Framework healthy: %v\n", health.Healthy)
 fmt.Printf("NATS healthy: %v\n", health.NATSHealthy)
+if health.JetStream != nil {
+    fmt.Printf("JetStream available: %v (leader %q)\n", health.JetStream.Available, health.JetStream.MetaLeader)
+}
 for name, moduleHealth := range health.Modules {
     fmt.Printf("%s: %v - %s\n", name, moduleHealth.Healthy, moduleHealth.Message)
 }
@@ -324,17 +340,94 @@ Enables NATS clustering for distributed deployments.
 | `clusterName` | Name of the cluster (required) |
 | `clusterHost` | Host for cluster communication |
 | `clusterPort` | Port for cluster communication (1024-65535) |
-| `routes` | URLs to other cluster nodes (optional for seed node) |
+| `routes` | URLs of the cluster's servers, of the form `nats://[user:password@]host:port` |
 
-**Example (Seed Node):**
+**Without JetStream**, a seed node (the first node in a cluster) may have no routes, and the other nodes point to the seed node's cluster URL.
+
+**With JetStream**, every server must:
+
+- list the same routes: all servers of the cluster, its own included (a server ignores the route to itself);
+- set a server name with [`WithNATSServerName`](#withnatsservername).
+
+`NewMonoApplication` returns an error when clustering and JetStream are configured without a server name or without a route. With a config file, these checks run at `Start` on the merged configuration instead, since the file may provide `server_name`, `cluster.name` and `routes` (or leafnode remotes).
+
+**Route URLs** must have the form `nats://[user:password@]host:port`. A path, query, fragment or opaque part is rejected, which also catches an unencoded `/`, `?` or `#` in a password: percent-encode special characters in credentials. Errors name a route by its index and never quote it. [`WithNATSClusterAuth`](#withnatsclusterauth) adds credentials to every route that has none.
+
+**With a config file** ([`WithNATSConfigFile`](#withnatsconfigfile)), the values are merged into the file's `cluster{}` block: name, host, port and routes come from this option, and the file's other cluster settings (authorization, TLS, permissions, pool size, compression) apply. Before v0.2.0 the option replaced the whole block and those settings were silently dropped.
+
+In Kubernetes, use the fully qualified names of a StatefulSet's pods behind a headless Service (`<pod>.<service>.<namespace>.svc.cluster.local`). See the [Clustering and Kubernetes guide](../guides/clustering.md).
+
+**Example (without JetStream, seed node):**
 ```go
 mono.WithNATSClustering("production", "127.0.0.1", 6222, nil)
 ```
 
-**Example (Non-Seed Node):**
+**Example (without JetStream, non-seed node):**
 ```go
 mono.WithNATSClustering("production", "127.0.0.1", 6223,
     []string{"nats://127.0.0.1:6222"})
+```
+
+**Example (with JetStream, three servers, same on each):**
+```go
+routes := []string{
+    "nats://app-0.app.default.svc.cluster.local:6222",
+    "nats://app-1.app.default.svc.cluster.local:6222",
+    "nats://app-2.app.default.svc.cluster.local:6222",
+}
+mono.NewMonoApplication(
+    mono.WithNATSServerName(os.Getenv("POD_NAME")),
+    mono.WithNATSClustering("production", "0.0.0.0", 6222, routes),
+    mono.WithJetStreamStorageDir("/data/jetstream"),
+)
+```
+
+#### WithNATSServerName
+
+```go
+func WithNATSServerName(name string) MonoFrameworkOption
+```
+
+Sets the name of the embedded NATS server (`server_name`). It overrides `server_name` in a NATS config file.
+
+Clustered JetStream requires a server name, and it must be:
+
+- **unique** within the cluster (and across a supercluster or leafnodes that share JetStream). JetStream identifies every RAFT peer, of the meta group and of each stream and consumer, by server name. nats-server closes a route from a server that reports its own name ("Remote server has a duplicate name").
+- **stable** across restarts. A server's stored JetStream state belongs to its name, so a restarted server must come back under the same name.
+
+The framework only checks that the name is set and valid (not empty, no whitespace). Uniqueness and stability come from the deployment: a Kubernetes StatefulSet pod name (`my-app-0`, `my-app-1`, ...) is both; a Deployment's generated pod name is unique but changes on every restart; a random value is neither.
+
+| Property | Value |
+|----------|-------|
+| Type | `string` |
+| Default | (empty: the config file's `server_name`, otherwise nats-server's default, the server ID) |
+| Constraints | Non-empty, no whitespace |
+
+**Example:**
+```go
+mono.WithNATSServerName(os.Getenv("POD_NAME"))
+```
+
+#### WithNATSClusterAuth
+
+```go
+func WithNATSClusterAuth(username, password string) MonoFrameworkOption
+```
+
+Requires the given credentials from every cluster route, and presents them on the routes this server opens. nats-server only sends the credentials written in a route's URL, so the framework adds them to every route URL that has none, from `WithNATSClustering` and from a config file alike. The credentials are redacted from the framework's logs and errors.
+
+They replace the user and password of a config file's `cluster.authorization` block. The option requires clustering (from `WithNATSClustering` or a config file). Load the password from a secret, never from code. The credentials are only safe on a trusted network unless the route listener also uses TLS, which a `cluster{}` block in a NATS config file can configure.
+
+| Property | Value |
+|----------|-------|
+| Type | `string`, `string` |
+| Default | (empty: routes are not authenticated unless the config file says otherwise) |
+| Constraints | Both non-empty; requires clustering |
+
+**Example:**
+```go
+mono.WithNATSClustering("orders", "0.0.0.0", 6222, routes)
+mono.WithNATSClusterAuth("route", os.Getenv("NATS_ROUTE_PASSWORD"))
 ```
 
 #### WithNATSClientName
@@ -442,6 +535,54 @@ Enables JetStream with persistent file storage at the specified directory.
 **Example:**
 ```go
 mono.WithJetStreamStorageDir("./data/jetstream")
+```
+
+#### WithJetStreamReadyTimeout
+
+```go
+func WithJetStreamReadyTimeout(d time.Duration) MonoFrameworkOption
+```
+
+Bounds how long `Start` waits for JetStream. Before it starts plugins and modules, `Start` waits until JetStream answers. It then retries each JetStream setup step (the stream, consumer and schedule setup of stream consumer, cron and event stream consumer services, and the planning of event stream durables) while it fails with an error that can clear by itself:
+
+- a timeout of one attempt, no responders, or no stream response;
+- JetStream API errors 10004 (incomplete results), 10005 (no suitable peers for placement), 10008 (JetStream system temporarily unavailable), 10118, 10119, 10194 and 10195 (stream or consumer offline).
+
+Any other error fails `Start` at once. Each attempt is bounded by 15s, and the wait between attempts grows from 250ms to 2s. The wait and each retried step are bounded by `d` (and by the `Start` context); a step still failing after `d` fails `Start` with an error that names `WithJetStreamReadyTimeout`. While it waits, the framework logs `Waiting for JetStream` at Info (at most every 10s per step), and `JetStream step succeeded after waiting` once the step succeeds.
+
+On a single server JetStream answers at once and nothing is retried. In a cluster, JetStream has no leader until a quorum of the servers is routed, a replicated stream or consumer can only be updated once its replicas are current, and a restarted server must catch up first: servers that start together wait for each other here instead of failing and restarting. When JetStream is not enabled, `Start` does not wait.
+
+| Property | Value |
+|----------|-------|
+| Type | `time.Duration` |
+| Default | 2 minutes |
+| Constraints | > 0 |
+
+**Example:**
+```go
+mono.WithJetStreamReadyTimeout(5 * time.Minute)
+```
+
+#### WithJetStreamDefaultReplicas
+
+```go
+func WithJetStreamDefaultReplicas(n int) MonoFrameworkOption
+```
+
+Sets the number of replicas of the streams the framework creates for stream consumer services (`StreamConsumerConfig.Stream`), event stream consumers and cron services (`CronServiceConfig.Replicas`) whose configuration leaves `Replicas` at 0. Their consumers follow the stream unless their own `Replicas` is set.
+
+Without it these streams have one replica, so in a cluster each lives on a single server and is unavailable while that server is down; a cron schedule stops firing. A replicated stream keeps working while fewer than half of its replicas are down, so 2 replicas tolerate no loss: use 3 (or 5) in a cluster of at least as many servers. Raising the value updates existing streams in place (nats-server adds the replicas).
+
+| Property | Value |
+|----------|-------|
+| Type | `int` |
+| Default | `0` (one replica) |
+| Constraints | 1 to 5; above 1 requires clustering (`WithNATSClustering` or a config file) |
+
+**Example:**
+```go
+mono.WithNATSClustering("orders", "0.0.0.0", 6222, routes)
+mono.WithJetStreamDefaultReplicas(3)
 ```
 
 ### Logger Configuration
@@ -720,6 +861,10 @@ Returns a configuration with all default values. Useful for testing.
 | NATS ConfigFile | (empty, disabled) |
 | JetStream Domain | (empty, disabled) |
 | JetStream Dir | (empty, in-memory) |
+| JetStream Ready Timeout | `0` (= 2 minutes) |
+| JetStream Default Replicas | `0` (one replica) |
+| NATS Server Name | (empty: config file or nats-server default) |
+| NATS Cluster Auth | (empty, routes not authenticated) |
 | Log Level | `LogLevelInfo` |
 | Log Format | `LogFormatText` |
 | Log Output | `os.Stdout` |

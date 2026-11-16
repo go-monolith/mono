@@ -150,6 +150,13 @@ func buildNATSOptions(cfg types.NATSOptions) []nats.NATSOption {
 		))
 	}
 
+	if cfg.ServerName != "" {
+		opts = append(opts, nats.WithServerName(cfg.ServerName))
+	}
+	if cfg.ClusterUsername != "" || cfg.ClusterPassword != "" {
+		opts = append(opts, nats.WithClusterAuth(cfg.ClusterUsername, cfg.ClusterPassword))
+	}
+
 	// Add max payload if configured
 	// When using config file, only add if explicitly changed from defaults
 	if cfg.MaxPayload > 0 && (!hasConfigFile || cfg.MaxPayload != defaultNATSMaxPayload) {

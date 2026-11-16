@@ -355,7 +355,7 @@ Limits:
 7. Add one `CheckImports` test in the root directory of the application.
 8. Where a module has real rules, move them into `service.go` behind ports in its own types.
 
-Interface changes that custom containers and test fakes must follow are listed in [Upgrading to v0.1.0 and v0.1.2](upgrading.md).
+Interface changes that custom containers and test fakes must follow are listed in [Upgrading to v0.1.0, v0.1.2 and v0.2.0](upgrading.md).
 
 ## Best Practices
 
@@ -383,7 +383,7 @@ Interface changes that custom containers and test fakes must follow are listed i
 ## Related Documentation
 
 - [Testing Guide](testing.md)
-- [Upgrading to v0.1.0 and v0.1.2](upgrading.md)
+- [Upgrading to v0.1.0, v0.1.2 and v0.2.0](upgrading.md)
 - [API Reference - Modules](../api/module.md#serviceconsumermodule)
 - [API Reference - Framework](../api/framework.md) (`ModuleBoundaries`, `WithStrictModuleBoundaries`)
 - [API Reference - Service Container](../api/container.md#typed-service-contracts)

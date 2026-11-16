@@ -960,6 +960,20 @@ func TestMarkLegacyMigrationDone(t *testing.T) {
 		}
 	})
 
+	t.Run("keeps the default replicas", func(t *testing.T) {
+		store := newFakeConsumerStore()
+		lm, _ := newMigrationTestManager(store)
+		lm.SetJetStreamDefaultReplicas(3)
+		entries := []types.EventStreamConsumerEntry{streamEntry("analytics", "payments", paymentProcessedV1)}
+
+		lm.markLegacyMigrationDone(context.Background(), entries, []eventStreamDurable{{}})
+
+		writes := store.writtenStreams()
+		if len(writes) != 1 || writes[0].Replicas != 3 {
+			t.Fatalf("stream writes = %+v, want one with the default 3 replicas (a 0 would scale the stream down)", writes)
+		}
+	})
+
 	t.Run("failure is only logged", func(t *testing.T) {
 		store := newFakeConsumerStore()
 		store.streamWriteErr = errors.New("jetstream unavailable")

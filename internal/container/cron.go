@@ -22,7 +22,9 @@ const minScheduleTTL = time.Second
 //
 // Validation is fail-fast: the handler must be non-nil, Schedule must be set,
 // Payload and SourceSubject are mutually exclusive, TimeZone (when set) must be
-// a valid IANA location, and TTL (when set) must be at least one second.
+// a valid IANA location, TTL (when set) must be at least one second, and
+// Replicas must be between 0 (the framework default) and
+// types.MaxJetStreamReplicas.
 //
 // Standard five-field cron expressions are normalized to the six-field
 // seconds-first format the NATS scheduler expects (see
@@ -54,6 +56,9 @@ func (c *serviceContainer) RegisterCronService(
 	}
 	if config.TTL != 0 && config.TTL < minScheduleTTL {
 		return fmt.Errorf("cron service '%s': TTL must be at least %s when set", name, minScheduleTTL)
+	}
+	if config.Replicas < 0 || config.Replicas > types.MaxJetStreamReplicas {
+		return fmt.Errorf("cron service '%s': Replicas must be between 0 and %d", name, types.MaxJetStreamReplicas)
 	}
 
 	// The target subject is the standard service subject. Ticks are republished

@@ -117,6 +117,15 @@ type FrameworkHealth struct {
 	// NATSHealthy indicates if the NATS server is operational
 	NATSHealthy bool `json:"nats_healthy"`
 
+	// JetStream reports whether JetStream is usable on this server; nil when
+	// JetStream is not enabled (or the framework is not running). It is not
+	// part of Healthy: in a cluster JetStream is unavailable on every server
+	// while the cluster has no quorum, so including it would mark the
+	// surviving servers unhealthy (and have them restarted) when one is lost.
+	// A readiness check that must not route JetStream-dependent traffic to
+	// this server can include JetStream.Available itself.
+	JetStream *JetStreamHealth `json:"jetstream,omitempty"`
+
 	// Modules contains health status of each registered module, keyed by module name.
 	// Modules that don't implement HealthAwareModule will have SupportsHealth=false.
 	Modules map[string]ModuleHealth `json:"modules"`
@@ -126,6 +135,23 @@ type FrameworkHealth struct {
 
 	// Message provides additional context if the framework is unhealthy.
 	// Empty if Healthy is true.
+	Message string `json:"message,omitempty"`
+}
+
+// JetStreamHealth is the JetStream part of FrameworkHealth, read from the
+// embedded server without a network request.
+type JetStreamHealth struct {
+	// Available is true when JetStream can serve requests from this server:
+	// it is enabled and, in a cluster, the meta group has a leader.
+	Available bool `json:"available"`
+	// Clustered is true when JetStream runs in clustered mode.
+	Clustered bool `json:"clustered"`
+	// MetaLeader is the server name of the meta group leader in a cluster;
+	// empty while there is none (no quorum).
+	MetaLeader string `json:"meta_leader,omitempty"`
+	// ClusterSize is the number of JetStream servers the meta group knows.
+	ClusterSize int `json:"cluster_size,omitempty"`
+	// Message explains why JetStream is not available; empty otherwise.
 	Message string `json:"message,omitempty"`
 }
 

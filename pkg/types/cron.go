@@ -168,6 +168,14 @@ type CronServiceConfig struct {
 	// set it must be at least one second.
 	TTL time.Duration
 
+	// Replicas is the number of servers the service's stream (which holds the
+	// schedule and the occurrences) and its consumer are replicated to in a
+	// cluster. Zero selects the framework default (WithJetStreamDefaultReplicas,
+	// otherwise 1). With one replica the schedule lives on a single server and
+	// stops firing while that server is down; use 3 in a cluster of at least
+	// three servers. At most MaxJetStreamReplicas.
+	Replicas int
+
 	// Deprecated, when true, cancels (purges) the server-side schedule on
 	// startup and does not start the consumer, while keeping the registration
 	// code in place. This is phase one of the safe two-phase retirement flow:

@@ -44,6 +44,18 @@ type MonoFrameworkConfig struct {
 	// are considered to disagree (clock skew) when they differ by more than it.
 	// Zero selects DefaultDeadlineSkewAllowance.
 	DeadlineSkewAllowance time.Duration
+	// JetStreamReadyTimeout bounds how long Start waits for JetStream to answer
+	// before starting plugins and modules, and how long each JetStream setup
+	// step (streams and consumers of stream consumer, cron and event stream
+	// consumer services) is retried while it fails with an error that can
+	// clear by itself (no quorum yet, a replica catching up, a timeout). Zero
+	// selects DefaultJetStreamReadyTimeout. See WithJetStreamReadyTimeout.
+	JetStreamReadyTimeout time.Duration
+	// JetStreamDefaultReplicas is the number of replicas of the streams the
+	// framework creates for stream consumer, cron and event stream consumer
+	// services whose own configuration leaves Replicas at 0. Zero means 1.
+	// See WithJetStreamDefaultReplicas.
+	JetStreamDefaultReplicas int
 	// ServiceDiscovery enables the NATS services protocol responders
 	// ($SRV.PING/INFO/STATS) for request-reply services; nil means disabled.
 	// See WithServiceDiscovery.
@@ -80,6 +92,14 @@ type MonoFrameworkConfig struct {
 // nats.go's DefaultDrainTimeout.
 const DefaultShutdownDrainTimeout = 30 * time.Second
 
+// DefaultJetStreamReadyTimeout is the default JetStreamReadyTimeout: 2 minutes,
+// enough for the servers of a cluster that start together to elect their
+// leaders.
+const DefaultJetStreamReadyTimeout = 2 * time.Minute
+
+// MaxJetStreamReplicas is the largest replica count JetStream accepts.
+const MaxJetStreamReplicas = 5
+
 // DefaultDeadlineSkewAllowance is the default DeadlineSkewAllowance: 250ms.
 const DefaultDeadlineSkewAllowance = 250 * time.Millisecond
 
@@ -109,17 +129,28 @@ type ServiceDiscoveryConfig struct {
 
 // NATSOptions holds NATS server configuration.
 type NATSOptions struct {
-	Host                string
-	Port                int
-	DontListen          bool          // If true, server won't listen on TCP (useful for in-process only). Requires UseInProcessConn=true.
-	UseInProcessConn    bool          // If true, client uses in-process connection instead of TCP. Can be used independently or with DontListen.
-	JetStreamEnabled    bool          // Track if JetStream is requested
-	JetStreamDomain     string        // JetStream domain for multi-tenancy
-	JetStreamDir        string        // JetStream storage directory
-	ClusterName         string        // NATS cluster name
-	ClusterHost         string        // NATS cluster host for inter-node communication
-	ClusterPort         int           // NATS cluster port for inter-node communication
-	ClusterRoutes       []string      // NATS cluster routes (URLs to other cluster nodes)
+	Host             string
+	Port             int
+	DontListen       bool     // If true, server won't listen on TCP (useful for in-process only). Requires UseInProcessConn=true.
+	UseInProcessConn bool     // If true, client uses in-process connection instead of TCP. Can be used independently or with DontListen.
+	JetStreamEnabled bool     // Track if JetStream is requested
+	JetStreamDomain  string   // JetStream domain for multi-tenancy
+	JetStreamDir     string   // JetStream storage directory
+	ClusterName      string   // NATS cluster name
+	ClusterHost      string   // NATS cluster host for inter-node communication
+	ClusterPort      int      // NATS cluster port for inter-node communication
+	ClusterRoutes    []string // NATS cluster routes (URLs to other cluster nodes)
+	// ServerName is the NATS server name (server_name). Clustered JetStream
+	// requires it to be unique within the cluster and stable across restarts.
+	// Empty leaves the name to the config file, or to nats-server's default
+	// (the server ID) when there is none.
+	ServerName string
+	// ClusterUsername and ClusterPassword are the credentials every route
+	// must present, and that this server presents on the routes it opens.
+	// Empty means routes are not authenticated (unless the config file says
+	// otherwise).
+	ClusterUsername     string
+	ClusterPassword     string
 	MaxPayload          int32         // Maximum NATS message payload size
 	StartupReadyTimeout time.Duration // Maximum time to wait for NATS server readiness (default: 10s)
 	// NATS server logging flags (passed to SetLoggerV2)

@@ -44,6 +44,8 @@ type lifecycleManager struct {
 	inFlightHandlers           atomic.Int32                  // handlers of fetch loops (stream, event stream, cron) currently running
 	drainTimeout               time.Duration                 // Stop's budget for draining and in-flight handlers (0 = default)
 	deadlineSkew               time.Duration                 // clock skew tolerated on request deadlines (0 = default)
+	jsReadyTimeout             time.Duration                 // JetStream wait and setup retry budget (0 = default)
+	jsDefaultReplicas          int                           // replicas of framework-created streams left at 0 (0 = 1)
 	streamConsumers            map[string]context.CancelFunc // cancel funcs for stream consumer fetch loops
 	queueGroupOptimisticWindow time.Duration                 // Optimistic publish window for queue groups
 	defaultServiceConcurrency  int                           // MaxConcurrency for subscriptions that leave it at 0 (0 = built-in default)
@@ -221,6 +223,45 @@ func (lm *lifecycleManager) SetDeadlineSkewAllowance(d time.Duration) {
 	lm.mu.Lock()
 	defer lm.mu.Unlock()
 	lm.deadlineSkew = d
+}
+
+// SetJetStreamReadyTimeout bounds the JetStream wait before plugins and
+// modules start and each retried JetStream setup step. Values <= 0 select
+// types.DefaultJetStreamReadyTimeout.
+func (lm *lifecycleManager) SetJetStreamReadyTimeout(d time.Duration) {
+	lm.mu.Lock()
+	defer lm.mu.Unlock()
+	lm.jsReadyTimeout = d
+}
+
+// jetStreamReadyTimeout returns the configured JetStream ready timeout, or the
+// default.
+func (lm *lifecycleManager) jetStreamReadyTimeout() time.Duration {
+	lm.mu.RLock()
+	defer lm.mu.RUnlock()
+	if lm.jsReadyTimeout > 0 {
+		return lm.jsReadyTimeout
+	}
+	return types.DefaultJetStreamReadyTimeout
+}
+
+// SetJetStreamDefaultReplicas sets the replica count of framework-created
+// streams whose configuration leaves Replicas at 0. Values <= 0 mean 1.
+func (lm *lifecycleManager) SetJetStreamDefaultReplicas(n int) {
+	lm.mu.Lock()
+	defer lm.mu.Unlock()
+	lm.jsDefaultReplicas = n
+}
+
+// streamReplicas returns the replicas a framework-created stream configured
+// with configured replicas gets: the configured value, or the default.
+func (lm *lifecycleManager) streamReplicas(configured int) int {
+	if configured > 0 {
+		return configured
+	}
+	lm.mu.RLock()
+	defer lm.mu.RUnlock()
+	return lm.jsDefaultReplicas // 0: the server's default, one replica
 }
 
 // deadlineSkewAllowance returns the configured skew allowance, or the default.
@@ -689,6 +730,22 @@ func (lm *lifecycleManager) detectMiddlewareModules() {
 
 // Start starts all modules in dependency order
 func (lm *lifecycleManager) Start(ctx context.Context) error {
+	// Step -1: wait until JetStream answers, so that plugins and modules that
+	// use it in Start, and the JetStream setup after them, find it ready even
+	// while the servers of a cluster are still electing leaders.
+	jetStreamEnabled, err := lm.waitForJetStream(ctx)
+	if err != nil {
+		return err
+	}
+	// Step -0.5: keep the framework's consumers that the server still treats
+	// as non-durable from being deleted before the setup (Step 5) converts
+	// them: plugin, middleware and module Start may together take longer than
+	// their inactivity threshold, which runs from when JetStream elected their
+	// leaders.
+	if jetStreamEnabled {
+		lm.protectNonDurableConsumers(ctx, lm.registeredNames())
+	}
+
 	// Step 0: Start plugin modules FIRST (before middleware)
 	if err := lm.startPlugins(ctx); err != nil {
 		return fmt.Errorf("failed to start plugins: %w", err)
@@ -1140,14 +1197,22 @@ func (lm *lifecycleManager) setupNATSSubscriptions(ctx context.Context) error {
 				}
 
 			case types.ServiceTypeStreamConsumer:
-				// Setup JetStream stream consumer
-				if err := lm.setupStreamConsumer(ctx, entry); err != nil {
+				// Setup JetStream stream consumer. Retried while JetStream is
+				// not ready (see retryJetStream): the fetch loop starts only
+				// after the last JetStream call, so a failed attempt leaves
+				// nothing running.
+				if err := lm.retryJetStream(ctx, "set up stream consumer "+entry.Name, func(ctx context.Context) error {
+					return lm.setupStreamConsumer(ctx, entry)
+				}); err != nil {
 					return fmt.Errorf("failed to setup stream consumer %s: %w", entry.Name, err)
 				}
 
 			case types.ServiceTypeCron:
-				// Setup server-side cron schedule + durable consumer
-				if err := lm.setupCronService(ctx, entry); err != nil {
+				// Setup server-side cron schedule + durable consumer, retried
+				// like a stream consumer.
+				if err := lm.retryJetStream(ctx, "set up cron service "+entry.Name, func(ctx context.Context) error {
+					return lm.setupCronService(ctx, entry)
+				}); err != nil {
 					return fmt.Errorf("failed to setup cron service %s: %w", entry.Name, err)
 				}
 				registeredCronStreams[types.CronStreamName(entry.ModuleName, entry.Name)] = struct{}{}
@@ -1225,12 +1290,18 @@ func (lm *lifecycleManager) setupNATSSubscriptions(ctx context.Context) error {
 		// durables shared between registrations can be recognized.
 		streamConsumers := lm.eventRegistry.StreamConsumerEntries()
 		if len(streamConsumers) > 0 {
-			durables, err := lm.planEventStreamDurables(ctx, streamConsumers)
-			if err != nil {
+			var durables []eventStreamDurable
+			if err := lm.retryJetStream(ctx, "plan event stream consumers", func(ctx context.Context) error {
+				var err error
+				durables, err = lm.planEventStreamDurables(ctx, streamConsumers)
+				return err
+			}); err != nil {
 				return fmt.Errorf("failed to plan event stream consumers: %w", err)
 			}
 			for i, entry := range streamConsumers {
-				if err := lm.setupEventStreamConsumer(ctx, entry, durables[i]); err != nil {
+				if err := lm.retryJetStream(ctx, "set up event stream consumer "+entry.EventDef.Name, func(ctx context.Context) error {
+					return lm.setupEventStreamConsumer(ctx, entry, durables[i])
+				}); err != nil {
 					return fmt.Errorf("failed to setup event stream consumer for %s.%s: %w",
 						entry.EventDef.ModuleName, entry.EventDef.Name, err)
 				}
@@ -1879,6 +1950,7 @@ func (lm *lifecycleManager) setupStreamConsumer(ctx context.Context, entry *type
 	if streamCfg.Storage == 0 {
 		streamCfg.Storage = types.FileStorage
 	}
+	streamCfg.Replicas = lm.streamReplicas(streamCfg.Replicas)
 	_, err = es.CreateOrUpdateStream(ctx, streamCfg)
 	if err != nil {
 		return fmt.Errorf("failed to create stream %s: %w", cfg.Stream.Name, err)
@@ -1887,20 +1959,18 @@ func (lm *lifecycleManager) setupStreamConsumer(ctx context.Context, entry *type
 	// Create/Update Consumer (idempotent)
 	consumerName := types.SanitizeConsumerName(entry.ModuleName + "-" + entry.Name)
 	consumerCfg := cfg.Consumer
-	// Set required fields that must be managed by the framework
+	// Set required fields that must be managed by the framework. The consumer
+	// is durable (Name and Durable both sent), so the server keeps it, and its
+	// position, across restarts and idle periods; a caller's Name or Durable
+	// is replaced.
 	consumerCfg.Name = consumerName
-	// Durable was never sent to the server for stream consumer services, so
-	// their consumers exist server-side as named, non-durable consumers. Keep it
-	// that way: switching an existing consumer to durable, or passing a caller's
-	// Durable that differs from Name, is a server-side change that needs its
-	// own migration.
-	consumerCfg.Durable = ""
+	consumerCfg.Durable = consumerName
 	if consumerCfg.AckPolicy == 0 {
 		consumerCfg.AckPolicy = types.AckExplicitPolicy
 	}
-	consumer, err := es.CreateOrUpdateConsumer(ctx, cfg.Stream.Name, consumerCfg)
+	consumer, err := lm.ensureStreamConsumer(ctx, es, cfg.Stream.Name, consumerCfg, entry)
 	if err != nil {
-		return fmt.Errorf("failed to create consumer %s: %w", consumerName, err)
+		return err
 	}
 
 	// Start fetch loop goroutine. The loop context only controls fetching;
@@ -1971,6 +2041,7 @@ func (lm *lifecycleManager) setupCronService(ctx context.Context, entry *types.S
 		AllowMsgSchedules: true,
 		MaxMsgsPerSubject: defaultCronMaxMsgsPerSubj,
 		MaxAge:            defaultCronStreamMaxAge,
+		Replicas:          lm.streamReplicas(cfg.Replicas),
 	}
 	if cfg.SourceSubject != "" {
 		streamCfg.Subjects = append(streamCfg.Subjects, cfg.SourceSubject)
@@ -2088,6 +2159,7 @@ func (lm *lifecycleManager) purgeCronSchedule(ctx context.Context, es types.Even
 // each to the handler. Unlike the stream-consumer loop, the framework owns
 // acknowledgement here (see dispatchCronTick).
 func (lm *lifecycleManager) runCronConsumerLoop(ctx context.Context, consumer jetstream.Consumer, entry *types.ServiceEntry) {
+	fetchErrs := newFetchErrorReporter(lm.logger, "Cron fetch error", "service", entry.Name)
 	for {
 		select {
 		case <-ctx.Done():
@@ -2106,17 +2178,17 @@ func (lm *lifecycleManager) runCronConsumerLoop(ctx context.Context, consumer je
 					return
 				}
 				if !isBenignFetchError(err) {
-					lm.logger.Error("Cron fetch error", "service", entry.Name, "error", err)
-					select {
-					case <-ctx.Done():
+					fetchErrs.failure(err)
+					if !sleepCtx(ctx, fetchErrorBackoff) {
 						return
-					case <-time.After(time.Second):
 					}
 				}
 				continue
 			}
 
+			delivered := 0
 			for msg := range msgs.Messages() {
+				delivered++
 				if ctx.Err() != nil {
 					// Nak the in-flight occurrence so redelivery starts
 					// immediately on the next run instead of waiting for AckWait.
@@ -2139,8 +2211,15 @@ func (lm *lifecycleManager) runCronConsumerLoop(ctx context.Context, consumer je
 				lm.endHandler()
 			}
 
-			if msgs.Error() != nil && !isBenignFetchError(msgs.Error()) {
-				lm.logger.Error("Cron fetch batch error", "service", entry.Name, "error", msgs.Error())
+			// A failed fetch that returned nothing backs off, so a server
+			// answering at once with an error does not make the loop spin.
+			if batchErr := msgs.Error(); batchErr != nil && !isBenignFetchError(batchErr) {
+				fetchErrs.failure(batchErr)
+				if delivered == 0 && !sleepCtx(ctx, fetchErrorBackoff) {
+					return
+				}
+			} else {
+				fetchErrs.success()
 			}
 		}
 	}
@@ -2228,6 +2307,7 @@ func (lm *lifecycleManager) setupEventStreamConsumer(ctx context.Context, entry 
 	// Writing the configuration replaces the stream's metadata, so a migrated
 	// stream gets its migration marker re-applied.
 	streamCfg := eventStreamConfig(cfg.Stream, durable.migrated)
+	streamCfg.Replicas = lm.streamReplicas(streamCfg.Replicas)
 	_, err = es.CreateOrUpdateStream(ctx, streamCfg)
 	if err != nil {
 		return fmt.Errorf("failed to create stream %s: %w", cfg.Stream.Name, err)
@@ -2305,6 +2385,7 @@ func (lm *lifecycleManager) runEventStreamConsumerLoop(
 		consumerModule = entry.Module.Name()
 	}
 
+	fetchErrs := newFetchErrorReporter(lm.logger, "Fetch error", "event", eventName)
 	for {
 		select {
 		case <-ctx.Done():
@@ -2328,14 +2409,11 @@ func (lm *lifecycleManager) runEventStreamConsumerLoop(
 
 				// Fetch timeout is expected when no messages are available - don't log as error
 				if !isBenignFetchError(err) {
-					lm.logger.Error("Fetch error", "event", eventName, "error", err)
+					fetchErrs.failure(err)
 					// Context-aware backoff to allow quick shutdown
-					select {
-					case <-ctx.Done():
+					if !sleepCtx(ctx, fetchErrorBackoff) {
 						lm.logger.Info("Event stream consumer loop cancelled during backoff", "event", eventName)
 						return
-					case <-time.After(time.Second):
-						// Continue to next iteration
 					}
 				}
 				continue
@@ -2347,9 +2425,16 @@ func (lm *lifecycleManager) runEventStreamConsumerLoop(
 				batch = append(batch, eventbus.WrapJetStreamMsg(msg))
 			}
 
-			// Check for fetch errors
-			if msgs.Error() != nil && !isBenignFetchError(msgs.Error()) {
-				lm.logger.Error("Fetch batch error", "event", eventName, "error", msgs.Error())
+			// Check for fetch errors; a failed fetch that returned nothing
+			// backs off (see runStreamConsumerLoop).
+			if batchErr := msgs.Error(); batchErr != nil && !isBenignFetchError(batchErr) {
+				fetchErrs.failure(batchErr)
+				if len(batch) == 0 && !sleepCtx(ctx, fetchErrorBackoff) {
+					lm.logger.Info("Event stream consumer loop cancelled during backoff", "event", eventName)
+					return
+				}
+			} else {
+				fetchErrs.success()
 			}
 
 			if len(batch) == 0 {
@@ -2383,6 +2468,7 @@ func (lm *lifecycleManager) runStreamConsumerLoop(
 	entry *types.ServiceEntry,
 ) {
 	cfg := entry.StreamConsumerConfig
+	fetchErrs := newFetchErrorReporter(lm.logger, "Fetch error", "service", entry.Name)
 
 	for {
 		select {
@@ -2407,14 +2493,11 @@ func (lm *lifecycleManager) runStreamConsumerLoop(
 
 				// Fetch timeout is expected when no messages are available - don't log as error
 				if !isBenignFetchError(err) {
-					lm.logger.Error("Fetch error", "service", entry.Name, "error", err)
+					fetchErrs.failure(err)
 					// Context-aware backoff to allow quick shutdown
-					select {
-					case <-ctx.Done():
+					if !sleepCtx(ctx, fetchErrorBackoff) {
 						lm.logger.Info("Stream consumer loop cancelled during backoff", "service", entry.Name)
 						return
-					case <-time.After(time.Second):
-						// Continue to next iteration
 					}
 				}
 				continue
@@ -2426,9 +2509,17 @@ func (lm *lifecycleManager) runStreamConsumerLoop(
 				batch = append(batch, eventbus.WrapJetStreamMsg(msg))
 			}
 
-			// Check for fetch errors
-			if msgs.Error() != nil && !isBenignFetchError(msgs.Error()) {
-				lm.logger.Error("Fetch batch error", "service", entry.Name, "error", msgs.Error())
+			// Check for fetch errors. A failed fetch that returned nothing
+			// backs off: the server may answer at once (no responders while
+			// the consumer has no leader), and the loop must not spin.
+			if batchErr := msgs.Error(); batchErr != nil && !isBenignFetchError(batchErr) {
+				fetchErrs.failure(batchErr)
+				if len(batch) == 0 && !sleepCtx(ctx, fetchErrorBackoff) {
+					lm.logger.Info("Stream consumer loop cancelled during backoff", "service", entry.Name)
+					return
+				}
+			} else {
+				fetchErrs.success()
 			}
 
 			if len(batch) == 0 {
@@ -2499,4 +2590,18 @@ func getErrorTypeName(err error) string {
 	// Remove "Error" suffix and convert to lowercase
 	typeName = strings.TrimSuffix(typeName, "Error")
 	return strings.ToLower(typeName)
+}
+
+// registeredNames returns the names of the registered modules and plugins.
+func (lm *lifecycleManager) registeredNames() []string {
+	var names []string
+	if lm.registry != nil {
+		names = append(names, lm.registry.List()...)
+	}
+	if lm.pluginRegistry != nil {
+		for _, plugin := range lm.pluginRegistry.All() {
+			names = append(names, plugin.Name())
+		}
+	}
+	return names
 }

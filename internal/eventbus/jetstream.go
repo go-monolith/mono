@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	monoerrors "github.com/go-monolith/mono/pkg/errors"
 	"github.com/go-monolith/mono/pkg/types"
@@ -357,4 +358,49 @@ func WrapJetStreamMsg(msg jetstream.Msg) *types.Msg {
 		// Store the underlying jetstream.Msg for acknowledgment support
 		NatsMsg: msg,
 	}
+}
+
+// Ready reports whether JetStream answers for the account: it requests the
+// account info, which succeeds only when JetStream is enabled and, in a
+// cluster, the meta group has a leader. Like ConsumerInfo, it is a concrete
+// method rather than part of the EventStream interface.
+func (j *NatsJetStream) Ready(ctx context.Context) error {
+	if _, err := j.js.AccountInfo(ctx); err != nil {
+		return fmt.Errorf("JetStream account info: %w", err)
+	}
+	return nil
+}
+
+// nonDurableDefaultInactiveThreshold is the inactivity threshold nats-server
+// gives a non-durable consumer that sets none (JsDeleteWaitTimeDefault); the
+// consumer's info reports it as its configured threshold.
+const nonDurableDefaultInactiveThreshold = 5 * time.Second
+
+// ExtendInactiveThreshold sets the inactivity threshold of a non-durable pull
+// consumer left at the server's default (5s) to d, keeping the rest of its
+// configuration. The server deletes a non-durable consumer that has not been
+// pulled for its threshold, counted from when it becomes leader, which since
+// nats-server v2.14.10 includes a server start. A durable consumer, a push
+// consumer, a missing one, or one whose threshold was set explicitly is left
+// unchanged, and the method reports false.
+func (j *NatsJetStream) ExtendInactiveThreshold(ctx context.Context, streamName, consumerName string, d time.Duration) (bool, error) {
+	consumer, err := j.js.Consumer(ctx, streamName, consumerName)
+	if errors.Is(err, jetstream.ErrConsumerNotFound) || errors.Is(err, jetstream.ErrNotPullConsumer) {
+		return false, nil // deleted since it was listed, or a push consumer: nothing to protect
+	}
+	if err != nil {
+		return false, fmt.Errorf("failed to get consumer %s on stream %s: %w", consumerName, streamName, err)
+	}
+	cfg := consumer.CachedInfo().Config
+	defaultThreshold := cfg.InactiveThreshold == 0 || cfg.InactiveThreshold == nonDurableDefaultInactiveThreshold
+	if cfg.Durable != "" || !defaultThreshold || d <= 0 {
+		return false, nil
+	}
+	cfg.InactiveThreshold = d
+	if _, err := j.js.UpdateConsumer(ctx, streamName, cfg); err != nil {
+		return false, fmt.Errorf("failed to extend the inactivity threshold of consumer %s on stream %s: %w", consumerName, streamName, err)
+	}
+	j.logger.Debug("Consumer inactivity threshold extended",
+		"stream", streamName, "consumer", consumerName, "threshold", d)
+	return true, nil
 }
