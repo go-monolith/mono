@@ -1,0 +1,8 @@
+# Build context is the repository root; send only what the build needs.
+.git
+**/dist
+**/*.test
+**/coverage*
+bench
+docs
+test

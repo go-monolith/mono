@@ -132,6 +132,7 @@ Modules communicate through NATS messaging patterns rather than direct method ca
 | [analytics](examples/analytics/) | Channel services for high-performance in-process communication |
 | [event-emitter](examples/event-emitter/) | Event publishing with EventEmitter and EventConsumer |
 | [auto-tls](examples/auto-tls/) | Automatic Let's Encrypt certificates for client-to-server connections |
+| [k8s-cluster](examples/k8s-cluster/) | Two replicas on Kubernetes forming one NATS cluster with clustered JetStream |
 
 ## Built-in Components
 
