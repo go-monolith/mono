@@ -154,7 +154,7 @@ Benchmarks are designed to run on:
 - **CPU**: 11 vCPUs (ARM64 or x86_64)
 - **Memory**: 4GB+ recommended
 - **OS**: Linux, macOS, or Windows
-- **Go**: 1.25+
+- **Go**: 1.26+
 
 ### Accuracy Considerations
 - Each benchmark runs multiple iterations (b.N) for statistical accuracy

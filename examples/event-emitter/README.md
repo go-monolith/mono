@@ -97,7 +97,7 @@ This example demonstrates two ways to register event consumers:
 
 ### Prerequisites
 
-- Go 1.25 or higher
+- Go 1.26 or higher
 - Framework installed: `go get github.com/go-monolith/mono`
 
 ### Run the Example

@@ -1,7 +1,7 @@
 # Mono Framework
 
 [![Go Reference](https://pkg.go.dev/badge/github.com/go-monolith/mono.svg)](https://pkg.go.dev/github.com/go-monolith/mono)
-[![Go Version](https://img.shields.io/badge/go-1.25+-blue.svg)](https://golang.org/dl/)
+[![Go Version](https://img.shields.io/badge/go-1.26+-blue.svg)](https://golang.org/dl/)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 [![codecov](https://codecov.io/gh/go-monolith/mono/graph/badge.svg)](https://codecov.io/gh/go-monolith/mono)
 

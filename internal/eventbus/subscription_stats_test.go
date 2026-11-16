@@ -58,22 +58,27 @@ func TestSubscription_PendingLimitsAndClientStats(t *testing.T) {
 		t.Fatalf("Flush: %v", err)
 	}
 
+	// A message can be dropped before the dispatcher has handed the first one
+	// to the (blocked) handler, so wait for both counters rather than reading
+	// Delivered as soon as a drop shows.
 	deadline := time.Now().Add(5 * time.Second)
 	for {
 		dropped, err := reader.Dropped()
 		if err != nil {
 			t.Fatalf("Dropped: %v", err)
 		}
-		if dropped > 0 {
+		n, err := reader.Delivered()
+		if err != nil {
+			t.Fatalf("Delivered: %v", err)
+		}
+		if dropped > 0 && n >= 1 {
 			break
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("no message was dropped with a pending limit of 1 and a blocked handler (delivered=%d)", delivered.Load())
+			t.Fatalf("want a dropped and a delivered message with a pending limit of 1 and a blocked handler, got dropped=%d delivered=%d (handler saw %d)",
+				dropped, n, delivered.Load())
 		}
 		time.Sleep(5 * time.Millisecond)
-	}
-	if n, err := reader.Delivered(); err != nil || n < 1 {
-		t.Fatalf("Delivered = %d (%v), want at least 1", n, err)
 	}
 	if msgs, bytes, err := reader.Pending(); err != nil || msgs < 0 || bytes < 0 {
 		t.Fatalf("Pending = %d/%d (%v)", msgs, bytes, err)
