@@ -353,7 +353,7 @@ Enables NATS clustering for distributed deployments.
 
 **Route URLs** must have the form `nats://[user:password@]host:port`. A path, query, fragment or opaque part is rejected, which also catches an unencoded `/`, `?` or `#` in a password: percent-encode special characters in credentials. Errors name a route by its index and never quote it. [`WithNATSClusterAuth`](#withnatsclusterauth) adds credentials to every route that has none.
 
-**With a config file** ([`WithNATSConfigFile`](#withnatsconfigfile)), the values are merged into the file's `cluster{}` block: name, host, port and routes come from this option, and the file's other cluster settings (authorization, TLS, permissions, pool size, compression) apply. Before v0.2.0 the option replaced the whole block and those settings were silently dropped.
+**With a config file** ([`WithNATSConfigFile`](#withnatsconfigfile)), the values are merged into the file's `cluster{}` block: name, host and port come from this option, its routes are added to the file's `cluster.routes` (the server uses both lists), and the file's other cluster settings (authorization, TLS, permissions, pool size, compression) apply. Before v0.2.0 the option replaced the whole block and those settings were silently dropped.
 
 In Kubernetes, use the fully qualified names of a StatefulSet's pods behind a headless Service (`<pod>.<service>.<namespace>.svc.cluster.local`). See the [Clustering and Kubernetes guide](../guides/clustering.md).
 
@@ -546,7 +546,7 @@ func WithJetStreamReadyTimeout(d time.Duration) MonoFrameworkOption
 Bounds how long `Start` waits for JetStream. Before it starts plugins and modules, `Start` waits until JetStream answers. It then retries each JetStream setup step (the stream, consumer and schedule setup of stream consumer, cron and event stream consumer services, and the planning of event stream durables) while it fails with an error that can clear by itself:
 
 - a timeout of one attempt, no responders, or no stream response;
-- JetStream API errors 10004 (incomplete results), 10005 (no suitable peers for placement), 10008 (JetStream system temporarily unavailable), 10118, 10119, 10194 and 10195 (stream or consumer offline).
+- JetStream API errors 10004 (incomplete results), 10005 (no suitable peers for placement), 10008 (JetStream system temporarily unavailable), 10118 and 10119 (stream or consumer offline while its leader recovers). Not 10194/10195 ("offline" with a reason: an unsupported configuration or API level, or a decoding error), which do not clear by themselves.
 
 Any other error fails `Start` at once. Each attempt is bounded by 15s, and the wait between attempts grows from 250ms to 2s. The wait and each retried step are bounded by `d` (and by the `Start` context); a step still failing after `d` fails `Start` with an error that names `WithJetStreamReadyTimeout`. While it waits, the framework logs `Waiting for JetStream` at Info (at most every 10s per step), and `JetStream step succeeded after waiting` once the step succeeds.
 

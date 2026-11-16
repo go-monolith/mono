@@ -521,8 +521,9 @@ func WithJetStreamStorageDir(dir string) MonoFrameworkOption {
 // nats://[user:password@]host:port; WithNATSClusterAuth adds the credentials.
 //
 // With a NATS config file (WithNATSConfigFile), the values are merged into the
-// file's cluster{} block: name, host, port and routes come from here, and the
-// file's other cluster settings (authorization, TLS, permissions, pool size,
+// file's cluster{} block: name, host and port come from here, routes are added
+// to the file's cluster.routes (the server uses both lists), and the file's
+// other cluster settings (authorization, TLS, permissions, pool size,
 // compression) apply. Before v0.2.0 they were silently dropped.
 //
 // Do not enable clustering on a storage directory that already holds JetStream

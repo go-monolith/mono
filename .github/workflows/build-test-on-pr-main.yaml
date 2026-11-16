@@ -10,7 +10,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        go-version: ['1.21', '1.22', '1.23', '1.24', '1.25', '1.26']
+        # go.mod requires Go 1.26: older releases would only pass by
+        # downloading a 1.26 toolchain, so they are not tested.
+        go-version: ['1.26', '1.27']
 
     name: Go ${{ matrix.go-version }}
 

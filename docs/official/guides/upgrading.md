@@ -226,7 +226,7 @@ Before it starts plugins and modules, `Start` now waits until JetStream answers.
 
 ### `WithNATSClustering` is merged into the config file
 
-**Breaking for applications that use `WithNATSClustering` together with `WithNATSConfigFile`.** The option used to replace the file's `cluster{}` block. It is now merged into it: name, host, port and routes come from the option, and the file's authorization, TLS, permissions, pool size and compression now apply, where before they were silently dropped.
+**Breaking for applications that use `WithNATSClustering` together with `WithNATSConfigFile`.** The option used to replace the file's `cluster{}` block. It is now merged into it: name, host and port come from the option, its routes are added to the file's `cluster.routes` (the server uses both lists), and the file's authorization, TLS, permissions, pool size and compression now apply, where before they were silently dropped.
 
 If your file has a `cluster{}` block with `authorization` or `tls`, check that your routes still authenticate: the routes must now present those credentials (use [`WithNATSClusterAuth`](../api/framework.md#withnatsclusterauth) or credentials in the route URLs) and complete the TLS handshake.
 
