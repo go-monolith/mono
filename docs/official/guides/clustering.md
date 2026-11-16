@@ -163,6 +163,16 @@ While a stream or consumer is unavailable, the fetch loops of stream consumer, e
 
 On shutdown, nats-server steps down the RAFT leaders it holds; the framework adds no leadership transfer of its own.
 
+## Protecting Existing Data
+
+These situations can delete JetStream data. The framework cannot detect most of them, so plan for them.
+
+- **Do not turn an existing standalone store into a cluster member.** When a server starts in clustered mode, the cluster's meta layer is the source of truth: about 30s after it recovers, nats-server deletes every locally stored stream and consumer the meta layer does not know. That includes your own streams, KV buckets and object stores, and all consumer positions. Start the cluster on empty storage directories, then move the data with `nats stream backup` / `restore`, or with mirrors or sources from the old server.
+- **Do not rename a JetStream server.** A server's RAFT identity is derived from its name, so a server with a new name is a new peer, and the cluster removes the local replicas assigned to the old one. A single-replica stream on that server is lost. Keep the name stable, which is why a StatefulSet pod name fits. When both `WithNATSServerName` and `server_name` in a config file are set, `Start` fails unless they are equal.
+- **Single-replica streams live on one server.** Losing that server's volume loses them. Use `WithJetStreamDefaultReplicas(3)`, or `Replicas` on your own streams. The KV and object stores of the `kv-jetstream` and `fs-jetstream` plugins are not covered by this option, so set their replicas in the plugin configuration.
+- **Non-durable consumers.** A consumer created with a `Name` only is deleted by the server once it has not been pulled for its inactivity threshold. That replays its stream when the consumer is recreated, and on an interest-retention stream it removes the messages only that consumer still needed. The framework's own consumers are durable. At start it gives non-durable consumers still at the default 5s threshold, yours included, one hour (see [Upgrading](upgrading.md#go-126-and-nats-server-v21410)). Use durable consumers for anything that must survive.
+- **Rolling back.** See [Upgrading to v0.2.0](upgrading.md#rolling-back-from-v020).
+
 ## Kubernetes
 
 The [Kubernetes cluster example](../../../examples/k8s-cluster/README.md) has complete manifests. These are the settings that matter for a JetStream cluster.

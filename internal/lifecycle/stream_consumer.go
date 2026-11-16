@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/go-monolith/mono/internal/jsprotect"
 	"github.com/go-monolith/mono/pkg/types"
 	"github.com/nats-io/nats.go/jetstream"
 )
@@ -28,7 +29,10 @@ import (
 // updates: the server still applies the non-durable inactivity threshold to the
 // update that sets Durable (it evaluates the threshold against the previous
 // configuration), and the second update, to what is now a durable, clears it
-// (or sets the caller's InactiveThreshold). The deliver policy and start
+// (or sets the caller's InactiveThreshold). The first update sends the start
+// protection threshold (an hour) rather than none, so that a conversion
+// interrupted between the two updates leaves a durable the server keeps for an
+// hour instead of five seconds; the next start finishes it. The deliver policy and start
 // position of an existing consumer cannot be changed by an update; a
 // configuration that changes them fails, as it did before, and since the
 // consumer is durable it no longer disappears by itself: delete it (nats
@@ -49,7 +53,7 @@ func (lm *lifecycleManager) ensureStreamConsumer(ctx context.Context, es types.E
 		return lm.createOrUpdateStreamConsumer(ctx, es, stream, cfg)
 	}
 
-	_, err = store.UpdateConsumer(ctx, stream, cfg)
+	_, err = store.UpdateConsumer(ctx, stream, protectedConversion(cfg))
 	if isCronConsumerMissing(err) {
 		// Deleted between the lookup and the update (its inactivity
 		// threshold expired): create it instead.
@@ -75,4 +79,15 @@ func (lm *lifecycleManager) createOrUpdateStreamConsumer(ctx context.Context, es
 		return nil, fmt.Errorf("failed to create consumer %s: %w", cfg.Name, err)
 	}
 	return consumer, nil
+}
+
+// protectedConversion returns cfg for the first update of a conversion from a
+// non-durable consumer: with at least the start protection threshold, since
+// the server would otherwise give the new durable the 5s non-durable default
+// until the second update lands.
+func protectedConversion(cfg types.ConsumerConfig) types.ConsumerConfig {
+	if cfg.InactiveThreshold < jsprotect.Threshold {
+		cfg.InactiveThreshold = jsprotect.Threshold
+	}
+	return cfg
 }

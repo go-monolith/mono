@@ -4,10 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strings"
 	"time"
 
 	"github.com/go-monolith/mono/internal/eventbus"
+	"github.com/go-monolith/mono/internal/jsprotect"
 	"github.com/go-monolith/mono/pkg/types"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
@@ -41,14 +41,6 @@ const (
 	jetStreamProbeTimeout = 2 * time.Second
 )
 
-// nonDurableProtectThreshold is the inactivity threshold given at startup to
-// the framework's consumers that the server still treats as non-durable (see
-// protectNonDurableConsumers). It only has to outlast the start: the setup
-// then converts stream consumer and cron consumers to durables, and a legacy
-// event stream durable keeps it, so the server removes one that is no longer
-// used an hour after its last pull instead of five seconds.
-const nonDurableProtectThreshold = time.Hour
-
 // jetStreamReadiness reports whether JetStream answers. The framework's
 // JetStream wrapper implements it; an EventStream without it (a test double)
 // is treated as always ready.
@@ -56,13 +48,10 @@ type jetStreamReadiness interface {
 	Ready(ctx context.Context) error
 }
 
-// consumerProtector lists consumers and extends the inactivity threshold of a
-// non-durable one. The framework's JetStream wrapper implements it; without it
-// (a test double) nothing is protected.
+// consumerProtector runs a jsprotect pass. The framework's JetStream wrapper
+// implements it; without it (a test double) nothing is protected.
 type consumerProtector interface {
-	StreamNames(ctx context.Context) ([]string, error)
-	ConsumerNames(ctx context.Context, stream string) ([]string, error)
-	ExtendInactiveThreshold(ctx context.Context, stream, consumer string, d time.Duration) (bool, error)
+	ProtectConsumers(ctx context.Context, d time.Duration) (protected int, complete bool)
 }
 
 // The framework's JetStream wrapper must keep implementing both; otherwise the
@@ -125,103 +114,49 @@ func isJetStreamNotEnabled(err error) bool {
 		(apiErr.ErrorCode == jetstream.JSErrCodeJetStreamNotEnabled || apiErr.ErrorCode == jetstream.JSErrCodeJetStreamNotEnabledForAccount)
 }
 
-// protectNonDurableConsumers extends, before any module starts, the inactivity
-// threshold of the framework's consumers that the server still treats as
-// non-durable, so that the server cannot delete them before the setup has
-// converted them to durables or carried their position over.
-//
-// Earlier framework versions created stream consumer service consumers, cron
-// consumers (up to v0.0.12) and event stream consumers (up to v0.0.11) with a
-// Name only. Since nats-server v2.14.10 such a consumer is deleted about five
-// seconds after the server starts unless it is pulled, and the setup runs only
-// after every module has started; a deleted consumer would be recreated from
-// its deliver policy and replay its stream. A consumer is taken to be the
-// framework's when its name starts with the name of a registered module or
-// plugin followed by "-" (<module>-<service>, <module>-<service>-cron,
-// <event-module>-<event>-<version>-<n>). Only non-durable pull consumers left
-// at the server's default threshold are changed, and only their threshold: a
-// consumer whose threshold was chosen explicitly is not the framework's. The
-// pass is bounded by the JetStream ready timeout as a whole. It runs right
-// after JetStream answers, before plugins and modules start, since the
-// threshold runs from when the consumer's leader is elected.
+// protectNonDurableConsumers sweeps, before plugins and modules start, every
+// consumer the server may still delete for inactivity and extends its
+// threshold (see package jsprotect). The embedded server's manager did a first
+// pass right after the server started and was stopped when Start began; this
+// sweep covers consumers whose leaders were elected only once the cluster had
+// quorum. It runs right after the JetStream wait, retries passes that could
+// not check everything for at most the JetStream ready timeout, and is
+// finished before the setup converts the framework's consumers to durables.
 //
 // Best effort: a failure is logged and the start goes on.
-func (lm *lifecycleManager) protectNonDurableConsumers(ctx context.Context, moduleNames []string) {
+func (lm *lifecycleManager) protectNonDurableConsumers(ctx context.Context) {
 	es, ok := lm.eventStream()
-	if !ok || len(moduleNames) == 0 {
+	if !ok {
 		return
 	}
 	protector, ok := es.(consumerProtector)
 	if !ok {
 		return
 	}
-	prefixes := make([]string, 0, len(moduleNames))
-	for _, name := range moduleNames {
-		prefixes = append(prefixes, types.SanitizeConsumerName(name)+"-")
-	}
-	// One bound for the whole pass: it is best effort and must not hold the
-	// start up for a retry budget per stream or consumer.
 	ctx, cancel := context.WithTimeout(ctx, lm.jetStreamReadyTimeout())
 	defer cancel()
 
-	var streams []string
-	if err := lm.retryJetStream(ctx, "list streams", func(ctx context.Context) error {
-		var err error
-		streams, err = protector.StreamNames(ctx)
-		return err
-	}); err != nil {
-		lm.logger.Warn("Could not list streams to protect non-durable consumers", "error", err)
-		return
-	}
-
-	protected := 0
-	for _, stream := range streams {
-		var names []string
-		if err := lm.retryJetStream(ctx, "list consumers of "+stream, func(ctx context.Context) error {
-			var err error
-			names, err = protector.ConsumerNames(ctx, stream)
-			return err
-		}); err != nil {
-			lm.logger.Warn("Could not list consumers to protect non-durable ones", "stream", stream, "error", err)
-			continue
+	total := 0
+	backoff := jetStreamRetryMinBackoff
+	for {
+		passCtx, cancelPass := context.WithTimeout(ctx, jetStreamAttemptTimeout)
+		protected, complete := protector.ProtectConsumers(passCtx, jsprotect.Threshold)
+		cancelPass()
+		total += protected
+		if complete {
+			break
 		}
-		for _, name := range names {
-			if !hasAnyPrefix(name, prefixes) {
-				continue
-			}
-			if ctx.Err() != nil {
-				lm.logger.Warn("Stopped protecting non-durable consumers: out of time", "stream", stream)
-				return
-			}
-			var extended bool
-			err := lm.retryJetStream(ctx, "protect consumer "+name, func(ctx context.Context) error {
-				var err error
-				extended, err = protector.ExtendInactiveThreshold(ctx, stream, name, nonDurableProtectThreshold)
-				return err
-			})
-			switch {
-			case err != nil:
-				lm.logger.Warn("Could not protect a non-durable consumer; the server may delete it before it is set up",
-					"stream", stream, "consumer", name, "error", err)
-			case extended:
-				protected++
-				lm.logger.Debug("Protected non-durable consumer until setup", "stream", stream, "consumer", name)
-			}
+		if !sleepCtx(ctx, backoff) {
+			lm.logger.Warn("Could not check every JetStream consumer for an inactivity threshold; " +
+				"a non-durable consumer may be deleted by the server before it is set up")
+			break
 		}
+		backoff = min(backoff*2, jetStreamRetryMaxBackoff)
 	}
-	if protected > 0 {
+	if total > 0 {
 		lm.logger.Info("Protected non-durable consumers until they are set up",
-			"count", protected, "inactive_threshold", nonDurableProtectThreshold)
+			"count", total, "inactive_threshold", jsprotect.Threshold)
 	}
-}
-
-func hasAnyPrefix(s string, prefixes []string) bool {
-	for _, p := range prefixes {
-		if strings.HasPrefix(s, p) {
-			return true
-		}
-	}
-	return false
 }
 
 // retryJetStream runs step until it succeeds, retrying while it fails with an

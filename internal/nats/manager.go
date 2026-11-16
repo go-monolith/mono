@@ -40,6 +40,13 @@ type NATSManager interface {
 	// JetStreamHealth reports the JetStream state of the embedded server; nil
 	// when the server is not running or JetStream is not enabled.
 	JetStreamHealth() *types.JetStreamHealth
+
+	// StopConsumerProtection stops the consumer protection the manager runs
+	// after the server starts (see package jsprotect) and waits for it to
+	// end. The application calls it when Start begins: from then on the
+	// lifecycle protects and converts the consumers itself. Safe to call more
+	// than once.
+	StopConsumerProtection()
 }
 
 // ServerInfo contains information about the running NATS server.
@@ -63,6 +70,11 @@ type natsManager struct {
 	// autoTLS is non-nil only while the server is running with AutoTLS
 	// enabled; it owns the ACME challenge listener.
 	autoTLS *autoTLS
+
+	// protectStop stops the background consumer protection (see protect.go)
+	// and protectDone is closed when it has ended; nil without JetStream.
+	protectStop chan struct{}
+	protectDone chan struct{}
 }
 
 // NewNATSManager creates a new NATS manager with the given options.
@@ -227,6 +239,13 @@ func (m *natsManager) Start(ctx context.Context) error {
 	}
 
 	if m.config.ServerName != "" {
+		// A JetStream server's RAFT identity is derived from its name: a
+		// different name makes it a new peer, and the cluster removes the
+		// local replicas assigned to the old one. Refuse to rename silently.
+		if opts.ServerName != "" && opts.ServerName != m.config.ServerName {
+			return fmt.Errorf("server name %q (WithNATSServerName) differs from server_name %q in the NATS config file; "+
+				"renaming a JetStream server discards its local replicas: use one of them", m.config.ServerName, opts.ServerName)
+		}
 		opts.ServerName = m.config.ServerName
 	}
 	if err := applyClusterAuth(opts, m.config.ClusterUsername, m.config.ClusterPassword); err != nil {
@@ -352,6 +371,11 @@ func (m *natsManager) Start(ctx context.Context) error {
 		}
 		m.js = js
 		m.logger.Info("JetStream enabled", "storage_dir", m.config.StorageDir)
+
+		// Before any application code runs: the server has just recovered
+		// its consumers, and since v2.14.10 a non-durable one is deleted
+		// about 5s later unless it is pulled (see protect.go).
+		m.startConsumerProtection(js)
 	}
 
 	startupOK = true
@@ -369,6 +393,8 @@ func (m *natsManager) Stop(ctx context.Context) error {
 	conn := m.conn
 	m.conn = nil
 	m.mu.Unlock()
+
+	m.StopConsumerProtection()
 
 	// Drain the client connection before stopping the server: closing it
 	// outright can drop a message the server has already routed back to this

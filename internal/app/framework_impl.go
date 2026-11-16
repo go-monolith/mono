@@ -95,13 +95,16 @@ func NewFrameworkAppInstance(logger types.Logger, settings Settings, natsOptions
 		return nil, fmt.Errorf("failed to start NATS: %w", err)
 	}
 
-	// Step 3: Get NATS connection and create EventBus
+	// Step 3: Get NATS connection and create EventBus. The server is
+	// running from here on: stop it if creation fails.
 	conn, err := fwApp.natsManager.Connection()
 	if err != nil {
+		fwApp.stopNATSAfterFailedCreate()
 		return nil, fmt.Errorf("failed to get NATS connection: %w", err)
 	}
 	fwApp.eventBus, err = eventbus.NewEventBus(conn, fwApp.logger)
 	if err != nil {
+		fwApp.stopNATSAfterFailedCreate()
 		return nil, fmt.Errorf("failed to create EventBus: %w", err)
 	}
 
@@ -200,6 +203,10 @@ func (fw *frameworkApplication) Start(ctx context.Context) error {
 
 	fw.logger.Info("Starting application")
 
+	// From here the lifecycle protects and converts consumers itself; a
+	// pass of the manager's early protection must not run concurrently with
+	// the conversion and write back a consumer's old configuration.
+	fw.natsManager.StopConsumerProtection()
 	if err := fw.lifecycleManager.Start(ctx); err != nil {
 		fw.mu.Lock()
 		fw.state = types.StateCreated
@@ -442,4 +449,15 @@ func (fw *frameworkApplication) Health(ctx context.Context) types.FrameworkHealt
 // Logger returns the framework's internal logger.
 func (fw *frameworkApplication) Logger() types.Logger {
 	return fw.logger
+}
+
+// stopNATSAfterFailedCreate stops the embedded server when creating the
+// application fails after it started, so neither the server nor its
+// background consumer protection outlives the failed call.
+func (fw *frameworkApplication) stopNATSAfterFailedCreate() {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := fw.natsManager.Stop(ctx); err != nil {
+		fw.logger.Warn("Failed to stop NATS after a failed application create", "error", err)
+	}
 }

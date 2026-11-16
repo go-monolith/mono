@@ -1009,6 +1009,8 @@ func (m *mockNATSManager) JetStreamHealth() *types.JetStreamHealth {
 	return m.jetStreamHealth
 }
 
+func (m *mockNATSManager) StopConsumerProtection() {}
+
 // mockLifecycleManager implements lifecycle.LifecycleManager for testing
 type mockLifecycleManager struct {
 	startErr        error

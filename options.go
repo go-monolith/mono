@@ -525,6 +525,12 @@ func WithJetStreamStorageDir(dir string) MonoFrameworkOption {
 // file's other cluster settings (authorization, TLS, permissions, pool size,
 // compression) apply. Before v0.2.0 they were silently dropped.
 //
+// Do not enable clustering on a storage directory that already holds JetStream
+// data from a standalone server: about 30s after a clustered server recovers,
+// nats-server deletes every local stream and consumer the cluster's meta
+// layer does not know. Start the cluster on empty storage and move the data
+// with backup and restore, mirrors or sources.
+//
 // Example (seed node):
 //
 //	mono.NewMonoApplication(
@@ -597,6 +603,11 @@ func WithNATSClustering(clusterName, clusterHost string, clusterPort int, routes
 // a random value is neither. NewMonoApplication returns an error when
 // clustering and JetStream are both configured programmatically without a
 // server name and without a config file that could provide one.
+//
+// Renaming a JetStream server makes it a new peer, and the cluster removes the
+// local replicas assigned to the old name. When a NATS config file also sets
+// server_name, Start fails unless the two are equal, rather than renaming the
+// server silently.
 //
 // Example:
 //

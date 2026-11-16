@@ -737,13 +737,13 @@ func (lm *lifecycleManager) Start(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	// Step -0.5: keep the framework's consumers that the server still treats
-	// as non-durable from being deleted before the setup (Step 5) converts
-	// them: plugin, middleware and module Start may together take longer than
-	// their inactivity threshold, which runs from when JetStream elected their
-	// leaders.
+	// Step -0.5: second sweep (the embedded server's manager did the first
+	// right after the server started) over consumers the server may still
+	// delete for inactivity before the setup (Step 5) converts them: plugin,
+	// middleware and module Start may together take longer than their
+	// threshold, which runs from when JetStream elected their leaders.
 	if jetStreamEnabled {
-		lm.protectNonDurableConsumers(ctx, lm.registeredNames())
+		lm.protectNonDurableConsumers(ctx)
 	}
 
 	// Step 0: Start plugin modules FIRST (before middleware)
@@ -2590,18 +2590,4 @@ func getErrorTypeName(err error) string {
 	// Remove "Error" suffix and convert to lowercase
 	typeName = strings.TrimSuffix(typeName, "Error")
 	return strings.ToLower(typeName)
-}
-
-// registeredNames returns the names of the registered modules and plugins.
-func (lm *lifecycleManager) registeredNames() []string {
-	var names []string
-	if lm.registry != nil {
-		names = append(names, lm.registry.List()...)
-	}
-	if lm.pluginRegistry != nil {
-		for _, plugin := range lm.pluginRegistry.All() {
-			names = append(names, plugin.Name())
-		}
-	}
-	return names
 }

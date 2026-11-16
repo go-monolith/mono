@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-monolith/mono/internal/jsprotect"
 	"github.com/go-monolith/mono/pkg/types"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
@@ -239,88 +240,69 @@ func TestWaitForJetStream(t *testing.T) {
 	})
 }
 
-// fakeProtector lists streams and consumers and records threshold extensions.
+// fakeProtector reports the queued pass results of ProtectConsumers.
 type fakeProtector struct {
 	*mockEventStream
-	mu          sync.Mutex
-	streams     []string
-	streamsErrs []error
-	consumers   map[string][]string
-	listErr     map[string]error
-	extendErr   map[string]error
-	notExtended map[string]bool // reported as already durable or protected
-	extended    []string
+	mu     sync.Mutex
+	passes []struct {
+		protected int
+		complete  bool
+	}
+	calls int
 }
 
-func (f *fakeProtector) StreamNames(context.Context) ([]string, error) {
+func (f *fakeProtector) ProtectConsumers(_ context.Context, d time.Duration) (int, bool) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if len(f.streamsErrs) > 0 {
-		err := f.streamsErrs[0]
-		f.streamsErrs = f.streamsErrs[1:]
-		return nil, err
+	f.calls++
+	if d != jsprotect.Threshold {
+		return 0, false
 	}
-	return f.streams, nil
-}
-
-func (f *fakeProtector) ConsumerNames(_ context.Context, stream string) ([]string, error) {
-	return f.consumers[stream], f.listErr[stream]
-}
-
-func (f *fakeProtector) ExtendInactiveThreshold(_ context.Context, stream, consumer string, d time.Duration) (bool, error) {
-	if d != nonDurableProtectThreshold {
-		return false, fmt.Errorf("unexpected threshold %s", d)
+	if len(f.passes) == 0 {
+		return 0, false
 	}
-	if err := f.extendErr[consumer]; err != nil {
-		return false, err
+	p := f.passes[0]
+	if len(f.passes) > 1 {
+		f.passes = f.passes[1:]
 	}
-	if f.notExtended[consumer] {
-		return false, nil
-	}
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.extended = append(f.extended, stream+"/"+consumer)
-	return true, nil
+	return p.protected, p.complete
 }
 
 func TestProtectNonDurableConsumers(t *testing.T) {
-	es := &fakeProtector{
-		mockEventStream: &mockEventStream{},
-		streams:         []string{"ORDERS", "MONO_CRON_billing_nightly", "BROKEN", "APP"},
-		streamsErrs:     []error{nats.ErrTimeout}, // retried
-		consumers: map[string][]string{
-			"ORDERS":                    {"billing-orders", "billing-PaymentProcessed-v1-3", "dashboard"},
-			"MONO_CRON_billing_nightly": {"billing-nightly-cron"},
-			"APP":                       {"my-own-consumer", "billing-already-durable", "billing-fails"},
-		},
-		listErr:     map[string]error{"BROKEN": errors.New("list failed")},
-		extendErr:   map[string]error{"billing-fails": errors.New("update failed")},
-		notExtended: map[string]bool{"billing-already-durable": true},
-	}
-	lm, logger := newReadyTestManager(es)
-	lm.protectNonDurableConsumers(context.Background(), []string{"billing", "my.plugin"})
-
-	want := []string{
-		"ORDERS/billing-orders",
-		"ORDERS/billing-PaymentProcessed-v1-3",
-		"MONO_CRON_billing_nightly/billing-nightly-cron",
-	}
-	slices.Sort(want)
-	got := slices.Sorted(slices.Values(es.extended))
-	if !slices.Equal(got, want) {
-		t.Errorf("extended = %v, want %v", got, want)
-	}
-	if !logger.hasWarnContaining("Could not list consumers") || !logger.hasWarnContaining("Could not protect a non-durable consumer") {
-		t.Errorf("failures not logged: %v", logger.entries)
-	}
-	if !logger.hasEntryContaining("INFO: Protected non-durable consumers until they are set up") {
-		t.Errorf("summary not logged: %v", logger.entries)
-	}
+	t.Run("retries an incomplete pass and sums what was protected", func(t *testing.T) {
+		es := &fakeProtector{mockEventStream: &mockEventStream{}}
+		es.passes = append(es.passes,
+			struct {
+				protected int
+				complete  bool
+			}{2, false},
+			struct {
+				protected int
+				complete  bool
+			}{1, true})
+		lm, logger := newReadyTestManager(es)
+		lm.protectNonDurableConsumers(context.Background())
+		if es.calls != 2 {
+			t.Errorf("passes = %d, want 2", es.calls)
+		}
+		if !logger.hasEntryContaining("INFO: Protected non-durable consumers until they are set up [count 3") {
+			t.Errorf("summary not logged: %v", logger.entries)
+		}
+	})
+	t.Run("gives up after the ready timeout", func(t *testing.T) {
+		es := &fakeProtector{mockEventStream: &mockEventStream{}}
+		lm, logger := newReadyTestManager(es)
+		lm.SetJetStreamReadyTimeout(600 * time.Millisecond)
+		lm.protectNonDurableConsumers(context.Background())
+		if !logger.hasWarnContaining("Could not check every JetStream consumer") {
+			t.Errorf("giving up not logged: %v", logger.entries)
+		}
+	})
 }
 
 func TestProtectNonDurableConsumers_NoProtector(t *testing.T) {
 	lm, logger := newReadyTestManager(&mockEventStream{})
-	lm.protectNonDurableConsumers(context.Background(), []string{"billing"})
+	lm.protectNonDurableConsumers(context.Background())
 	if len(logger.entries) != 0 {
 		t.Errorf("nothing should happen without a protector: %v", logger.entries)
 	}
@@ -355,6 +337,14 @@ func TestEnsureStreamConsumer(t *testing.T) {
 			if c.Durable != "billing-orders" {
 				t.Errorf("update sent Durable %q", c.Durable)
 			}
+		}
+		// The first update keeps the consumer for an hour should the second
+		// never land; the second sets the caller's threshold (none).
+		if got := store.configs[0].InactiveThreshold; got != jsprotect.Threshold {
+			t.Errorf("first update threshold = %s, want %s", got, jsprotect.Threshold)
+		}
+		if got := store.configs[1].InactiveThreshold; got != 0 {
+			t.Errorf("second update threshold = %s, want 0", got)
 		}
 		if !logger.hasEntryContaining("INFO: Stream consumer converted to durable") {
 			t.Errorf("conversion not logged: %v", logger.entries)

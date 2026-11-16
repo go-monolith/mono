@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/go-monolith/mono/internal/jsprotect"
 	monoerrors "github.com/go-monolith/mono/pkg/errors"
 	"github.com/go-monolith/mono/pkg/types"
 	"github.com/nats-io/nats.go"
@@ -371,36 +372,10 @@ func (j *NatsJetStream) Ready(ctx context.Context) error {
 	return nil
 }
 
-// nonDurableDefaultInactiveThreshold is the inactivity threshold nats-server
-// gives a non-durable consumer that sets none (JsDeleteWaitTimeDefault); the
-// consumer's info reports it as its configured threshold.
-const nonDurableDefaultInactiveThreshold = 5 * time.Second
-
-// ExtendInactiveThreshold sets the inactivity threshold of a non-durable pull
-// consumer left at the server's default (5s) to d, keeping the rest of its
-// configuration. The server deletes a non-durable consumer that has not been
-// pulled for its threshold, counted from when it becomes leader, which since
-// nats-server v2.14.10 includes a server start. A durable consumer, a push
-// consumer, a missing one, or one whose threshold was set explicitly is left
-// unchanged, and the method reports false.
-func (j *NatsJetStream) ExtendInactiveThreshold(ctx context.Context, streamName, consumerName string, d time.Duration) (bool, error) {
-	consumer, err := j.js.Consumer(ctx, streamName, consumerName)
-	if errors.Is(err, jetstream.ErrConsumerNotFound) || errors.Is(err, jetstream.ErrNotPullConsumer) {
-		return false, nil // deleted since it was listed, or a push consumer: nothing to protect
-	}
-	if err != nil {
-		return false, fmt.Errorf("failed to get consumer %s on stream %s: %w", consumerName, streamName, err)
-	}
-	cfg := consumer.CachedInfo().Config
-	defaultThreshold := cfg.InactiveThreshold == 0 || cfg.InactiveThreshold == nonDurableDefaultInactiveThreshold
-	if cfg.Durable != "" || !defaultThreshold || d <= 0 {
-		return false, nil
-	}
-	cfg.InactiveThreshold = d
-	if _, err := j.js.UpdateConsumer(ctx, streamName, cfg); err != nil {
-		return false, fmt.Errorf("failed to extend the inactivity threshold of consumer %s on stream %s: %w", consumerName, streamName, err)
-	}
-	j.logger.Debug("Consumer inactivity threshold extended",
-		"stream", streamName, "consumer", consumerName, "threshold", d)
-	return true, nil
+// ProtectConsumers runs one jsprotect pass: every consumer the server may
+// delete for inactivity at start (see jsprotect.NeedsProtection) gets the
+// threshold d. It returns the number changed and whether every stream and
+// consumer could be checked.
+func (j *NatsJetStream) ProtectConsumers(ctx context.Context, d time.Duration) (int, bool) {
+	return jsprotect.Protect(ctx, j.js, d)
 }
