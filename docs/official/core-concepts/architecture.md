@@ -228,7 +228,7 @@ Reserved prefix `_mono.`; event definitions and service subjects using it are re
 
 **Properties**:
 - Reserved for framework use
-- Modules cannot publish here
+- Modules must not publish here (the event bus does not currently reject such publishes)
 - Internal only
 
 ## Data Flow Examples
