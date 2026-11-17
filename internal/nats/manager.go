@@ -251,6 +251,18 @@ func (m *natsManager) Start(ctx context.Context) error {
 	if err := applyClusterAuth(opts, m.config.ClusterUsername, m.config.ClusterPassword); err != nil {
 		return err
 	}
+	if m.config.SystemAccountUsername != "" || m.config.SystemAccountPassword != "" {
+		authBlock := false
+		if m.config.ConfigFile != "" {
+			var err error
+			if authBlock, err = configHasAuthorizationBlock(m.config.ConfigFile); err != nil {
+				return err
+			}
+		}
+		if err := applySystemAccount(opts, m.config.SystemAccountUsername, m.config.SystemAccountPassword, authBlock); err != nil {
+			return err
+		}
+	}
 	if err := validateClusteredJetStream(opts); err != nil {
 		return err
 	}

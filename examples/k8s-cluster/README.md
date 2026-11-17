@@ -33,7 +33,7 @@ instance serves every service, and the services behave as one application:
 | `Dockerfile` | Static binary on `distroless/static:nonroot` (~8 MB); build context is the repository root |
 | `Dockerfile.dockerignore` | Keeps the build context small |
 | `deploy/k8s.yaml` | Namespace, headless and HTTP Services, StatefulSet, PodDisruptionBudget |
-| `deploy/create-route-secret.sh` | Creates the Secret with a random route password |
+| `deploy/create-route-secret.sh` | Creates the Secret with a random route password and system account password |
 
 ## How the cluster is configured
 
@@ -106,6 +106,7 @@ mono.NewMonoApplication(
 | `POD_NAME` | hostname | instance and NATS server name |
 | `NATS_ROUTES` | (required) | comma-separated route URLs of every replica |
 | `NATS_ROUTE_PASSWORD` | unset | route password (`WithNATSClusterAuth`); unset means routes are not authenticated |
+| `NATS_SYSTEM_PASSWORD` | unset | password of the system account user `admin` (`WithNATSSystemAccount`), for `nats server report` and `nats server raft peer-remove`; unset means no system account user |
 | `NATS_CLUSTER_NAME` | `mono-demo` | NATS cluster name |
 | `NATS_CLUSTER_PORT` | `6222` | route listener port |
 | `JS_REPLICAS` | `3` | replicas of the framework's streams (at most the number of servers) |

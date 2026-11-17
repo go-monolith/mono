@@ -4,7 +4,8 @@
 //
 // Every replica runs the same configuration: its server name (POD_NAME, unique
 // and stable in a StatefulSet), the routes to all replicas (NATS_ROUTES), the
-// route password (NATS_ROUTE_PASSWORD) and the replicas of the framework's
+// route password (NATS_ROUTE_PASSWORD), the password of the system account
+// user "admin" (NATS_SYSTEM_PASSWORD, optional) and the replicas of the framework's
 // streams (JS_REPLICAS). Start waits for the other replicas, so they can start
 // together. An HTTP API on HTTP_ADDR exposes:
 //
@@ -52,6 +53,7 @@ type config struct {
 	clusterPort   int
 	routes        []string
 	routePassword string
+	systemPass    string
 	storeDir      string
 	replicas      int
 	readyTimeout  time.Duration
@@ -64,6 +66,7 @@ func loadConfig() (config, error) {
 		instance:      envOr("POD_NAME", hostname()),
 		clusterName:   envOr("NATS_CLUSTER_NAME", "mono-demo"),
 		routePassword: os.Getenv("NATS_ROUTE_PASSWORD"),
+		systemPass:    os.Getenv("NATS_SYSTEM_PASSWORD"),
 		storeDir:      envOr("JS_STORE_DIR", "/data/jetstream"),
 		httpAddr:      envOr("HTTP_ADDR", ":8080"),
 		natsDebug:     os.Getenv("NATS_DEBUG") == "true",
@@ -129,6 +132,12 @@ func run() error {
 	}
 	if cfg.routePassword != "" {
 		opts = append(opts, mono.WithNATSClusterAuth("route", cfg.routePassword))
+	}
+	if cfg.systemPass != "" {
+		// A system account user for operator tooling (nats server report,
+		// nats server raft peer-remove), reachable through the loopback
+		// client listener only, so through kubectl port-forward.
+		opts = append(opts, mono.WithNATSSystemAccount("admin", cfg.systemPass))
 	}
 	if cfg.natsDebug {
 		// The embedded server's own log (routes, JetStream meta elections)

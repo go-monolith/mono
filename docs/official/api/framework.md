@@ -430,6 +430,34 @@ mono.WithNATSClustering("orders", "0.0.0.0", 6222, routes)
 mono.WithNATSClusterAuth("route", os.Getenv("NATS_ROUTE_PASSWORD"))
 ```
 
+#### WithNATSSystemAccount
+
+```go
+func WithNATSSystemAccount(username, password string) MonoFrameworkOption
+```
+
+Adds a user of the NATS system account (`$SYS`) to the embedded server, for operator tooling: `nats server report jetstream`, `nats server raft peer-remove` (removing a server from the JetStream meta group, which retiring servers for good requires, for example at the end of a [blue-green cutover](../extra/kubernetes-deployment.md#joined-cluster)) and the other system requests.
+
+Clients without credentials keep working as before, in the global account where the application's streams and consumers live: nats-server requires a password only from the system account user as long as no other accounts and no client authorization are configured. Enabling it on an existing store, or on a running cluster one server at a time, changes no stream, consumer or client that connects without credentials. A client that sends credentials (a URL with user info, a token, `nats.UserInfo` in `WithNATSClientOptions`) used to be accepted regardless; it is now rejected unless they are the system account user's, so remove leftover credentials from client URLs. The user can connect wherever the client listener is reachable, so keep that listener private (`WithNATSHost("127.0.0.1")`, a port-forward for operators). The password is not logged.
+
+A NATS config file that configures `accounts`, `system_account`, an `authorization` block (even an empty one) or an operator is rejected when the embedded server starts, so `NewMonoApplication` returns the error: the framework's own client would need credentials. Add the system account user to that file instead.
+
+| Property | Value |
+|----------|-------|
+| Type | `string`, `string` |
+| Default | (empty: no system account user) |
+| Constraints | Both non-empty; no accounts, client authorization or operator in the config file |
+
+**Example:**
+```go
+mono.WithNATSSystemAccount("admin", os.Getenv("NATS_SYSTEM_PASSWORD"))
+```
+
+```bash
+kubectl port-forward pod/orders-0 4222:4222 &
+nats -s nats://127.0.0.1:4222 --user admin --password "$NATS_SYSTEM_PASSWORD" server report jetstream
+```
+
 #### WithNATSClientName
 
 ```go

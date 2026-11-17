@@ -63,7 +63,7 @@ What to expect:
 
 - **Both versions run side by side for a while** (about 11 s in the test). Every service is shared through NATS: request-reply calls, stream consumer messages and cron occurrences go to whichever instance takes them, old or new. Keep message formats and handler behaviour compatible across one version step.
 - **A few messages are delayed by the ack wait.** A message fetched by a pod that is shutting down is left unacknowledged and is delivered again after the consumer's `AckWait` (30 s by default). The test saw 3 visits handled about 31 s after they were published. They are delayed, not lost or duplicated.
-- **Leader moves log one `Fetch error`** per fetch loop at Warn (`nats: leadership change` or `nats: server shutdown`), followed by `Fetch error cleared` within seconds. Versions up to v0.2.1 logged these two at Error.
+- **Leader moves log one `Fetch error`** per fetch loop at Warn (`nats: leadership change` or `nats: server shutdown`), followed by `Fetch error cleared` within seconds. Up to v0.2.0 these two were logged at Error.
 
 ## Canary with Partition
 
@@ -155,26 +155,14 @@ Green uses the same NATS cluster name and route credentials, and its route list 
 
 #### Prerequisites
 
-1. **A system-account user.** Removing a server from the meta group (`nats server raft peer-remove`) is only allowed in the system account. The framework has no option for one yet ([#39](https://github.com/go-monolith/mono/issues/39)). The test joined a temporary admin `nats-server` to the routes: JetStream disabled (otherwise it becomes a meta peer itself), the same cluster name and route credentials, and a `$SYS` user:
+1. **A system account user on every server.** Removing a server from the meta group (`nats server raft peer-remove`) is only allowed in the system account. Enable [`WithNATSSystemAccount`](../api/framework.md#withnatssystemaccount) on both colours (the example reads the password from `NATS_SYSTEM_PASSWORD`), and port-forward to a pod of the colour that stays:
 
-   ```
-   server_name: nats-admin
-   listen: 127.0.0.1:4222
-   jetstream: disabled
-   accounts { "$SYS": { users: [ { user: admin, password: "<admin password>" } ] } }
-   system_account: "$SYS"
-   cluster {
-     name: mono-demo
-     listen: 0.0.0.0:6222
-     authorization { user: route, password: "<route password>" }
-     routes: [
-       "nats://route:<route password>@mono-cluster-0.mono-cluster-nats.mono-demo.svc.cluster.local:6222"
-       # ... every blue and green pod
-     ]
-   }
+   ```bash
+   kubectl -n mono-demo port-forward pod/mono-green-0 14223:4222 &
+   nats -s nats://127.0.0.1:14223 --user admin --password "$NATS_SYSTEM_PASSWORD" server report jetstream
    ```
 
-   Run it as a pod, port-forward to its client port, and check that `nats server report jetstream --user admin --password <admin password>` lists every server of both colours.
+   The report must list every server of both colours. For an application without the option, a temporary `nats-server` with JetStream disabled (otherwise it becomes a meta peer itself), the same cluster name and route credentials, a `$SYS` user (`accounts { "$SYS": { users: [ { user: admin, password: "..." } ] } }`, `system_account: "$SYS"`) and routes to every pod works as well.
 
 2. **Every stream replicated across all old servers.** The runbook takes old servers offline one by one. A stream with 1 replica on an old server becomes unreachable once that server is offline, and one with 2 replicas loses its quorum when the second goes. List **every** stream (`nats stream ls`, including KV and object store buckets) and raise them to 3 replicas first.
 
@@ -196,7 +184,7 @@ nats stream info GREETER_VISITS
 nats consumer info GREETER_VISITS greeter-visits
 
 # 4. Remove it from the meta group (system account)
-nats server raft peer-remove mono-cluster-2 -f --user admin --password <admin password>
+nats server raft peer-remove mono-cluster-2 -f --user admin --password "$NATS_SYSTEM_PASSWORD"
 ```
 
 After the last blue server, the meta group and every stream consist of green servers only, with their history intact. The test moved three servers in about 35 s with no failed request.
@@ -221,7 +209,7 @@ Every strategy here keeps the framework's guarantees: stream consumer and cron m
 - **The "new version" differed only in its greeting text** (to make mixed-version serving visible). No run upgraded the framework itself, so behaviour changes between framework versions (such as the consumer conversion of v0.2.0) are not covered here; read the [upgrading guide](../guides/upgrading.md) for those.
 - **The bad release failed before its NATS server started.** A release that joins the cluster and then fails is not covered.
 - **The 5-minute rejoin wait** was observed on a 2+2 server test and confirmed in the nats-server v2.14.10 source; the 3+3 reverse cutover waited it out.
-- **The system-account setup used a separate admin server.** Supplying a system account through `WithNATSConfigFile` is untested.
+- **The system account:** the measured cutovers used a separate admin server; a later cutover and reverse cutover with `WithNATSSystemAccount` on every pod and no admin server had no failed request either (609 and 685 requests). A config file with only a `$SYS` user and `system_account` was checked with a single server.
 
 ## Related Documentation
 
