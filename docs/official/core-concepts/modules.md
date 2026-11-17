@@ -2,6 +2,8 @@
 
 Modules are the fundamental unit of organization in the Monolith Framework. A module is an independent component with a well-defined lifecycle and clear responsibilities.
 
+Read this page to learn what a module is, the order in which the framework calls it, and which optional interfaces to implement. The exact signatures are in the [Module API](../api/module.md); how modules talk to each other is in [Services](services.md) and [Inter-Module Communication](inter-module-communication.md).
+
 ## Module Interface
 
 Every module must implement the `Module` interface:
@@ -92,8 +94,21 @@ Register services your module provides:
 
 ```go
 func (m *MyModule) RegisterServices(container mono.ServiceContainer) error {
-    return container.RegisterRequestReplyService("process-order",
-        m.handleProcessOrder)
+    return container.RegisterRequestReplyService("get-user",
+        m.handleGetUser)
+}
+
+func (m *MyModule) handleGetUser(ctx context.Context, req *mono.Msg) ([]byte, error) {
+    var getReq GetUserRequest
+    if err := json.Unmarshal(req.Data, &getReq); err != nil {
+        return nil, err
+    }
+    // Fetch from database
+    user, err := m.db.GetUser(ctx, getReq.UserID)
+    if err != nil {
+        return nil, err
+    }
+    return json.Marshal(user)
 }
 ```
 
@@ -101,21 +116,13 @@ func (m *MyModule) RegisterServices(container mono.ServiceContainer) error {
 
 ### DependentModule
 
-Declare dependencies on other modules:
+Declare dependencies on other modules, and receive each dependency's container to access its services:
 
 ```go
 func (m *MyModule) Dependencies() []string {
-    return []string{"database", "cache"}
+    return []string{"payment"}
 }
-```
 
-**When to use**: When your module needs other modules to start first.
-
-### SetDependencyServiceContainer
-
-Access services from other modules:
-
-```go
 func (m *MyModule) SetDependencyServiceContainer(
     module string,
     container mono.ServiceContainer) {
@@ -126,7 +133,7 @@ func (m *MyModule) SetDependencyServiceContainer(
 }
 ```
 
-**When to use**: When you need to call services provided by other modules.
+**When to use**: When your module needs other modules to start first, or needs to call services they provide.
 
 {% hint style="info" %}
 **Since v0.1.0** this container is a read-only view of the dependency's container. Look services up on it; do not register on it. Code that only calls services can hold it as a `mono.ServiceLookup` (v0.1.2+). The bus from `SetEventBus` is scoped to the module in the same way. See the [Module Boundaries Guide](../guides/module-boundaries.md).
@@ -171,10 +178,15 @@ Register event consumers:
 
 ```go
 func (m *MyModule) RegisterEventConsumers(registry mono.EventRegistry) error {
-    return registry.RegisterEventConsumer(
-        orderCreatedDef,
-        m.handleOrderCreated,
-        m)
+    // Typed registration: the event is unmarshaled for the handler
+    return helper.RegisterTypedEventConsumer(registry, OrderCreatedV1, m.handleOrderCreated, m)
+}
+
+func (m *MyModule) handleOrderCreated(ctx context.Context,
+    event OrderCreatedEvent,
+    msg *mono.Msg) error {
+    // Process order
+    return nil
 }
 ```
 
@@ -394,64 +406,23 @@ func (m *MyModule) Stop(ctx context.Context) error {
 }
 ```
 
-### Module with Service Provider
-
-```go
-func (m *MyModule) RegisterServices(container mono.ServiceContainer) error {
-    return container.RegisterRequestReplyService("get-user",
-        m.handleGetUser)
-}
-
-func (m *MyModule) handleGetUser(ctx context.Context, req *mono.Msg) ([]byte, error) {
-    var getReq GetUserRequest
-    if err := json.Unmarshal(req.Data, &getReq); err != nil {
-        return nil, err
-    }
-    // Fetch from database
-    user, err := m.db.GetUser(ctx, getReq.UserID)
-    if err != nil {
-        return nil, err
-    }
-    return json.Marshal(user)
-}
-```
-
-### Module with Event Handling
-
-```go
-func (m *MyModule) RegisterEventConsumers(registry mono.EventRegistry) error {
-    // Typed registration: the event is unmarshaled for the handler
-    return helper.RegisterTypedEventConsumer(registry, OrderCreatedV1, m.handleOrderCreated, m)
-}
-
-func (m *MyModule) handleOrderCreated(ctx context.Context,
-    event OrderCreatedEvent,
-    msg *mono.Msg) error {
-    // Process order
-    return nil
-}
-```
-
 ## Testing Modules
 
-Test modules in isolation:
+Test modules in isolation with `monotest.CheckModule`, which starts the module in a test harness, stops it, and reports every Ports and Adapters rule it breaks:
 
 ```go
+import (
+    "testing"
+
+    "github.com/go-monolith/mono/monotest"
+)
+
 func TestOrderModule(t *testing.T) {
-    // Create module
-    module := &OrderModule{}
-
-    // Test Start
-    if err := module.Start(context.Background()); err != nil {
-        t.Fatalf("Start failed: %v", err)
-    }
-
-    // Test Stop
-    if err := module.Stop(context.Background()); err != nil {
-        t.Fatalf("Stop failed: %v", err)
-    }
+    monotest.CheckModule(t, &OrderModule{})
 }
 ```
+
+Every name in `Dependencies()` needs a stand-in container (`monotest.WithDependency`). The options are covered in the [Module Boundaries Guide](../guides/module-boundaries.md#testing-with-monotest).
 
 ## Summary
 

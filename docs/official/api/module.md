@@ -1,6 +1,6 @@
 # Module API
 
-API documentation for all module interfaces in the Monolith Framework. Modules are the primary building blocks of applications, implementing lifecycle hooks and optional capabilities.
+Reference for the module interfaces. Every module implements `Module`; the optional interfaces below let it depend on other modules, provide or call services, publish or consume events, report health and use plugins. Read this page when you write a module and need the exact method signatures and when the framework calls them. For the concepts, see [Core Concepts - Modules](../core-concepts/modules.md).
 
 ## Signatures
 
@@ -16,25 +16,25 @@ type Module interface {
 type EventBusAwareModule interface { SetEventBus(EventBus) }
 type DependentModule interface { Dependencies() []string; SetDependencyServiceContainer(string, ServiceContainer) }
 type ServiceProviderModule interface { RegisterServices(ServiceContainer) error }
+type ServiceConsumerModule interface { ConsumeServices() []BaseServiceDefinition }  // pkg/types
 type HealthCheckableModule interface { Health(ctx context.Context) HealthStatus }
 type EventEmitterModule interface { EmitEvents() []BaseEventDefinition }
 type EventConsumerModule interface { RegisterEventConsumers(EventRegistry) error }
-type ServiceConsumerModule interface { ConsumeServices() []BaseServiceDefinition }  // pkg/types
+type UsePluginModule interface { SetPlugin(alias string, plugin PluginModule) }
+
+// Special kinds of module
+type PluginModule interface { SetContainer(ServiceContainer); Container() ServiceContainer }
+type MiddlewareModule interface { /* six On... hooks, see below */ }
 ```
 
 {% hint style="info" %}
-**Interface Composition:** Implement only the interfaces your module needs. The framework detects which interfaces each module implements and calls the appropriate lifecycle methods automatically.
+**Interface Composition:** Implement only the interfaces your module needs. The framework detects which interfaces each module implements and calls the appropriate lifecycle methods automatically. The order in which it calls them is in [Module Lifecycle](#module-lifecycle).
 {% endhint %}
-
-## Overview
-
-All modules must implement the `Module` interface. Beyond that, modules can optionally implement additional interfaces to declare capabilities like event bus access, service provision, health checking, and more.
 
 ## Module Interface (Required)
 
 Every module must implement these three methods:
 
-**Example:**
 ```go
 type MyModule struct {
     logger mono.Logger
@@ -72,13 +72,6 @@ type EventBusAwareModule interface {
 
 **When to implement:** When your module needs to publish events or subscribe to events.
 
-**Signature:**
-```go
-func (m *MyModule) SetEventBus(eventBus mono.EventBus) {
-    m.eventBus = eventBus
-}
-```
-
 **Example:**
 ```go
 var OrderCreatedV1 = helper.EventDefinition[OrderCreatedEvent]("order", "OrderCreated", "v1")
@@ -112,32 +105,16 @@ type DependentModule interface {
 }
 ```
 
-{% hint style="warning" %}
-**Circular dependencies are rejected.** The framework validates the dependency graph during `Start` and returns an error if cycles are detected.
-{% endhint %}
-
 **When to implement:** When your module requires other modules to be initialized first and needs access to their services.
-
-**Signatures:**
-```go
-func (m *OrderModule) Dependencies() []string {
-    return []string{"payment", "inventory"}
-}
-
-func (m *OrderModule) SetDependencyServiceContainer(dep string, container mono.ServiceContainer) {
-    switch dep {
-    case "payment":
-        m.paymentContainer = container
-    case "inventory":
-        m.inventoryContainer = container
-    }
-}
-```
 
 **Framework guarantees:**
 - Dependencies are started before this module
 - `SetDependencyServiceContainer` is called for each dependency before `RegisterServices` and `Start`
 - Circular dependencies are detected and rejected when the application starts
+
+{% hint style="warning" %}
+**Circular dependencies are rejected.** The framework validates the dependency graph during `Start` and returns an error if cycles are detected.
+{% endhint %}
 
 **Example:**
 ```go
@@ -184,26 +161,7 @@ type ServiceProviderModule interface {
 }
 ```
 
-**When to implement:** When your module provides services for other modules to call.
-
-**Signature:**
-```go
-func (m *PaymentModule) RegisterServices(container mono.ServiceContainer) error {
-    return container.RegisterRequestReplyService(
-        "process-payment",
-        m.handleProcessPayment,
-    )
-}
-
-func (m *PaymentModule) handleProcessPayment(ctx context.Context, req *mono.Msg) ([]byte, error) {
-    var payment PaymentRequest
-    if err := json.Unmarshal(req.Data, &payment); err != nil {
-        return nil, fmt.Errorf("invalid request: %w", err)
-    }
-    // Process payment...
-    return json.Marshal(&PaymentResponse{})
-}
-```
+**When to implement:** When your module provides services for other modules to call. The registration methods are in the [Service Container API](container.md).
 
 **Example:**
 ```go
@@ -241,6 +199,42 @@ func (m *PaymentModule) handleAudit(ctx context.Context, msg *mono.Msg) error {
 }
 ```
 
+### ServiceConsumerModule
+
+```go
+// pkg/types (no root alias yet)
+type ServiceConsumerModule interface {
+    // ConsumeServices returns the contracts of the services this module calls.
+    ConsumeServices() []types.BaseServiceDefinition
+}
+```
+
+**When to implement:** When your module calls services of its dependencies through typed contracts (`helper.RequestReplyService`, `helper.QueueGroupService`, `helper.StreamConsumerService`). Return the `ToBase()` of each contract you call:
+
+```go
+func (m *OrderModule) ConsumeServices() []types.BaseServiceDefinition {
+    return []types.BaseServiceDefinition{
+        inventorycontract.CheckStock.ToBase(),
+        paymentcontract.Process.ToBase(),
+    }
+}
+```
+
+**When it is called:** once when the module starts, after its dependency containers are set, so the list may be built from what the module was wired with.
+
+**What is validated:**
+- each contract must name a module in `Dependencies()` (or a plugin);
+- that module must have registered the service;
+- the registered service type must match.
+
+A mismatch fails the start (`ErrModuleStartFailed` wrapping `ErrMissingDependency`, `ErrServiceNotFound` or `ErrServiceContractMismatch`) instead of surfacing on the first call.
+
+**What counts as a violation (since v0.1.2 the list is complete):**
+- A lookup of a request-reply, queue group or stream consumer service of a dependency that is not in the list, or a publish or request to that service's subject on the module's event bus, is an `undeclared-service-use` boundary violation (recorded by default, rejected under `WithStrictModuleBoundaries`).
+- By default a lookup of a service the dependency does not provide fails with `ErrServiceNotFound` and is not a violation.
+
+The list is also part of the module's `ModuleBoundaryReport`, with the contracts not used so far. See the [Module Boundaries Guide](../guides/module-boundaries.md).
+
 ### HealthCheckableModule
 
 ```go
@@ -254,23 +248,6 @@ type HealthCheckableModule interface {
 ```
 
 **When to implement:** When your module has internal state that could become unhealthy (database connections, external APIs, etc.).
-
-**Signature:**
-```go
-func (m *DatabaseModule) Health(ctx context.Context) mono.HealthStatus {
-    if err := m.db.Ping(ctx); err != nil {
-        return mono.HealthStatus{
-            Healthy: false,
-            Message: "Database connection failed",
-            Details: map[string]any{"error": err.Error()},
-        }
-    }
-    return mono.HealthStatus{
-        Healthy: true,
-        Message: "Database connected",
-    }
-}
-```
 
 **HealthStatus Structure:**
 ```go
@@ -324,21 +301,6 @@ type EventEmitterModule interface {
 
 **When to implement:** When your module publishes domain events that other modules may subscribe to.
 
-**Signature:**
-```go
-var (
-    OrderCreatedV1   = helper.EventDefinition[OrderCreatedEvent]("order", "OrderCreated", "v1")
-    OrderCancelledV1 = helper.EventDefinition[OrderCancelledEvent]("order", "OrderCancelled", "v1")
-)
-
-func (m *OrderModule) EmitEvents() []mono.BaseEventDefinition {
-    return []mono.BaseEventDefinition{
-        OrderCreatedV1.ToBase(),
-        OrderCancelledV1.ToBase(),
-    }
-}
-```
-
 **Example:**
 ```go
 type OrderCreatedEvent struct {
@@ -385,30 +347,7 @@ type EventConsumerModule interface {
 
 **Note:** This interface extends only `Module`, not `EventBusAwareModule`. The `EventRegistry` provides event discovery and registration without requiring direct EventBus access.
 
-### ServiceConsumerModule
-
-```go
-// pkg/types (no root alias yet)
-type ServiceConsumerModule interface {
-    // ConsumeServices returns the contracts of the services this module calls.
-    ConsumeServices() []types.BaseServiceDefinition
-}
-```
-
-**When to implement:** When your module calls services of its dependencies through typed contracts (`helper.RequestReplyService`, `helper.QueueGroupService`, `helper.StreamConsumerService`). Return the `ToBase()` of each contract you call:
-
-```go
-func (m *OrderModule) ConsumeServices() []types.BaseServiceDefinition {
-    return []types.BaseServiceDefinition{
-        inventorycontract.CheckStock.ToBase(),
-        paymentcontract.Process.ToBase(),
-    }
-}
-```
-
-The framework calls `ConsumeServices()` once when the module starts, after its dependency containers are set (the list may be built from what the module was wired with), and validates it: each contract must name a module in `Dependencies()` (or a plugin), that module must have registered the service, and the registered service type must match. A mismatch fails the start (`ErrModuleStartFailed` wrapping `ErrMissingDependency`, `ErrServiceNotFound` or `ErrServiceContractMismatch`) instead of surfacing on the first call. Since v0.1.2 the list is complete: a lookup of a request-reply, queue group or stream consumer service of a dependency that is not in it, or a publish or request to that service's subject on the module's event bus, is an `undeclared-service-use` boundary violation (recorded by default, rejected under `WithStrictModuleBoundaries`). By default a lookup of a service the dependency does not provide fails with `ErrServiceNotFound` and is not a violation. The list is also part of the module's `ModuleBoundaryReport`, with the contracts not used so far. See the [Module Boundaries Guide](../guides/module-boundaries.md).
-
-**Signature:**
+**Example:**
 ```go
 func (m *NotificationModule) RegisterEventConsumers(registry mono.EventRegistry) error {
     // Discover the event definition
@@ -450,71 +389,6 @@ type EventRegistry interface {
 
 See the [EventRegistry API](eventregistry.md) for the full interface.
 
-**Example:**
-```go
-type AuditModule struct{}
-
-func (m *AuditModule) Name() string { return "audit" }
-
-func (m *AuditModule) RegisterEventConsumers(registry mono.EventRegistry) error {
-    // Find order events from order module
-    eventDef, ok := registry.GetEventByName("OrderCreated", "v1", "order")
-    if !ok {
-        return fmt.Errorf("OrderCreated event not found")
-    }
-
-    // Register handler
-    return registry.RegisterEventConsumer(eventDef, m.handleOrderCreated, m)
-}
-
-func (m *AuditModule) handleOrderCreated(ctx context.Context, msg *mono.Msg) error {
-    var event OrderCreatedEvent
-    if err := json.Unmarshal(msg.Data, &event); err != nil {
-        return err
-    }
-    fmt.Printf("Audit: Order %s created\n", event.OrderID)
-    return nil
-}
-```
-
-### MiddlewareModule
-
-```go
-type MiddlewareModule interface {
-    Module
-
-    // Each hook returns the (possibly modified) value for the next middleware.
-    OnModuleLifecycle(ctx context.Context, event ModuleLifecycleEvent) ModuleLifecycleEvent
-    OnServiceRegistration(ctx context.Context, reg ServiceRegistration) ServiceRegistration
-    OnConfigurationChange(ctx context.Context, event ConfigurationEvent) ConfigurationEvent
-    OnOutgoingMessage(octx OutgoingMessageContext) OutgoingMessageContext
-    OnEventConsumerRegistration(ctx context.Context, entry EventConsumerEntry) EventConsumerEntry
-    OnEventStreamConsumerRegistration(ctx context.Context, entry EventStreamConsumerEntry) EventStreamConsumerEntry
-}
-```
-
-**When to implement:** When you're creating a middleware component (advanced users).
-
-**Related:** See [Middleware Documentation](../middleware/README.md) for pre-built middleware modules.
-
-### PluginModule
-
-```go
-type PluginModule interface {
-    Module
-
-    // SetContainer receives the plugin's dedicated ServiceContainer.
-    SetContainer(container ServiceContainer)
-
-    // Container returns the plugin's ServiceContainer.
-    Container() ServiceContainer
-}
-```
-
-**When to implement:** When creating infrastructure plugins (databases, caches, etc.).
-
-**Related:** See [Plugins Documentation](../plugins/README.md) and [Creating Plugins](../plugins/creating-plugins.md).
-
 ### UsePluginModule
 
 ```go
@@ -528,15 +402,6 @@ type UsePluginModule interface {
 ```
 
 **When to implement:** When your module needs to use services from plugins.
-
-**Signature:**
-```go
-func (m *DocumentModule) SetPlugin(alias string, plugin mono.PluginModule) {
-    if alias == "storage" {
-        m.storage = plugin.(*StoragePlugin)
-    }
-}
-```
 
 **Example:**
 ```go
@@ -564,7 +429,53 @@ func (m *DocumentModule) Start(ctx context.Context) error {
 }
 ```
 
+## Special Module Kinds
+
+### PluginModule
+
+```go
+type PluginModule interface {
+    Module
+
+    // SetContainer receives the plugin's dedicated ServiceContainer.
+    SetContainer(container ServiceContainer)
+
+    // Container returns the plugin's ServiceContainer.
+    Container() ServiceContainer
+}
+```
+
+**When to implement:** When creating infrastructure plugins (databases, caches, etc.).
+
+**Related:** See [Plugins Documentation](../plugins/README.md) and [Creating Plugins](../plugins/creating-plugins.md).
+
+### MiddlewareModule
+
+```go
+type MiddlewareModule interface {
+    Module
+
+    // Each hook returns the (possibly modified) value for the next middleware.
+    OnModuleLifecycle(ctx context.Context, event ModuleLifecycleEvent) ModuleLifecycleEvent
+    OnServiceRegistration(ctx context.Context, reg ServiceRegistration) ServiceRegistration
+    OnConfigurationChange(ctx context.Context, event ConfigurationEvent) ConfigurationEvent
+    OnOutgoingMessage(octx OutgoingMessageContext) OutgoingMessageContext
+    OnEventConsumerRegistration(ctx context.Context, entry EventConsumerEntry) EventConsumerEntry
+    OnEventStreamConsumerRegistration(ctx context.Context, entry EventStreamConsumerEntry) EventStreamConsumerEntry
+}
+```
+
+**When to implement:** When you're creating a middleware component (advanced users).
+
+**Related:** See [Middleware Documentation](../middleware/README.md) for pre-built middleware modules.
+
 ## Module Lifecycle
+
+### Overall Startup Order
+
+1. Plugins (in registration order)
+2. Middleware (in registration order)
+3. Regular modules (in dependency order)
 
 ### Startup Order (per module)
 
@@ -580,12 +491,6 @@ Before any regular module starts, the framework collects `EmitEvents()` from eve
 8. `Start()` - Initialize module
 
 After all modules have started, channel service routers are started and the NATS subscriptions are created. `SetContainer()` is called on plugin modules when the plugins start. Middleware modules only get `Start()`.
-
-### Overall Startup Order
-
-1. Plugins (in registration order)
-2. Middleware (in registration order)
-3. Regular modules (in dependency order)
 
 ### Shutdown Order
 
