@@ -84,50 +84,31 @@ func main() {
 }
 ```
 
-## Next Steps
+## Where Next
 
-New to Mono Framework? Start here:
+| If you want to...                    | Start here                                                     |
+| ------------------------------------ | -------------------------------------------------------------- |
+| Set up the framework in your project | [📦 Installation](getting-started/installation.md)             |
+| Build your first module quickly      | [⚡ Quick Start](getting-started/quickstart.md)                |
+| Understand how to organize your app  | [📁 Project Structure](getting-started/project-structure.md)   |
+| Learn how modules work and their lifecycle | [Modules](core-concepts/modules.md)                      |
+| Learn the Service and Event communication patterns | [Inter-Module Communication](core-concepts/inter-module-communication.md) |
+| Understand the framework architecture | [Architecture](core-concepts/architecture.md)                 |
+| Look up API details                  | [📚 API Reference](api/README.md), or the [godoc](https://pkg.go.dev/github.com/go-monolith/mono) |
+| Read the source or report an issue   | [GitHub Repository](https://github.com/go-monolith/mono)       |
 
-| If you want to...                    | Start here                                           |
-| ------------------------------------ | ---------------------------------------------------- |
-| Set up the framework in your project | [📦 Installation](getting-started/installation.md)   |
-| Build your first module quickly      | [⚡ Quick Start](getting-started/quickstart.md)      |
-| Understand how to organize your app  | [📁 Project Structure](getting-started/project-structure.md) |
-| Learn the core concepts              | [🧠 Core Concepts](core-concepts/README.md)          |
-| See working examples                 | [Examples](../../examples/basic/README.md)           |
-| Look up API details                  | [📚 API Reference](api/README.md)                    |
+### Examples
 
-## Core Concepts
-
-Understand the architectural foundation:
-
-- [Modules](core-concepts/modules.md) - How modules work and their lifecycle
-- [Inter-Module Communication](core-concepts/inter-module-communication.md) - Service and Event communication patterns
-- [Architecture](core-concepts/architecture.md) - Framework architecture and design
-
-## Examples
-
-Learn by example:
-
-- [Basic](../../examples/basic/README.md) - Simple "Hello World" module
-- [Multi-Module](../../examples/multi-module/README.md) - Order system with dependencies and service patterns
-- [Analytics](../../examples/analytics/README.md) - Channel-based services for high-performance communication
-- [Event Emitter](../../examples/event-emitter/README.md) - Event publishing and consumption patterns
-- [Cron Scheduler](../../examples/cron-scheduler/README.md) - Server-scheduled cron services
-- [NATS Config](../../examples/nats-config/README.md) - NATS config file with programmatic overrides
-- [AutoTLS](../../examples/auto-tls/README.md) - Let's Encrypt certificates for the client listener
-- [Kubernetes Cluster](../../examples/k8s-cluster/README.md) - Clustered JetStream on Kubernetes
-
-## Explore More
-
-- [API Reference](https://pkg.go.dev/github.com/go-monolith/mono) - Complete godoc documentation
-- [GitHub Repository](https://github.com/go-monolith/mono) - Source code and issue tracking
-
-## Help and Support
-
-- Check our [examples](../../examples/) directory for working code
-- Review the [API documentation](https://pkg.go.dev/github.com/go-monolith/mono) for detailed information
-- Visit the [GitHub repository](https://github.com/go-monolith/mono) for issues and discussions
+| Example | Shows |
+| ------- | ----- |
+| [Basic](../../examples/basic/README.md) | Simple "Hello World" module |
+| [Multi-Module](../../examples/multi-module/README.md) | Order system with dependencies and service patterns |
+| [Analytics](../../examples/analytics/README.md) | Channel-based services for high-performance communication |
+| [Event Emitter](../../examples/event-emitter/README.md) | Event publishing and consumption patterns |
+| [Cron Scheduler](../../examples/cron-scheduler/README.md) | Server-scheduled cron services |
+| [NATS Config](../../examples/nats-config/README.md) | NATS config file with programmatic overrides |
+| [AutoTLS](../../examples/auto-tls/README.md) | Let's Encrypt certificates for the client listener |
+| [Kubernetes Cluster](../../examples/k8s-cluster/README.md) | Clustered JetStream on Kubernetes |
 
 ---
 

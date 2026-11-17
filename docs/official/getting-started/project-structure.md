@@ -292,7 +292,6 @@ package tests
 import (
     "context"
     "testing"
-    "time"
 
     "github.com/go-monolith/mono"
     "my-mono-app/modules/order"
@@ -320,7 +319,7 @@ Each module should have:
 ### Separate Public and Internal APIs
 
 ```go
-// ✓ Public API (used by other modules)
+// ✓ Exported: called by this module's handlers (other modules reach it only through the contract)
 func (s *Service) CreateOrder(req *CreateOrderRequest) (*Order, error)
 
 // ✓ Internal helper (not used by other modules)
@@ -372,18 +371,9 @@ modules/
     └── account/
 ```
 
-### Shared Types
+### Types Used by Several Modules
 
-For types used by multiple modules:
-
-```
-shared/
-├── types.go         # Common domain types
-├── events.go        # Shared event definitions
-└── errors.go        # Common error types
-```
-
-But prefer event-driven communication over shared dependencies. Types that cross a module boundary belong in the owning module's `contract` package: request and response types with the provider, event types with the emitter. That removes the need for a shared events package.
+Types that cross a module boundary belong in the owning module's `contract` package: request and response types with the provider, event types with the emitter. No shared types or events package is needed. Prefer event-driven communication over shared dependencies.
 
 ## Complete Example
 

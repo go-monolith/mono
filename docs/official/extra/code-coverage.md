@@ -41,8 +41,6 @@ make COVERAGE_THRESHOLD=90 test-coverage-check
 
 Three trees are excluded from the enforced figure. Including them would measure how much example and benchmark code the repository carries rather than how well the framework itself is tested — `examples/` alone drags the raw number from ~92% down to ~61%.
 
-Expect the exact figure to move a little with the Go release you build under: the compiler's statement-counting granularity changes between versions, so the same tree reports 3807 in-scope statements under Go 1.26 and 5226 under Go 1.27 (91.2% and 92.4% respectively). The percentage barely shifts, but any check written against an absolute statement count has to tolerate the spread.
-
 | Excluded | Why |
 | --- | --- |
 | `examples/` | Documentation programs; four of them (basic, multi-module, analytics, cron-scheduler) are built and run by `make run-example-1` to `make run-example-4`, none are unit tested |
@@ -79,6 +77,10 @@ When contributing to the framework, ensure:
 1. **New code has tests** — all new public functions and methods should have corresponding tests
 2. **Edge cases are covered** — include tests for error conditions and boundary cases
 3. **Coverage doesn't decrease** — the Codecov comment on your pull request shows exactly which lines your diff left uncovered
+
+## Note: Figures Vary by Go Release
+
+Expect the exact figure to move a little with the Go release you build under: the compiler's statement-counting granularity changes between versions, so the same tree reports 3807 in-scope statements under Go 1.26 and 5226 under Go 1.27 (91.2% and 92.4% respectively). The percentage barely shifts, but any check written against an absolute statement count has to tolerate the spread.
 
 ## Related Documentation
 

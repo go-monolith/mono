@@ -6,8 +6,10 @@ API documentation for the `MonoApplication` (alias for `MonoFramework`), the mai
 
 `MonoApplication` is the central coordinator for module registration, lifecycle management, and inter-module communication. It manages NATS messaging, module dependencies, and graceful shutdown.
 
+A typical program creates the application with options, registers its modules, calls `Start`, waits for a shutdown signal and calls `Stop`. See [Complete Application Setup](#complete-application-setup).
+
 {% hint style="info" %}
-**Functional Options Pattern:** All framework configuration uses `WithXxx()` option functions. Options are validated at application time and last-wins for conflicting settings.
+**Functional Options Pattern:** All framework configuration uses `WithXxx()` option functions. Options are validated at application time and last-wins for conflicting settings. See [Configuration Options](#configuration-options).
 {% endhint %}
 
 ## Signatures
@@ -18,7 +20,7 @@ API documentation for the `MonoApplication` (alias for `MonoFramework`), the mai
 func NewMonoApplication(opts ...MonoFrameworkOption) (MonoApplication, error)
 ```
 
-Creates a new framework instance with the given configuration options. Returns an error if any option validation fails.
+Creates a new framework instance with the given configuration options and starts the embedded NATS server. Returns an error if any option validation fails.
 
 **Parameters:**
 - `opts` - Zero or more functional option functions to configure the framework
@@ -41,43 +43,43 @@ if err != nil {
 
 ### Lifecycle Methods
 
+#### Start
+
 ```go
 func (app MonoApplication) Start(ctx context.Context) error
 ```
 
-Starts plugins, middleware and all registered modules in dependency order (the embedded NATS server is already running: `NewMonoApplication` starts it). With JetStream it first waits for JetStream (see [`WithJetStreamReadyTimeout`](#withjetstreamreadytimeout)). Returns an error if a module fails to start: the previously started modules are rolled back and the state returns to `StateCreated`. Returns `application already running` when the application is running, and `application already stopped, cannot restart` after `Stop`.
+Starts plugins, middleware and all registered modules in dependency order (the embedded NATS server is already running: `NewMonoApplication` starts it). With JetStream it first waits for JetStream (see [`WithJetStreamReadyTimeout`](#withjetstreamreadytimeout)).
 
-**Parameters:**
-- `ctx` - Context for the startup operation
+**Errors:**
+- A module fails to start: the previously started modules are rolled back and the state returns to `StateCreated`.
+- `application already running` when the application is running.
+- `application already stopped, cannot restart` after `Stop`.
 
-**Returns:**
-- `error` - Startup error or nil on success
+#### Stop
 
 ```go
 func (app MonoApplication) Stop(ctx context.Context) error
 ```
 
-Gracefully shuts down the application: drains subscriptions and waits for in-flight handlers (up to the shutdown drain timeout, with a live context), cancels the runtime context, stops all modules in reverse dependency order, then stops NATS. The configured shutdown timeout bounds the whole operation when `ctx` has no deadline.
+Gracefully shuts down the application, in this order:
 
-**Parameters:**
-- `ctx` - Context for the shutdown operation
+1. Drains subscriptions and waits for in-flight handlers (up to the shutdown drain timeout, with a live context).
+2. Cancels the runtime context.
+3. Stops all modules in reverse dependency order.
+4. Stops NATS.
 
-**Returns:**
-- `error` - Shutdown error or nil on success
+The configured shutdown timeout bounds the whole operation when `ctx` has no deadline. See [`WithShutdownTimeout`](#withshutdowntimeout) and [`WithShutdownDrainTimeout`](#withshutdowndraintimeout).
 
 ### Module Management
+
+#### Register
 
 ```go
 func (app MonoApplication) Register(module Module) error
 ```
 
-Registers a regular module with the framework. Must be called before `Start()`. The module can be any type that implements the `Module` interface.
-
-**Parameters:**
-- `module` - Module implementing the `Module` interface
-
-**Returns:**
-- `error` - Registration error (duplicate name, invalid module)
+Registers a regular module with the framework. Must be called before `Start()`. The module can be any type that implements the `Module` interface. Returns an error for a duplicate name or an invalid module.
 
 **Example:**
 ```go
@@ -85,18 +87,13 @@ app.Register(&OrderModule{})
 app.Register(&PaymentModule{})
 ```
 
+#### RegisterPlugin
+
 ```go
 func (app MonoApplication) RegisterPlugin(plugin PluginModule, alias string) error
 ```
 
-Registers a plugin module with the given alias. Plugins start before middleware and regular modules, and stop last.
-
-**Parameters:**
-- `plugin` - Plugin implementing the `PluginModule` interface
-- `alias` - Unique identifier for this plugin instance (can differ from plugin name)
-
-**Returns:**
-- `error` - Registration error
+Registers a plugin module under `alias`, a unique identifier for this plugin instance (it can differ from the plugin name). Plugins start before middleware and regular modules, and stop last.
 
 **Example:**
 ```go
@@ -104,40 +101,31 @@ storage, _ := fsjetstream.New(config)
 app.RegisterPlugin(storage, "storage")
 ```
 
+#### Plugin
+
 ```go
 func (app MonoApplication) Plugin(alias string) PluginModule
 ```
 
-Retrieves a registered plugin by alias. Returns nil if not found.
+Returns the plugin registered under `alias`, or nil if there is none.
 
-**Parameters:**
-- `alias` - Plugin alias from registration
-
-**Returns:**
-- `PluginModule` - Plugin instance or nil
+#### Modules
 
 ```go
 func (app MonoApplication) Modules() []string
 ```
 
-Returns a list of registered module names (not including plugins), in no particular order.
-
-**Returns:**
-- `[]string` - Slice of module names
+Returns the names of the registered modules (not including plugins), in no particular order.
 
 ### Service Discovery
+
+#### Services
 
 ```go
 func (app MonoApplication) Services(moduleName string) ServiceContainer
 ```
 
-Returns the `ServiceContainer` for a specific module, allowing access to registered services. Returns nil before `Start`, after `Stop`, and for an unknown or empty name. It is a host-level escape hatch (main.go, API handlers, tests), not for module code.
-
-**Parameters:**
-- `moduleName` - Name of the module (from `Module.Name()`)
-
-**Returns:**
-- `ServiceContainer` - The module's service container, or nil
+Returns the `ServiceContainer` of the module named `moduleName` (from `Module.Name()`), giving access to its registered services. Returns nil before `Start`, after `Stop`, and for an unknown or empty name. It is a host-level escape hatch (main.go, API handlers, tests), not for module code.
 
 **Example:**
 ```go
@@ -148,38 +136,35 @@ if err != nil {
 reply, err := client.Call(ctx, payload) // payload is []byte
 ```
 
+See also [Accessing Services](#accessing-services).
+
+#### EventBus
+
 ```go
 func (app MonoApplication) EventBus(moduleName string) EventBus
 ```
 
-Returns the `EventBus` for a specific module: for a started module, the bus scoped to its declared boundaries; otherwise (unknown name, before `Start`) the shared, unscoped bus.
-
-**Parameters:**
-- `moduleName` - Name of the module
-
-**Returns:**
-- `EventBus` - The module's event bus
+Returns the `EventBus` of a module: for a started module, the bus scoped to its declared boundaries; otherwise (unknown name, before `Start`) the shared, unscoped bus.
 
 ### Health and Status
+
+#### Health
 
 ```go
 func (app MonoApplication) Health(ctx context.Context) FrameworkHealth
 ```
 
-Returns the aggregated health status of the framework and all modules.
+Returns the aggregated health status of the framework and all modules. `FrameworkHealth` contains:
 
-**Parameters:**
-- `ctx` - Context for the health check operation
-
-**Returns:**
-- `FrameworkHealth` - Health status structure containing:
-  - `Healthy` - Overall framework health (true only if framework + NATS + all modules healthy)
-  - `State` - Current framework state
-  - `NATSHealthy` - NATS server health
-  - `JetStream` - JetStream state of this server (`*types.JetStreamHealth`, see below); nil when JetStream is not enabled or the framework is not running
-  - `Modules` - Map of individual module health statuses
-  - `Timestamp` - When the check was performed
-  - `Message` - Error message if unhealthy
+| Field | Description |
+|-------|-------------|
+| `Healthy` | Overall framework health (true only if framework + NATS + all modules healthy) |
+| `State` | Current framework state |
+| `NATSHealthy` | NATS server health |
+| `JetStream` | JetStream state of this server (`*types.JetStreamHealth`, see below); nil when JetStream is not enabled or the framework is not running |
+| `Modules` | Map of individual module health statuses |
+| `Timestamp` | When the check was performed |
+| `Message` | Error message if unhealthy |
 
 `types.JetStreamHealth` (package `github.com/go-monolith/mono/pkg/types`) is read locally from the embedded server, without a network request:
 
@@ -191,7 +176,7 @@ Returns the aggregated health status of the framework and all modules.
 | `ClusterSize` | Number of JetStream servers the meta group knows |
 | `Message` | Why JetStream is not available; empty otherwise |
 
-`JetStream` is **not** part of `Healthy`. In a cluster, JetStream is unavailable on every server while the cluster has no quorum, so counting it would mark the surviving servers unhealthy (and have them restarted) when one server is lost. A readiness check that must not route JetStream-dependent traffic to this server can check `JetStream.Available` itself.
+`JetStream` is **not** part of `Healthy`. In a cluster, JetStream is unavailable on every server while the cluster has no quorum, so counting it would mark the surviving servers unhealthy (and have them restarted) when one server is lost. A readiness check that must not route JetStream-dependent traffic to this server can check `JetStream.Available` itself (see [Startup, Readiness and Health](../guides/clustering.md#startup-readiness-and-health)).
 
 **Example:**
 ```go
@@ -206,17 +191,41 @@ for name, moduleHealth := range health.Modules {
 }
 ```
 
+#### SubscriptionStats
+
 ```go
 func (app MonoApplication) SubscriptionStats() []SubscriptionStats
 ```
 
-`SubscriptionStats` returns one snapshot per framework-managed NATS subscription (request-reply service, queue group, event consumer; JetStream-based stream, event stream and cron consumers are not included): identity (`Kind`, `Module`, `Name`, `Subject`, `QueueGroup`), the NATS client buffer (`PendingMsgs`, `PendingBytes`, `Dropped`, `Delivered`), the worker pool (`PoolActive`, `PoolQueued`, `MaxConcurrency`, `MaxPending`) and the framework's counters (`Rejected`, `Expired`, `DroppedAtShutdown`). It returns nil unless the application is running. Export it as metrics, or enable `WithSubscriptionStatsLogInterval` for a periodic Debug log.
+Returns one snapshot per framework-managed NATS subscription: request-reply service, queue group and event consumer. JetStream-based stream, event stream and cron consumers are not included. It returns nil unless the application is running. Export it as metrics, or enable [`WithSubscriptionStatsLogInterval`](#withsubscriptionstatsloginterval) for a periodic Debug log.
+
+| Group | Fields |
+|-------|--------|
+| Identity | `Kind`, `Module`, `Name`, `Subject`, `QueueGroup` |
+| NATS client buffer | `PendingMsgs`, `PendingBytes`, `Dropped`, `Delivered` |
+| Worker pool | `PoolActive`, `PoolQueued`, `MaxConcurrency`, `MaxPending` |
+| Framework counters | `Rejected`, `Expired`, `DroppedAtShutdown` |
+
+#### ModuleBoundaries
 
 ```go
 func (app MonoApplication) ModuleBoundaries() []types.ModuleBoundaryReport
 ```
 
-`ModuleBoundaries` returns one report per started module, sorted by name: `Declared` (its `Dependencies()`), `Consumed` (its `ConsumeServices()` contracts), `Observed` (the dependency services it looked up, or for a consumed contract reached on its event bus, with counts), `UnusedDependencies` (declared but never looked up), `UnusedContracts` (consumed contracts not used so far) and `Violations` (boundary crossings: `register-on-dependency`, `channel-consumer-mismatch`, `undeclared-service-subject`, `foreign-service-subscription`, `undeclared-service-use`, each with a count and the time first seen). `Observed`, `UnusedDependencies`, `UnusedContracts` and `Violations` are empty lists, never nil, when there is nothing to list, so their JSON keys (`observed`, `unused_dependencies`, `unused_contracts`, `violations`) are always present. It returns nil unless the application is running. The same summary is logged at `Stop`. With `WithStrictModuleBoundaries` the crossings fail instead of being recorded. `ModuleBoundaryReport` has no alias in the root package: import `github.com/go-monolith/mono/pkg/types`.
+Returns one report per started module, sorted by name. It returns nil unless the application is running. The same summary is logged at `Stop`. With [`WithStrictModuleBoundaries`](#withstrictmoduleboundaries) the crossings fail instead of being recorded. `ModuleBoundaryReport` has no alias in the root package: import `github.com/go-monolith/mono/pkg/types`.
+
+| Field | Content |
+|-------|---------|
+| `Declared` | The module's `Dependencies()` |
+| `Consumed` | Its `ConsumeServices()` contracts |
+| `Observed` | The dependency services it looked up, or for a consumed contract reached on its event bus, with counts |
+| `UnusedDependencies` | Declared but never looked up |
+| `UnusedContracts` | Consumed contracts not used so far |
+| `Violations` | Boundary crossings (`register-on-dependency`, `channel-consumer-mismatch`, `undeclared-service-subject`, `foreign-service-subscription`, `undeclared-service-use`), each with a count and the time first seen |
+
+`Observed`, `UnusedDependencies`, `UnusedContracts` and `Violations` are empty lists, never nil, when there is nothing to list, so their JSON keys (`observed`, `unused_dependencies`, `unused_contracts`, `violations`) are always present.
+
+#### Logger
 
 ```go
 func (app MonoApplication) Logger() Logger
@@ -224,12 +233,50 @@ func (app MonoApplication) Logger() Logger
 
 Returns the framework's internal logger instance.
 
-**Returns:**
-- `Logger` - The framework logger
-
 ## Configuration Options
 
-All framework configuration is done through functional options passed to `NewMonoApplication()`.
+All framework configuration is done through functional options passed to `NewMonoApplication()`. Every option below has a signature, a one-line description, a table (type, default, constraints) and an example; longer details follow the example.
+
+### Options Index
+
+| Option | What it does | Default |
+|--------|--------------|---------|
+| **NATS** | | |
+| [`WithNATSPort`](#withnatsport) | Client listening port | `4222` |
+| [`WithNATSHost`](#withnatshost) | Client listening host | `127.0.0.1` |
+| [`WithNATSDontListen`](#withnatsdontlisten) | No TCP listener | `false` |
+| [`WithNATSInProcessConn`](#withnatsinprocessconn) | In-process client connection | `false` |
+| [`WithNATSLogging`](#withnatslogging) | NATS server log flags | all off |
+| [`WithNATSMaxPayload`](#withnatsmaxpayload) | Maximum message payload | nats-server default (1 MB) |
+| [`WithStartupReadyTimeout`](#withstartupreadytimeout) | Wait for the embedded server to accept connections | `10s` |
+| [`WithNATSClustering`](#withnatsclustering) | Join a NATS cluster | off |
+| [`WithNATSServerName`](#withnatsservername) | Server name (required for clustered JetStream) | config file or nats-server default |
+| [`WithNATSClusterAuth`](#withnatsclusterauth) | Route credentials | routes not authenticated |
+| [`WithNATSSystemAccount`](#withnatssystemaccount) | System account user for operator tooling | none |
+| [`WithNATSClientName`](#withnatsclientname) | Name of the framework's client connection | `"mono"` |
+| [`WithNATSClientOptions`](#withnatsclientoptions) | Extra nats.go client options | none |
+| [`WithNATSConfigFile`](#withnatsconfigfile) | NATS server config file | none |
+| [`WithNATSAutoTLS`](#withnatsautotls) | Let's Encrypt certificates for the client listener | disabled |
+| **JetStream** | | |
+| [`WithJetStreamDomain`](#withjetstreamdomain) | JetStream domain | empty |
+| [`WithJetStreamStorageDir`](#withjetstreamstoragedir) | Enables JetStream with file storage | JetStream disabled |
+| [`WithJetStreamReadyTimeout`](#withjetstreamreadytimeout) | How long `Start` waits for JetStream | 2 minutes |
+| [`WithJetStreamDefaultReplicas`](#withjetstreamdefaultreplicas) | Replicas of framework-created streams | one replica |
+| **Logger** | | |
+| [`WithLogLevel`](#withloglevel) | Log level | `LogLevelInfo` |
+| [`WithLogFormat`](#withlogformat) | Text or JSON | `LogFormatText` |
+| [`WithLogOutput`](#withlogoutput) | Log destination | `os.Stdout` |
+| [`WithLogSource`](#withlogsource) | Source file and line in log entries | `false` |
+| [`WithLogger` / `WithCustomLogger`](#withlogger--withcustomlogger) | Custom logger instance | auto-created |
+| **Framework** | | |
+| [`WithShutdownTimeout`](#withshutdowntimeout) | Bound of `Stop` | `30s` |
+| [`WithShutdownDrainTimeout`](#withshutdowndraintimeout) | Wait for draining and in-flight handlers | `min(30s, shutdown timeout)` |
+| [`WithQueueGroupOptimisticWindow`](#withqueuegroupoptimisticwindow) | Fire-and-forget queue group sends after a first ACK | `0` (disabled) |
+| [`WithServiceDiscovery`](#withservicediscovery) | NATS services protocol (`nats micro`) | disabled |
+| [`WithStrictModuleBoundaries`](#withstrictmoduleboundaries) | Boundary violations fail instead of being recorded | off |
+| [`WithSubscriptionStatsLogInterval`](#withsubscriptionstatsloginterval) | Periodic Debug log of `SubscriptionStats` | `0` (disabled) |
+| [`WithDeadlineSkewAllowance`](#withdeadlineskewallowance) | Clock skew tolerated for caller deadlines | `250ms` |
+| [`WithDefaultServiceConcurrency`](#withdefaultserviceconcurrency) | Handlers running at once per request-reply service | `runtime.GOMAXPROCS(0) * 4` |
 
 ### NATS Configuration
 
@@ -239,7 +286,7 @@ All framework configuration is done through functional options passed to `NewMon
 func WithNATSPort(port int) MonoFrameworkOption
 ```
 
-Sets the NATS server listening port. Default is `4222`. Port must be between 1024 and 65535.
+Sets the NATS server listening port.
 
 | Property | Value |
 |----------|-------|
@@ -258,7 +305,7 @@ mono.WithNATSPort(4222)
 func WithNATSHost(host string) MonoFrameworkOption
 ```
 
-Sets the NATS server host address. Default is `127.0.0.1`.
+Sets the NATS server host address.
 
 | Property | Value |
 |----------|-------|
@@ -277,7 +324,13 @@ mono.WithNATSHost("0.0.0.0")
 func WithNATSDontListen() MonoFrameworkOption
 ```
 
-Prevents the NATS server from listening on TCP. Useful for embedded servers. Must be combined with `WithNATSInProcessConn()`: otherwise `NewMonoApplication` fails. Cannot be combined with [`WithNATSAutoTLS`](#withnatsautotls).
+Prevents the NATS server from listening on TCP. Useful for embedded servers.
+
+| Property | Value |
+|----------|-------|
+| Type | none (flag) |
+| Default | `false` |
+| Constraints | Requires `WithNATSInProcessConn()`, otherwise `NewMonoApplication` fails; cannot be combined with [`WithNATSAutoTLS`](#withnatsautotls) |
 
 **Example:**
 ```go
@@ -292,6 +345,11 @@ func WithNATSInProcessConn() MonoFrameworkOption
 ```
 
 Enables in-process client connections using `net.Pipe()` instead of TCP. Can be used alone or with `WithNATSDontListen()`.
+
+| Property | Value |
+|----------|-------|
+| Type | none (flag) |
+| Default | `false` |
 
 **Example:**
 ```go
@@ -323,7 +381,7 @@ mono.WithNATSLogging(true, false, false)  // Debug only
 func WithNATSMaxPayload(bytes int32) MonoFrameworkOption
 ```
 
-Sets the maximum message payload size. Must be between 1KB and 8MB.
+Sets the maximum message payload size.
 
 | Property | Value |
 |----------|-------|
@@ -342,7 +400,7 @@ mono.WithNATSMaxPayload(2 * 1024 * 1024)  // 2 MB
 func WithStartupReadyTimeout(timeout time.Duration) MonoFrameworkOption
 ```
 
-Sets how long `NewMonoApplication` waits for the embedded NATS server to accept connections. If the server is not ready in time (for example because another process holds the client port), `NewMonoApplication` fails with `NATS server not ready after <timeout> timeout`.
+Sets how long `NewMonoApplication` waits for the embedded NATS server to accept connections.
 
 | Property | Value |
 |----------|-------|
@@ -354,6 +412,8 @@ Sets how long `NewMonoApplication` waits for the embedded NATS server to accept 
 ```go
 mono.WithStartupReadyTimeout(15 * time.Second)
 ```
+
+If the server is not ready in time (for example because another process holds the client port), `NewMonoApplication` fails with `NATS server not ready after <timeout> timeout`.
 
 #### WithNATSClustering
 
@@ -369,21 +429,6 @@ Enables NATS clustering for distributed deployments.
 | `clusterHost` | Host for cluster communication |
 | `clusterPort` | Port for cluster communication (1024-65535) |
 | `routes` | URLs of the cluster's servers, of the form `nats://[user:password@]host:port` |
-
-**Without JetStream**, a seed node (the first node in a cluster) may have no routes, and the other nodes point to the seed node's cluster URL.
-
-**With JetStream**, every server must:
-
-- list the same routes: all servers of the cluster, its own included (a server ignores the route to itself);
-- set a server name with [`WithNATSServerName`](#withnatsservername).
-
-`NewMonoApplication` returns an error when clustering and JetStream are configured without a server name or without a route. With a config file, these checks run on the merged configuration instead, when `NewMonoApplication` starts the embedded server, since the file may provide `server_name`, `cluster.name` and `routes` (or leafnode remotes).
-
-**Route URLs** must have the form `nats://[user:password@]host:port`. A path, query, fragment or opaque part is rejected, which also catches an unencoded `/`, `?` or `#` in a password: percent-encode special characters in credentials. Errors name a route by its index and never quote it. [`WithNATSClusterAuth`](#withnatsclusterauth) adds credentials to every route that has none.
-
-**With a config file** ([`WithNATSConfigFile`](#withnatsconfigfile)), the values are merged into the file's `cluster{}` block: name, host and port come from this option, its routes are added to the file's `cluster.routes` (the server uses both lists), and the file's other cluster settings (authorization, TLS, permissions, pool size, compression) apply. Before v0.2.0 the option replaced the whole block and those settings were silently dropped.
-
-In Kubernetes, use the fully qualified names of a StatefulSet's pods behind a headless Service (`<pod>.<service>.<namespace>.svc.cluster.local`). See the [Clustering and Kubernetes guide](../guides/clustering.md).
 
 **Example (without JetStream, seed node):**
 ```go
@@ -410,31 +455,44 @@ mono.NewMonoApplication(
 )
 ```
 
+**Routes:**
+- **Without JetStream**, a seed node (the first node in a cluster) may have no routes, and the other nodes point to the seed node's cluster URL.
+- **With JetStream**, every server must list the same routes: all servers of the cluster, its own included (a server ignores the route to itself). Every server must also set a server name with [`WithNATSServerName`](#withnatsservername).
+- `NewMonoApplication` returns an error when clustering and JetStream are configured without a server name or without a route. With a config file, these checks run on the merged configuration instead, when `NewMonoApplication` starts the embedded server, since the file may provide `server_name`, `cluster.name` and `routes` (or leafnode remotes).
+
+**Route URLs** must have the form `nats://[user:password@]host:port`. A path, query, fragment or opaque part is rejected, which also catches an unencoded `/`, `?` or `#` in a password: percent-encode special characters in credentials. Errors name a route by its index and never quote it. [`WithNATSClusterAuth`](#withnatsclusterauth) adds credentials to every route that has none.
+
+**With a config file** ([`WithNATSConfigFile`](#withnatsconfigfile)), the values are merged into the file's `cluster{}` block: name, host and port come from this option, its routes are added to the file's `cluster.routes` (the server uses both lists), and the file's other cluster settings (authorization, TLS, permissions, pool size, compression) apply. Before v0.2.0 the option replaced the whole block and those settings were silently dropped.
+
+In Kubernetes, use the fully qualified names of a StatefulSet's pods behind a headless Service (`<pod>.<service>.<namespace>.svc.cluster.local`). See the [Clustering and Kubernetes guide](../guides/clustering.md).
+
 #### WithNATSServerName
 
 ```go
 func WithNATSServerName(name string) MonoFrameworkOption
 ```
 
-Sets the name of the embedded NATS server (`server_name`). When a NATS config file also sets `server_name`, the two must be equal: otherwise `NewMonoApplication` fails rather than silently renaming the server (a renamed JetStream server becomes a new peer and loses its local replicas).
+Sets the name of the embedded NATS server (`server_name`).
+
+| Property | Value |
+|----------|-------|
+| Type | `string` |
+| Default | (empty: the config file's `server_name`, otherwise nats-server's default, the server ID) |
+| Constraints | Non-empty, no whitespace; equal to the config file's `server_name` when the file sets one |
+
+**Example:**
+```go
+mono.WithNATSServerName(os.Getenv("POD_NAME"))
+```
+
+When a NATS config file also sets `server_name`, the two must be equal: otherwise `NewMonoApplication` fails rather than silently renaming the server (a renamed JetStream server becomes a new peer and loses its local replicas).
 
 Clustered JetStream requires a server name, and it must be:
 
 - **unique** within the cluster (and across a supercluster or leafnodes that share JetStream). JetStream identifies every RAFT peer, of the meta group and of each stream and consumer, by server name. nats-server closes a route from a server that reports its own name ("Remote server has a duplicate name").
 - **stable** across restarts. A server's stored JetStream state belongs to its name, so a restarted server must come back under the same name.
 
-The framework only checks that the name is set and valid (not empty, no whitespace). Uniqueness and stability come from the deployment: a Kubernetes StatefulSet pod name (`my-app-0`, `my-app-1`, ...) is both; a Deployment's generated pod name is unique but changes on every restart; a random value is neither.
-
-| Property | Value |
-|----------|-------|
-| Type | `string` |
-| Default | (empty: the config file's `server_name`, otherwise nats-server's default, the server ID) |
-| Constraints | Non-empty, no whitespace |
-
-**Example:**
-```go
-mono.WithNATSServerName(os.Getenv("POD_NAME"))
-```
+The framework only checks that the name is set and valid. Uniqueness and stability come from the deployment: a Kubernetes StatefulSet pod name (`my-app-0`, `my-app-1`, ...) is both; a Deployment's generated pod name is unique but changes on every restart; a random value is neither.
 
 #### WithNATSClusterAuth
 
@@ -442,15 +500,13 @@ mono.WithNATSServerName(os.Getenv("POD_NAME"))
 func WithNATSClusterAuth(username, password string) MonoFrameworkOption
 ```
 
-Requires the given credentials from every cluster route, and presents them on the routes this server opens. nats-server only sends the credentials written in a route's URL, so the framework adds them to every route URL that has none, from `WithNATSClustering` and from a config file alike. The credentials are redacted from the framework's logs and errors.
-
-They replace the user and password of a config file's `cluster.authorization` block. The option requires clustering (from `WithNATSClustering` or a config file). Load the password from a secret, never from code. The credentials are only safe on a trusted network unless the route listener also uses TLS, which a `cluster{}` block in a NATS config file can configure.
+Requires the given credentials from every cluster route, and presents them on the routes this server opens.
 
 | Property | Value |
 |----------|-------|
 | Type | `string`, `string` |
 | Default | (empty: routes are not authenticated unless the config file says otherwise) |
-| Constraints | Both non-empty; requires clustering |
+| Constraints | Both non-empty; requires clustering (from `WithNATSClustering` or a config file) |
 
 **Example:**
 ```go
@@ -458,17 +514,18 @@ mono.WithNATSClustering("orders", "0.0.0.0", 6222, routes)
 mono.WithNATSClusterAuth("route", os.Getenv("NATS_ROUTE_PASSWORD"))
 ```
 
+- nats-server only sends the credentials written in a route's URL, so the framework adds them to every route URL that has none, from `WithNATSClustering` and from a config file alike.
+- They replace the user and password of a config file's `cluster.authorization` block.
+- The credentials are redacted from the framework's logs and errors. Load the password from a secret, never from code.
+- The credentials are only safe on a trusted network unless the route listener also uses TLS, which a `cluster{}` block in a NATS config file can configure.
+
 #### WithNATSSystemAccount
 
 ```go
 func WithNATSSystemAccount(username, password string) MonoFrameworkOption
 ```
 
-Adds a user of the NATS system account (`$SYS`) to the embedded server, for operator tooling: `nats server report jetstream`, `nats server raft peer-remove` (removing a server from the JetStream meta group, which retiring servers for good requires, for example at the end of a [blue-green cutover](../extra/kubernetes-deployment.md#joined-cluster)) and the other system requests.
-
-Clients without credentials keep working as before, in the global account where the application's streams and consumers live: nats-server requires a password only from the system account user as long as no other accounts and no client authorization are configured. Enabling it on an existing store, or on a running cluster one server at a time, changes no stream, consumer or client that connects without credentials. A client that sends credentials (a URL with user info, a token, `nats.UserInfo` in `WithNATSClientOptions`) used to be accepted regardless; it is now rejected unless they are the system account user's, so remove leftover credentials from client URLs. The user can connect wherever the client listener is reachable, so keep that listener private (`WithNATSHost("127.0.0.1")`, a port-forward for operators). The password is not logged.
-
-A NATS config file that configures `accounts`, `system_account`, `no_sys_acc`, an `authorization` block (even an empty one) or an operator is rejected when the embedded server starts, so `NewMonoApplication` returns the error: the framework's own client would need credentials. Add the system account user to that file instead.
+Adds a user of the NATS system account (`$SYS`) to the embedded server, for operator tooling such as `nats server report jetstream` and `nats server raft peer-remove`.
 
 | Property | Value |
 |----------|-------|
@@ -486,6 +543,14 @@ kubectl port-forward pod/orders-0 4222:4222 &
 nats -s nats://127.0.0.1:4222 --user admin --password "$NATS_SYSTEM_PASSWORD" server report jetstream
 ```
 
+- `nats server raft peer-remove` removes a server from the JetStream meta group, which retiring servers for good requires, for example at the end of a [blue-green cutover](../extra/kubernetes-deployment.md#joined-cluster).
+- Clients without credentials keep working, in the global account where the application's streams and consumers live: nats-server requires a password only from the system account user as long as no other accounts and no client authorization are configured. Enabling it on a running cluster one server at a time is safe.
+- A client that sends credentials (a URL with user info, a token, `nats.UserInfo` in `WithNATSClientOptions`) is rejected unless they are the system account user's: remove leftover credentials from client URLs.
+- The user can connect wherever the client listener is reachable, so keep that listener private (`WithNATSHost("127.0.0.1")`, a port-forward for operators). The password is not logged.
+- A NATS config file that configures `accounts`, `system_account`, `no_sys_acc`, an `authorization` block (even an empty one) or an operator is rejected when the embedded server starts, so `NewMonoApplication` returns the error: the framework's own client would need credentials. Add the system account user to that file instead.
+
+See [Operator Access (System Account)](../guides/clustering.md#operator-access-system-account) in the clustering guide.
+
 #### WithNATSClientName
 
 ```go
@@ -500,13 +565,18 @@ Sets the name the framework's client connection reports to the server (`nats.Nam
 | Default | `"mono"` |
 | Constraints | Non-empty |
 
+**Example:**
+```go
+mono.WithNATSClientName("orders-api")
+```
+
 #### WithNATSClientOptions
 
 ```go
 func WithNATSClientOptions(opts ...nats.Option) MonoFrameworkOption
 ```
 
-Adds nats.go options to the framework's client connection. The framework applies its defaults first (connection name; an error handler that logs slow consumers and other client errors with subject and queue group; disconnect, reconnect and closed handlers; a drain timeout), then these, so they can add to or override the defaults.
+Adds nats.go options to the framework's client connection.
 
 | Property | Value |
 |----------|-------|
@@ -522,25 +592,21 @@ mono.WithNATSClientOptions(
 )
 ```
 
+The framework applies its defaults first (connection name; an error handler that logs slow consumers and other client errors with subject and queue group; disconnect, reconnect and closed handlers; a drain timeout), then these, so they can add to or override the defaults.
+
 #### WithNATSConfigFile
 
 ```go
 func WithNATSConfigFile(path string) MonoFrameworkOption
 ```
 
-Sets the path to a NATS server configuration file. The file is processed using NATS `server.ProcessConfigFile()` during startup.
-
-When both a config file and programmatic options (like `WithNATSPort`) are specified, the config file provides base settings and programmatic options override them. This allows using a standard NATS config file while customizing specific settings. With a config file, `WithNATSHost`, `WithNATSPort` and `WithNATSMaxPayload` override the file only when their value differs from the framework default (`127.0.0.1`, `4222`, 1 MB): `WithNATSPort(4222)`, for example, does not override a `port` set in the file.
+Sets the path to a NATS server configuration file, processed with NATS `server.ProcessConfigFile()` when `NewMonoApplication` starts the embedded server.
 
 | Property | Value |
 |----------|-------|
 | Type | `string` |
 | Default | (empty, disabled) |
 | Constraints | Non-empty path |
-
-{% hint style="info" %}
-File existence and validity are checked when `NewMonoApplication` starts the embedded server, not when the option is applied.
-{% endhint %}
 
 **Example (Config file only):**
 ```go
@@ -557,6 +623,10 @@ mono.NewMonoApplication(
 )
 ```
 
+- The config file provides base settings and programmatic options override them, so a standard NATS config file can be used while customizing specific settings.
+- `WithNATSHost`, `WithNATSPort` and `WithNATSMaxPayload` override the file only when their value differs from the framework default (`127.0.0.1`, `4222`, 1 MB): `WithNATSPort(4222)`, for example, does not override a `port` set in the file.
+- File existence and validity are checked when `NewMonoApplication` starts the embedded server, not when the option is applied.
+
 For NATS configuration file format and options, see the [NATS Server Configuration documentation](https://docs.nats.io/running-a-nats-service/configuration).
 
 #### WithNATSAutoTLS
@@ -565,9 +635,26 @@ For NATS configuration file format and options, see the [NATS Server Configurati
 func WithNATSAutoTLS(autoTLS types.AutoTLSConfig) MonoFrameworkOption
 ```
 
-Enables automatic ACME (Let's Encrypt) TLS certificates for the embedded NATS server's **client listener**. Cluster routes, gateways, leafnodes, websocket and MQTT listeners are not affected. The framework starts an HTTP listener that answers ACME http-01 challenges for the whole life of the application (renewals re-run the challenge). Certificates are renewed in the background, without a restart or reload. Only the http-01 challenge is supported.
+Enables automatic ACME (Let's Encrypt) TLS certificates for the embedded NATS server's **client listener**.
 
-TLS becomes mandatory for external clients: plaintext TCP connections are rejected, so enabling it on a deployment with plaintext clients breaks them. Clients connect with `tls://` and one of the configured domain names (the certificate is selected from the TLS SNI name, so connecting by IP fails). The framework's own client is switched to an in-process connection.
+| Property | Value |
+|----------|-------|
+| Type | `types.AutoTLSConfig` |
+| Default | (disabled) |
+| Constraints | The fields below (checked when the option is applied); not combined with `WithNATSDontListen`; not combined with a config file that has a `tls{}` block |
+
+**Example:**
+```go
+mono.NewMonoApplication(
+    mono.WithNATSHost("0.0.0.0"),
+    mono.WithNATSAutoTLS(types.AutoTLSConfig{
+        Domains:   []string{"nats.example.com"},
+        Email:     "ops@example.com",
+        CacheDir:  "/var/lib/mono/acme",
+        AcceptTOS: true,
+    }),
+)
+```
 
 `types.AutoTLSConfig` (package `github.com/go-monolith/mono/pkg/types`, no root alias):
 
@@ -583,24 +670,11 @@ TLS becomes mandatory for external clients: plaintext TCP connections are reject
 | `StartupIssueTimeout` | Bound of the certificate fetch at startup; 0 = 60s; negative skips it |
 | `AcceptTOS` | Must be `true` |
 
-| Property | Value |
-|----------|-------|
-| Type | `types.AutoTLSConfig` |
-| Default | (disabled) |
-| Constraints | The fields above (checked when the option is applied); not combined with `WithNATSDontListen`; not combined with a config file that has a `tls{}` block |
-
-**Example:**
-```go
-mono.NewMonoApplication(
-    mono.WithNATSHost("0.0.0.0"),
-    mono.WithNATSAutoTLS(types.AutoTLSConfig{
-        Domains:   []string{"nats.example.com"},
-        Email:     "ops@example.com",
-        CacheDir:  "/var/lib/mono/acme",
-        AcceptTOS: true,
-    }),
-)
-```
+- Cluster routes, gateways, leafnodes, websocket and MQTT listeners are not affected.
+- The framework starts an HTTP listener that answers ACME http-01 challenges for the whole life of the application (renewals re-run the challenge). Certificates are renewed in the background, without a restart or reload. Only the http-01 challenge is supported.
+- TLS becomes mandatory for external clients: plaintext TCP connections are rejected, so enabling it on a deployment with plaintext clients breaks them.
+- Clients connect with `tls://` and one of the configured domain names (the certificate is selected from the TLS SNI name, so connecting by IP fails).
+- The framework's own client is switched to an in-process connection.
 
 See the [AutoTLS example](../../../examples/auto-tls/README.md).
 
@@ -650,14 +724,7 @@ mono.WithJetStreamStorageDir("./data/jetstream")
 func WithJetStreamReadyTimeout(d time.Duration) MonoFrameworkOption
 ```
 
-Bounds how long `Start` waits for JetStream. Before it starts plugins and modules, `Start` waits until JetStream answers. It then retries each JetStream setup step (the stream, consumer and schedule setup of stream consumer, cron and event stream consumer services, and the planning of event stream durables) while it fails with an error that can clear by itself:
-
-- a timeout of one attempt, no responders, or no stream response;
-- JetStream API errors 10004 (incomplete results), 10005 (no suitable peers for placement), 10008 (JetStream system temporarily unavailable), 10118 and 10119 (stream or consumer offline while its leader recovers). Not 10194/10195 ("offline" with a reason: an unsupported configuration or API level, or a decoding error), which do not clear by themselves.
-
-Any other error fails `Start` at once. Each attempt is bounded by 15s, and the wait between attempts grows from 250ms to 2s. The wait and each retried step are bounded by `d` (and by the `Start` context); a step still failing after `d` fails `Start` with an error that names `WithJetStreamReadyTimeout`. While it waits, the framework logs `Waiting for JetStream` at Info (at most every 10s per step), and `JetStream step succeeded after waiting` once the step succeeds.
-
-On a single server JetStream answers at once and nothing is retried. In a cluster, JetStream has no leader until a quorum of the servers is routed, a replicated stream or consumer can only be updated once its replicas are current, and a restarted server must catch up first: servers that start together wait for each other here instead of failing and restarting. When JetStream is not enabled, `Start` does not wait.
+Bounds how long `Start` waits for JetStream and retries its JetStream setup steps.
 
 | Property | Value |
 |----------|-------|
@@ -670,6 +737,13 @@ On a single server JetStream answers at once and nothing is retried. In a cluste
 mono.WithJetStreamReadyTimeout(5 * time.Minute)
 ```
 
+- **Wait**: before it starts plugins and modules, `Start` waits until JetStream answers. When JetStream is not enabled, `Start` does not wait. On a single server JetStream answers at once and nothing is retried.
+- **Retry**: each JetStream setup step (the stream, consumer and schedule setup of stream consumer, cron and event stream consumer services, and the planning of event stream durables) is retried while it fails with an error that can clear by itself: a timeout of one attempt, no responders, no stream response, or JetStream API errors 10004 (incomplete results), 10005 (no suitable peers for placement), 10008 (JetStream system temporarily unavailable), 10118 and 10119 (stream or consumer offline while its leader recovers). Not 10194/10195 ("offline" with a reason: an unsupported configuration or API level, or a decoding error), which do not clear by themselves. Any other error fails `Start` at once.
+- **Bounds**: each attempt is bounded by 15s, and the wait between attempts grows from 250ms to 2s. The wait and each retried step are bounded by `d` (and by the `Start` context); a step still failing after `d` fails `Start` with an error that names `WithJetStreamReadyTimeout`.
+- **Logs**: `Waiting for JetStream` at Info (at most every 10s per step), and `JetStream step succeeded after waiting` once the step succeeds.
+
+Why a cluster needs the wait, and how it affects probes: see [Startup, Readiness and Health](../guides/clustering.md#startup-readiness-and-health).
+
 #### WithJetStreamDefaultReplicas
 
 ```go
@@ -677,8 +751,6 @@ func WithJetStreamDefaultReplicas(n int) MonoFrameworkOption
 ```
 
 Sets the number of replicas of the streams the framework creates for stream consumer services (`StreamConsumerConfig.Stream`), event stream consumers and cron services (`CronServiceConfig.Replicas`) whose configuration leaves `Replicas` at 0. Their consumers follow the stream unless their own `Replicas` is set.
-
-Without it these streams have one replica, so in a cluster each lives on a single server and is unavailable while that server is down; a cron schedule stops firing. A replicated stream keeps working while fewer than half of its replicas are down, so 2 replicas tolerate no loss: use 3 (or 5) in a cluster of at least as many servers. Raising the value updates existing streams in place (nats-server adds the replicas).
 
 | Property | Value |
 |----------|-------|
@@ -691,6 +763,8 @@ Without it these streams have one replica, so in a cluster each lives on a singl
 mono.WithNATSClustering("orders", "0.0.0.0", 6222, routes)
 mono.WithJetStreamDefaultReplicas(3)
 ```
+
+Without it these streams have one replica, so in a cluster each lives on a single server and is unavailable while that server is down; a cron schedule stops firing. A replicated stream keeps working while fewer than half of its replicas are down, so 2 replicas tolerate no loss: use 3 (or 5) in a cluster of at least as many servers. Raising the value updates existing streams in place (nats-server adds the replicas).
 
 ### Logger Configuration
 
@@ -738,7 +812,7 @@ mono.WithLogFormat(mono.LogFormatJSON)
 func WithLogOutput(w io.Writer) MonoFrameworkOption
 ```
 
-Sets the output destination for logs. Default is `os.Stdout`.
+Sets the output destination for logs.
 
 | Property | Value |
 |----------|-------|
@@ -799,7 +873,7 @@ mono.WithCustomLogger(customLogger)
 func WithShutdownTimeout(timeout time.Duration) MonoFrameworkOption
 ```
 
-Sets the maximum time to wait for graceful shutdown. It bounds the lifecycle part of `Stop` (drain, in-flight handlers, module and plugin `Stop`) when the context passed to `Stop` has no deadline of its own; a context with a deadline is used as is. The final NATS connection drain (capped at 5s) and server shutdown run after that bound. The drain keeps a reserve of the remaining time (5s, or a quarter of it when that is smaller) for module `Stop`. Default is 30 seconds. Must be at least 1 second and at least `WithShutdownDrainTimeout`.
+Sets the maximum time to wait for graceful shutdown.
 
 | Property | Value |
 |----------|-------|
@@ -812,15 +886,17 @@ Sets the maximum time to wait for graceful shutdown. It bounds the lifecycle par
 mono.WithShutdownTimeout(60 * time.Second)
 ```
 
+- It bounds the lifecycle part of `Stop` (drain, in-flight handlers, module and plugin `Stop`) when the context passed to `Stop` has no deadline of its own; a context with a deadline is used as is.
+- The final NATS connection drain (capped at 5s) and server shutdown run after that bound.
+- The drain keeps a reserve of the remaining time (5s, or a quarter of it when that is smaller) for module `Stop`.
+
 #### WithShutdownDrainTimeout
 
 ```go
 func WithShutdownDrainTimeout(timeout time.Duration) MonoFrameworkOption
 ```
 
-Sets how long `Stop` waits, after it has stopped taking new messages, for subscriptions to finish draining and for in-flight handlers (worker pools and stream/cron fetch loops) to complete, before it cancels the runtime context and stops modules. Handlers keep a live context during this wait, so a request that started just before `Stop` completes normally. Whatever has not finished when the budget runs out is counted in a warning (`subscriptions_not_drained`, `pools_still_busy`, `fetch_loop_handlers_still_running`) and shutdown proceeds.
-
-Keep it below the orchestrator's termination grace period (Kubernetes defaults to 30s), with room for module `Stop`.
+Sets how long `Stop` waits for subscriptions to drain and in-flight handlers to complete before it cancels the runtime context and stops modules.
 
 | Property | Value |
 |----------|-------|
@@ -836,13 +912,17 @@ mono.NewMonoApplication(
 )
 ```
 
+- The wait starts after `Stop` has stopped taking new messages and covers worker pools and stream/cron fetch loops. Handlers keep a live context during this wait, so a request that started just before `Stop` completes normally.
+- Whatever has not finished when the budget runs out is counted in a warning (`subscriptions_not_drained`, `pools_still_busy`, `fetch_loop_handlers_still_running`) and shutdown proceeds.
+- Keep it below the orchestrator's termination grace period (Kubernetes defaults to 30s), with room for module `Stop`.
+
 #### WithQueueGroupOptimisticWindow
 
 ```go
 func WithQueueGroupOptimisticWindow(window time.Duration) MonoFrameworkOption
 ```
 
-Enables optimistic publish mode for queue group services. When set, the first send uses ACK mode, subsequent sends within the window use fire-and-forget.
+Enables optimistic publish mode for queue group services: the first send uses ACK mode, subsequent sends within the window use fire-and-forget.
 
 | Property | Value |
 |----------|-------|
@@ -861,15 +941,7 @@ mono.WithQueueGroupOptimisticWindow(1 * time.Second)
 func WithServiceDiscovery(cfg ...ServiceDiscoveryConfig) MonoFrameworkOption
 ```
 
-Exposes the application's request-reply services through the NATS services protocol, so `nats micro ls`, `nats micro info <module>` and `nats micro stats <module>` work against the application. One service is exposed per module that owns request-reply services, with one endpoint per service. Stats carry the standard per-endpoint fields and, in `data`, mono's queue wait time (`queue_wait_time`, `average_queue_wait_time`, `max_queue_wait_time`), `expired`, `expired_queue_wait_max`, `rejected`, `pending_msgs`, `pool_active` and `pool_queued`. Any client that can reach the server can read these responses (including `last_error` text and `Metadata`); restrict `$SRV.>` with server permissions when the NATS port is exposed beyond the application. Off by default (it adds subscriptions).
-
-```go
-type ServiceDiscoveryConfig struct {
-    Version     string            // semantic version reported for every service; "" = "0.0.0"
-    Description string            // reported by INFO
-    Metadata    map[string]string // reported with the service identity
-}
-```
+Exposes the application's request-reply services through the NATS services protocol, so `nats micro ls`, `nats micro info <module>` and `nats micro stats <module>` work against the application.
 
 | Property | Value |
 |----------|-------|
@@ -890,18 +962,45 @@ nats micro info orders
 nats micro stats orders
 ```
 
+```go
+type ServiceDiscoveryConfig struct {
+    Version     string            // semantic version reported for every service; "" = "0.0.0"
+    Description string            // reported by INFO
+    Metadata    map[string]string // reported with the service identity
+}
+```
+
+- One service is exposed per module that owns request-reply services, with one endpoint per service.
+- Stats carry the standard per-endpoint fields and, in `data`, mono's queue wait time (`queue_wait_time`, `average_queue_wait_time`, `max_queue_wait_time`), `expired`, `expired_queue_wait_max`, `rejected`, `pending_msgs`, `pool_active` and `pool_queued`.
+- Any client that can reach the server can read these responses (including `last_error` text and `Metadata`); restrict `$SRV.>` with server permissions when the NATS port is exposed beyond the application.
+- Off by default because it adds subscriptions.
+
 #### WithStrictModuleBoundaries
 
 ```go
 func WithStrictModuleBoundaries() MonoFrameworkOption
 ```
 
-Makes a module boundary violation fail with `ErrModuleBoundaryViolation` instead of being recorded: a mutating call on a dependency's `ServiceContainer` (only lookups are allowed), a channel service requested under another module's name, or a publish, request or subscription on the `services.<module>.<service>` subject of a module that is not itself, a declared dependency or a plugin, or, for a module implementing `ServiceConsumerModule`, looking up or sending to a dependency service missing from `ConsumeServices()`. Such a use fails when the call is made (a lookup in `SetDependencyServiceContainer` fails the module start), so complete every `ConsumeServices()` list before turning strict mode on. Off by default: the call then goes through, is warned once, and appears in `ModuleBoundaries()`. Turn it on once the report is clean, and in tests.
+Makes a module boundary violation fail with `ErrModuleBoundaryViolation` instead of being recorded.
 
 | Property | Value |
 |----------|-------|
 | Type | none (flag) |
 | Default | off (record and warn) |
+
+**Example:**
+```go
+mono.WithStrictModuleBoundaries()
+```
+
+A violation is:
+
+- a mutating call on a dependency's `ServiceContainer` (only lookups are allowed);
+- a channel service requested under another module's name;
+- a publish, request or subscription on the `services.<module>.<service>` subject of a module that is not itself, a declared dependency or a plugin;
+- for a module implementing `ServiceConsumerModule`, looking up or sending to a dependency service missing from `ConsumeServices()`. Such a use fails when the call is made (a lookup in `SetDependencyServiceContainer` fails the module start), so complete every `ConsumeServices()` list before turning strict mode on.
+
+Without the option the call goes through, is warned once, and appears in [`ModuleBoundaries()`](#moduleboundaries). Turn it on once the report is clean, and in tests.
 
 #### WithSubscriptionStatsLogInterval
 
@@ -909,7 +1008,7 @@ Makes a module boundary violation fail with `ErrModuleBoundaryViolation` instead
 func WithSubscriptionStatsLogInterval(d time.Duration) MonoFrameworkOption
 ```
 
-Logs `SubscriptionStats` for every pooled subscription at Debug level every `d`. Off by default.
+Logs [`SubscriptionStats`](#subscriptionstats) for every pooled subscription at Debug level every `d`.
 
 | Property | Value |
 |----------|-------|
@@ -917,13 +1016,18 @@ Logs `SubscriptionStats` for every pooled subscription at Debug level every `d`.
 | Default | `0` (disabled) |
 | Constraints | ≥ 0 |
 
+**Example:**
+```go
+mono.WithSubscriptionStatsLogInterval(30 * time.Second)
+```
+
 #### WithDeadlineSkewAllowance
 
 ```go
 func WithDeadlineSkewAllowance(d time.Duration) MonoFrameworkOption
 ```
 
-Sets the clock skew tolerated when a request-reply handler decides whether the caller's deadline (sent in `Mono-Deadline`) has already passed, and when the two deadline headers are considered to disagree. A request whose deadline passed by more than the allowance while it waited in the queue is dropped without running the handler (the caller has given up); otherwise the handler runs with a context that expires at the caller's deadline. When `Mono-Deadline` and `Mono-Timeout` disagree by more than the allowance, the clock-independent `Mono-Timeout` is used and a warning is logged. Set it to the largest clock difference you expect between callers and this instance.
+Sets the clock skew tolerated when a request-reply handler decides whether the caller's deadline (sent in `Mono-Deadline`) has already passed. Set it to the largest clock difference you expect between callers and this instance.
 
 | Property | Value |
 |----------|-------|
@@ -936,13 +1040,16 @@ Sets the clock skew tolerated when a request-reply handler decides whether the c
 mono.WithDeadlineSkewAllowance(time.Second)
 ```
 
+- A request whose deadline passed by more than the allowance while it waited in the queue is dropped without running the handler (the caller has given up); otherwise the handler runs with a context that expires at the caller's deadline.
+- When `Mono-Deadline` and `Mono-Timeout` disagree by more than the allowance, the clock-independent `Mono-Timeout` is used and a warning is logged.
+
 #### WithDefaultServiceConcurrency
 
 ```go
 func WithDefaultServiceConcurrency(n int) MonoFrameworkOption
 ```
 
-Sets how many handlers may run at once for each request-reply service that does not set its own `MaxConcurrency` (see [Handler Concurrency](container.md#handler-concurrency-worker-pools)). Pass `1` to run request-reply handlers serially, as versions before worker pools did; a single registration can still override it with `mono.WithMaxConcurrency`. Queue group and event consumer handlers are serial unless their own registration opts in, so this option does not affect them.
+Sets how many handlers may run at once for each request-reply service that does not set its own `MaxConcurrency` (see [Handler Concurrency](container.md#handler-concurrency-worker-pools)).
 
 | Property | Value |
 |----------|-------|
@@ -955,46 +1062,15 @@ Sets how many handlers may run at once for each request-reply service that does 
 mono.WithDefaultServiceConcurrency(16)
 ```
 
+Pass `1` to run request-reply handlers serially, as versions before worker pools did; a single registration can still override it with `mono.WithMaxConcurrency`. Queue group and event consumer handlers are serial unless their own registration opts in, so this option does not affect them.
+
 ## Default Configuration
 
 ```go
 func DefaultConfig() *types.MonoFrameworkConfig
 ```
 
-Returns a configuration with all default values. Useful for testing. `MonoFrameworkConfig` has no root alias: it is `types.MonoFrameworkConfig` (package `github.com/go-monolith/mono/pkg/types`). The shutdown drain timeout and the deadline skew allowance are `0` in the returned value and resolve to the effective defaults listed below.
-
-**Default Values:**
-
-| Setting | Default |
-|---------|---------|
-| NATS Host | `127.0.0.1` |
-| NATS Port | `4222` |
-| NATS DontListen | `false` |
-| NATS InProcessConn | `false` |
-| NATS ConfigFile | (empty, disabled) |
-| NATS Startup Ready Timeout | `10 * time.Second` |
-| NATS Max Payload | `0` (nats-server default, 1 MB) |
-| NATS AutoTLS | nil (disabled) |
-| NATS System Account | (empty, none) |
-| JetStream Domain | (empty) |
-| JetStream Dir | (empty: JetStream disabled) |
-| JetStream Ready Timeout | `0` (= 2 minutes) |
-| JetStream Default Replicas | `0` (one replica) |
-| NATS Server Name | (empty: config file or nats-server default) |
-| NATS Cluster Auth | (empty, routes not authenticated) |
-| Log Level | `LogLevelInfo` |
-| Log Format | `LogFormatText` |
-| Log Output | `os.Stdout` |
-| Log Source | `false` |
-| Shutdown Timeout | `30 * time.Second` |
-| Shutdown Drain Timeout | `min(30 * time.Second, ShutdownTimeout)` |
-| Deadline Skew Allowance | `250 * time.Millisecond` |
-| NATS Client Name | `"mono"` |
-| Subscription Stats Log Interval | `0` (disabled) |
-| Service Discovery | disabled |
-| Queue Group Optimistic Window | `0` (disabled) |
-| Default Service Concurrency | `0` (= `runtime.GOMAXPROCS(0) * 4`) |
-| Strict Module Boundaries | `false` |
+Returns a configuration with all default values (listed in the [Options Index](#options-index)). Useful for testing. `MonoFrameworkConfig` has no root alias: it is `types.MonoFrameworkConfig` (package `github.com/go-monolith/mono/pkg/types`). The shutdown drain timeout and the deadline skew allowance are `0` in the returned value and resolve to their effective defaults. Likewise `JetStreamReadyTimeout` and `JetStreamDefaultReplicas` are `0` (2 minutes, one replica), and the max payload is `0` (the nats-server default).
 
 ## Constants and Enums
 
@@ -1126,6 +1202,7 @@ err := helper.CallRequestReplyService(context.Background(), services, "process-p
 - [Module API](module.md) - Module interfaces and lifecycle
 - [Service Container API](container.md) - Service management
 - [EventBus API](eventbus.md) - Event publishing
+- [Clustering and Kubernetes](../guides/clustering.md) - Clustered JetStream, readiness, operator access
 - [API Reference](README.md) - All APIs overview
 
 ---

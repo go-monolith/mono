@@ -186,6 +186,8 @@ Every module must implement three methods:
 - **`Start(ctx)`** - Called when the application starts (initialize resources here)
 - **`Stop(ctx)`** - Called when the application shuts down (clean up resources)
 
+Optional interfaces (see [Common Patterns](#common-patterns)) are called before `Start`, in this order: `SetDependencyServiceContainer`, `SetEventBus`, `RegisterServices`, `RegisterEventConsumers`, then `Start`. See [Module Lifecycle](../core-concepts/modules.md#module-lifecycle).
+
 ### Logging
 
 Use Go's standard `log/slog` package for structured logging:

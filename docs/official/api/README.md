@@ -6,6 +6,18 @@ Complete API documentation for the Monolith Framework, including function signat
 
 The Monolith Framework provides a clean, Go-idiomatic API for building modular monolithic applications with embedded NATS messaging. This API reference documents all public types, functions, and options.
 
+## API Pages
+
+| Page | Covers |
+|------|--------|
+| [Framework API](framework.md) | Application creation, configuration options, lifecycle, health |
+| [Module API](module.md) | Module interface definitions and lifecycle |
+| [Service Container API](container.md) | Service registration and discovery |
+| [EventRegistry API](eventregistry.md) | Event definitions and consumer registration |
+| [EventBus API](eventbus.md) | Event publishing and subscription |
+| [Storage API](storage.md) | Storage interfaces for plugin backends |
+| [Plugin API](plugins.md) | Plugin modules |
+
 ## Core Components
 
 ### Framework
@@ -102,9 +114,11 @@ The framework provides type-safe handlers for common operations:
 
 The framework follows Go's standard error handling patterns:
 
-- All functions return `error` as the last return value
+- Functions that can fail return `error` as the last return value
 - Errors are wrapped with context using `fmt.Errorf` with `%w` verb
 - Sentinel errors provide specific error types for programmatic handling
+
+See the [Error Handling guide](../guides/error-handling.md).
 
 ## Interfaces vs Implementations
 
@@ -114,14 +128,9 @@ The framework API emphasizes interfaces over concrete types:
 - Framework returns concrete implementations that satisfy these interfaces
 - This enables testing with mock implementations and future backend swaps
 
-## Navigation
-
-- [Framework API](framework.md) - Application creation, configuration, and lifecycle
-- [Module API](module.md) - Module interface definitions and lifecycle
-- [Service Container API](container.md) - Service registration and discovery
-- [EventBus API](eventbus.md) - Event publishing and subscription
-
 ## Common Patterns
+
+Short versions of the most common calls. The [Quick Start](../getting-started/quickstart.md), [Services](../core-concepts/services.md) and [Event Consumers](../core-concepts/consumers.md) pages explain them in full.
 
 ### Creating an Application
 
@@ -196,7 +205,7 @@ func (m *MyModule) emitUserCreated(userID string) error {
 
 ```go
 const (
-    LogLevelDebug = iota  // 0 - Detailed diagnostic information
+    LogLevelDebug LogLevel = iota  // 0 - Detailed diagnostic information
     LogLevelInfo          // 1 - General informational messages
     LogLevelWarn          // 2 - Warning messages about potential problems
     LogLevelError         // 3 - Error messages about failures
@@ -216,7 +225,7 @@ const (
 
 ```go
 const (
-    StateCreated  = iota  // 0 - Framework created, not started
+    StateCreated MonoFrameworkState = iota  // 0 - Framework created, not started
     StateStarting         // 1 - Framework starting up
     StateRunning          // 2 - Framework running normally
     StateStopping         // 3 - Framework shutting down
@@ -228,7 +237,7 @@ const (
 
 ```go
 const (
-    ServiceTypeChannel = iota      // In-process Go channels
+    ServiceTypeChannel ServiceType = iota  // In-process Go channels
     ServiceTypeRequestReply        // NATS request-reply pattern
     ServiceTypeQueueGroup          // NATS queue group pattern
     ServiceTypeStreamConsumer      // JetStream durable consumer pattern
