@@ -1,6 +1,6 @@
-# Upgrading from v0.1.x to v0.2
+# Upgrading from v0.1.x to v0.2.x
 
-This page covers upgrading an application from any v0.1.x release to the latest v0.2 release (v0.2.2). Each change names the release that introduced it. Applications on v0.1.2 can skip the changes marked v0.1.2.
+This page covers upgrading an application from any v0.1.x release to the latest v0.2.x release (v0.2.2). Each change names the release that introduced it. Applications on v0.1.2 can skip the changes marked v0.1.2.
 
 ## Who Is Affected
 
@@ -103,12 +103,12 @@ All optional.
 
 For running a cluster, see the [Clustering and Kubernetes guide](clustering.md) and [Kubernetes Deployment Strategies](../extra/kubernetes-deployment.md).
 
-## Rolling Back from v0.2
+## Rolling Back from v0.2.x
 
 Rolling back to v0.1.x leaves the data on disk readable (the store format is unchanged), but two things change behaviour:
 
 - **Stream consumers become non-durable again.** They keep their position, but after the next server restart the server deletes one that is not pulled within 5s, and the stream is delivered again when it is recreated (on an interest-retention stream, messages only it needed are removed).
-- **Replicated streams are scaled down to one replica** the first time an old instance starts, if you set `WithJetStreamDefaultReplicas` or `CronServiceConfig.Replicas` above 1. Scale them down yourself first while every server is healthy (`nats stream edit <stream> --replicas 1`), or keep one instance on v0.2 until the rollback is complete.
+- **Replicated streams are scaled down to one replica** the first time an old instance starts, if you set `WithJetStreamDefaultReplicas` or `CronServiceConfig.Replicas` above 1. Scale them down yourself first while every server is healthy (`nats stream edit <stream> --replicas 1`), or keep one instance on v0.2.x until the rollback is complete.
 
 ## Recommended Next Steps
 

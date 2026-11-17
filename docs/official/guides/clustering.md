@@ -184,7 +184,7 @@ These situations can delete JetStream data. The framework cannot detect most of 
 - **Do not rename a JetStream server.** A server's RAFT identity is derived from its name, so a server with a new name is a new peer, and the cluster removes the local replicas assigned to the old one. A single-replica stream on that server is lost. Keep the name stable, which is why a StatefulSet pod name fits. When both `WithNATSServerName` and `server_name` in a config file are set, `Start` fails unless they are equal.
 - **Single-replica streams live on one server.** Losing that server's volume loses them. Use `WithJetStreamDefaultReplicas(3)`, or `Replicas` on your own streams. The KV and object stores of the `kv-jetstream` and `fs-jetstream` plugins are not covered by this option, so set their replicas in the plugin configuration.
 - **Non-durable consumers.** A consumer created with a `Name` only is deleted by the server once it has not been pulled for its inactivity threshold. That replays its stream when the consumer is recreated, and on an interest-retention stream it removes the messages only that consumer still needed. The framework's own consumers are durable. At start it gives non-durable consumers still at the default 5s threshold, yours included, one hour (see [Upgrading](upgrading.md#go-126-and-nats-server-v21410)). Use durable consumers for anything that must survive. The start pass covers every stream of the account, so it also reaches plain non-durable pull consumers of other clients connected to the same servers (another replica during a rolling update, a script, a service in another language): when such a client goes away, its consumer lives up to an hour instead of five seconds. On an interest-retention stream it keeps its messages for that hour, and on a work-queue stream a new consumer with an overlapping filter is rejected until it expires. Give such consumers an explicit `InactiveThreshold` (any value other than 5s is left alone), or make them durable.
-- **Rolling back.** See [Rolling Back from v0.2](upgrading.md#rolling-back-from-v02).
+- **Rolling back.** See [Rolling Back from v0.2.x](upgrading.md#rolling-back-from-v02x).
 
 ## Kubernetes
 
@@ -266,6 +266,6 @@ The sleep counts toward `terminationGracePeriodSeconds`, so the grace period mus
 
 - [Framework API](../api/framework.md) - `WithNATSClustering`, `WithNATSServerName`, `WithNATSClusterAuth`, `WithJetStreamReadyTimeout`, `WithJetStreamDefaultReplicas`, health
 - [Service Container API](../api/container.md) - stream consumer and cron services
-- [Upgrading from v0.1.x to v0.2](upgrading.md)
+- [Upgrading from v0.1.x to v0.2.x](upgrading.md)
 - [Kubernetes cluster example](../../../examples/k8s-cluster/README.md)
 - [Kubernetes Deployment Strategies](../extra/kubernetes-deployment.md) - rolling, canary and blue-green deployments, measured
