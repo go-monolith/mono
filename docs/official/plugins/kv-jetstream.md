@@ -1,6 +1,8 @@
 # Key-Value Storage Plugin (kv-jetstream)
 
-The Key-Value Storage Plugin provides fast, distributed key-value storage using NATS JetStream KV Store. It's ideal for caching, sessions, configuration, and any application state that needs to be shared across modules.
+This page shows how to keep small values in the `kv-jetstream` plugin: setting it up, configuring buckets, key rules, and the operations a module can call, including optimistic locking and watching for changes. Read it when your modules share caches, sessions, configuration or other small application state. For files and large binary objects, use [fs-jetstream](fs-jetstream.md) instead; [Storage Backends](../guides/storage-backends.md#backend-comparison) compares the two.
+
+The plugin provides fast, distributed key-value storage using NATS JetStream KV Store.
 
 ## Overview
 
@@ -10,142 +12,15 @@ The `kv-jetstream` plugin implements bucket-based key-value storage capabilities
 - **Flexible Storage**: Choose between disk-based (persistent) and memory-based (fast) storage
 - **Revision-Based Locking**: Optimistic locking with revision numbers for concurrent updates
 - **Real-Time Notifications**: Watch API for real-time change notifications
-- **TTL Support**: Automatically expire keys after a specified duration
+- **TTL Support**: Automatically expire keys after a bucket-level duration (`BucketConfig.TTL`)
 - **Compression**: Optional S2 compression for space efficiency
 - **Distributed**: Shared across all modules in the application
-
-## Architecture
-
-The plugin uses a hexagonal (ports & adapters) architecture with clean separation:
-
-```
-Consumer Module
-     │
-     │ uses
-     ▼
-KVStoragePort (interface)       ← Consumer-facing interface
-     │
-     │ implemented by
-     ▼
-KVStorageAdapter (struct)       ← Wraps backend, can add logging
-     │
-     │ wraps
-     ▼
-KVStorageBackend (interface)    ← Internal backend interface
-     │
-     │ implemented by
-     ▼
-JetStreamKVBackend (struct)     ← JetStream KV implementation
-```
-
-This design allows for future alternative backends (Redis, etc.) without changing consumer code.
-
-## Interface Hierarchy
-
-The `KVStoragePort` interface embeds multiple interfaces from the `pkg/storage` package, providing a unified storage abstraction:
-
-```
-KVStoragePort
-     │
-     ├── storage.Storage (base)
-     │   └── Get, Set, Delete, Reset, Close (+ context variants)
-     │
-     ├── storage.StorageWithBucket
-     │   └── BucketName()
-     │
-     ├── storage.StorageWithWatch
-     │   └── Watch, WatchWithContext
-     │
-     ├── storage.StorageWithRevision
-     │   └── Create, Update, Purge, GetEntry, PutWithRevision (+ context variants)
-     │
-     ├── storage.StorageWithKeys
-     │   └── Keys, KeysWithContext
-     │
-     ├── storage.StorageWithStatus
-     │   └── Status, StatusWithContext
-     │
-     └── WatchAll (KV-specific)
-```
-
-### Embedded Interfaces
-
-| Interface | Methods | Purpose |
-|-----------|---------|---------|
-| `storage.Storage` | Get, Set, Delete, Reset, Close | Base key-value operations |
-| `storage.StorageWithBucket` | BucketName | Bucket identification |
-| `storage.StorageWithWatch` | Watch, WatchWithContext | Real-time change notifications |
-| `storage.StorageWithRevision` | Create, Update, Purge, GetEntry, PutWithRevision | Optimistic locking |
-| `storage.StorageWithKeys` | Keys, KeysWithContext | Key enumeration |
-| `storage.StorageWithStatus` | Status, StatusWithContext | Bucket status information |
-
-### Type Aliases
-
-The plugin re-exports types from `pkg/storage` for convenience:
-
-| Plugin Type | Source | Description |
-|-------------|--------|-------------|
-| `KVEntry` | `storage.Entry` | Key-value entry with revision metadata |
-| `BucketStatus` | `storage.BucketStatus` | Bucket status information |
-| `KeyWatcher` | `storage.KeyWatcher` | Watch subscription handle |
-| `KeyOperation` | `storage.KeyOperation` | Operation type (Put, Delete, Purge) |
-| `WatchOption` | `storage.WatchOption` | Watch configuration options |
-| `WatchOptions` | `storage.WatchOptions` | Watch options struct |
-| `DeleteOption` | `storage.DeleteOption` | Delete configuration options |
-| `DeleteOptions` | `storage.DeleteOptions` | Delete options struct |
-
-### Context Variants Pattern
-
-Most methods have two variants:
-- **Non-context**: `Get(key)` - Uses `context.Background()` internally
-- **Context-aware**: `GetWithContext(ctx, key)` - Accepts explicit context
-
-Use context-aware variants when you need:
-- Timeout control
-- Cancellation support
-- Request tracing/logging
-
-```go
-// Simple usage (uses context.Background() internally)
-data, err := bucket.Get("key")
-
-// Context-aware usage (explicit timeout/cancellation)
-ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-defer cancel()
-data, err := bucket.GetWithContext(ctx, "key")
-```
-
-## Installation
-
-Import the plugin:
-
-```go
-import kvjetstream "github.com/go-monolith/mono/plugin/kv-jetstream"
-```
-
-## Signatures
-
-### New
-
-```go
-func New(config Config, opts ...Option) (*PluginModule, error)
-```
-
-Creates a new key-value storage plugin with the given bucket configurations.
-
-### Bucket Methods
-
-```go
-func (p *PluginModule) Bucket(name string) KVStoragePort
-func (p *PluginModule) Buckets() []string
-func (p *PluginModule) HasBucket(name string) bool
-```
-
-Access configured KV storage buckets.
 
 ## Quick Start
 
 ### 1. Create and Register the Plugin
+
+Import the plugin as `kvjetstream "github.com/go-monolith/mono/plugin/kv-jetstream"`. The application must enable JetStream:
 
 ```go
 package main
@@ -191,10 +66,14 @@ func main() {
     }
 
     // Register plugin with an alias
-    app.RegisterPlugin(kvStore, "kv")
+    if err := app.RegisterPlugin(kvStore, "kv"); err != nil {
+        panic(err)
+    }
 
     // Register modules that use KV store
-    app.Register(&SessionModule{})
+    if err := app.Register(&SessionModule{}); err != nil {
+        panic(err)
+    }
 
     if err := app.Start(ctx); err != nil {
         panic(err)
@@ -228,28 +107,28 @@ func (m *SessionModule) Start(ctx context.Context) error {
 
     // Store a session (simple set, no revision tracking)
     sessionData := []byte(`{"user_id":"123","role":"admin"}`)
-    err := m.sessions.Set("sess:abc123", sessionData, 0) // 0 = no expiration
+    err := m.sessions.Set("sess.abc123", sessionData, 0) // 0 = no expiration
     if err != nil {
         return err
     }
     fmt.Println("Stored session")
 
     // Store with revision tracking (for optimistic locking)
-    rev, err := m.sessions.PutWithRevision("sess:abc123", sessionData, 0)
+    rev, err := m.sessions.PutWithRevision("sess.abc123", sessionData, 0)
     if err != nil {
         return err
     }
     fmt.Printf("Stored session with revision: %d\n", rev)
 
     // Retrieve the session (value only)
-    data, err := m.sessions.Get("sess:abc123")
+    data, err := m.sessions.Get("sess.abc123")
     if err != nil {
         return err
     }
     fmt.Printf("Retrieved: %s\n", string(data))
 
     // Retrieve with metadata (for revision-based updates)
-    entry, err := m.sessions.GetEntry("sess:abc123")
+    entry, err := m.sessions.GetEntry("sess.abc123")
     if err != nil {
         return err
     }
@@ -263,20 +142,36 @@ func (m *SessionModule) Stop(ctx context.Context) error {
 }
 ```
 
+The plugin creates or updates every configured bucket in JetStream when it starts, before middleware and modules start. For the full start and stop order, see [Lifecycle Order](../api/plugins.md#lifecycle-order).
+
 ## Configuration
 
 ### BucketConfig
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `Name` | `string` | Bucket name (required, must be unique) |
-| `Description` | `string` | Optional bucket description |
-| `MaxValueSize` | `int32` | Maximum size per value in bytes (0 = unlimited) |
-| `MaxBytes` | `int64` | Maximum total size of bucket (0 = unlimited) |
-| `TTL` | `time.Duration` | Time-to-live for keys (0 = no expiry) |
-| `Replicas` | `int` | Number of replicas (1-5, default 1) |
-| `Storage` | `StorageType` | `FileStorage` (default) or `MemoryStorage` |
-| `Compression` | `bool` | Enable S2 compression |
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `Name` | `string` | (required) | Bucket name (required, must be unique) |
+| `Description` | `string` | `""` | Optional bucket description |
+| `MaxValueSize` | `int32` | `0` (unlimited) | Maximum size per value in bytes (0 = unlimited) |
+| `MaxBytes` | `int64` | `0` (unlimited) | Maximum total size of bucket (0 = unlimited) |
+| `TTL` | `time.Duration` | `0` (no expiry) | Time-to-live for keys (0 = no expiry). This is the only expiry: the `exp` argument of `Set`, `Create`, `Update` and `PutWithRevision` is ignored, because JetStream KV has no per-key TTL |
+| `Replicas` | `int` | `0` (means 1) | Number of replicas (1-5; 0 means 1). The framework's `WithJetStreamDefaultReplicas` does not apply to plugin buckets; values above 1 need a clustered JetStream |
+| `Storage` | `StorageType` | `FileStorage` | `FileStorage` (default) or `MemoryStorage` |
+| `Compression` | `bool` | `false` | Enable S2 compression |
+
+The minimal configuration is a single bucket with a name:
+
+```go
+kvStore, _ := kvjetstream.New(kvjetstream.Config{
+    Buckets: []kvjetstream.BucketConfig{
+        {Name: "cache"},
+    },
+})
+```
+
+### Keys
+
+Keys must match `[-/_=.a-zA-Z0-9]+` (the NATS KV key rules; `:` and spaces are rejected with `nats: invalid key`). `.` separates the tokens that Watch patterns such as `user.*` match.
 
 ### StorageType
 
@@ -290,38 +185,37 @@ const (
 ### Plugin Options
 
 ```go
-// Create with custom logger
+// Create with custom logger (myLogger is a *slog.Logger)
 kvStore, err := kvjetstream.New(config, kvjetstream.WithLogger(myLogger))
 ```
 
-## Default Config
-
-```go
-// Minimal configuration (single bucket)
-kvStore, _ := kvjetstream.New(kvjetstream.Config{
-    Buckets: []kvjetstream.BucketConfig{
-        {
-            Name:     "cache",
-            Storage:  kvjetstream.FileStorage,  // Persistent by default
-            Replicas: 1,
-        },
-    },
-})
-```
+Without `WithLogger` the plugin logs to `slog.Default()`, not to the framework logger.
 
 ## API Reference
 
-### Module Methods
+### Plugin Methods
 
 | Method | Description |
 |--------|-------------|
+| `New(config Config, opts ...Option) (*PluginModule, error)` | Create the plugin with the given bucket configurations |
 | `Bucket(name string) KVStoragePort` | Get a bucket by name (returns nil if not found) |
 | `Buckets() []string` | List all bucket names |
 | `HasBucket(name string) bool` | Check if a bucket exists |
 
 ### KVStoragePort Interface
 
-Consumer-facing interface for KV operations. The interface embeds `storage.Storage` for basic operations and additional interfaces for KV-specific capabilities:
+Consumer-facing interface for KV operations. It embeds interfaces from `pkg/storage` and adds `WatchAll`:
+
+| Embedded interface | Methods | Purpose |
+|--------------------|---------|---------|
+| `storage.Storage` | Get, Set, Delete, Reset, Close | Base key-value operations |
+| `storage.StorageWithBucket` | BucketName | Bucket identification |
+| `storage.StorageWithWatch` | Watch, WatchWithContext | Real-time change notifications |
+| `storage.StorageWithRevision` | Create, Update, Purge, GetEntry, PutWithRevision | Optimistic locking |
+| `storage.StorageWithKeys` | Keys, KeysWithContext | Key enumeration |
+| `storage.StorageWithStatus` | Status, StatusWithContext | Bucket status information |
+
+Most methods come in a plain and a `...WithContext` variant; see [Context Variants Pattern](../api/storage.md#context-variants-pattern).
 
 ```go
 type KVStoragePort interface {
@@ -346,8 +240,8 @@ type KVStoragePort interface {
     UpdateWithContext(ctx context.Context, key string, val []byte, exp time.Duration, revision uint64) (uint64, error)
     Purge(key string) error
     PurgeWithContext(ctx context.Context, key string) error
-    GetEntry(key string) (*Entry, error)
-    GetEntryWithContext(ctx context.Context, key string) (*Entry, error)
+    GetEntry(key string) (*KVEntry, error)
+    GetEntryWithContext(ctx context.Context, key string) (*KVEntry, error)
     PutWithRevision(key string, val []byte, exp time.Duration) (uint64, error)
     PutWithRevisionWithContext(ctx context.Context, key string, val []byte, exp time.Duration) (uint64, error)
 
@@ -372,12 +266,27 @@ type KVStoragePort interface {
 **Convenience vs Revision-Tracking**: Use `Set()` for simple store operations. Use `PutWithRevision()` when you need the revision number for optimistic locking. Use `GetEntry()` instead of `Get()` when you need both value and revision metadata.
 {% endhint %}
 
-### Entry
+### Type Aliases
 
-Metadata and value returned for stored keys (from `storage.Entry`):
+The plugin re-exports types from `pkg/storage` for convenience:
+
+| Plugin Type | Source | Description |
+|-------------|--------|-------------|
+| `KVEntry` | `storage.Entry` | Key-value entry with revision metadata |
+| `BucketStatus` | `storage.BucketStatus` | Bucket status information |
+| `KeyWatcher` | `storage.KeyWatcher` | Watch subscription handle |
+| `KeyOperation` | `storage.KeyOperation` | Operation type (Put, Delete, Purge) |
+| `WatchOption` | `storage.WatchOption` | Watch configuration options |
+| `WatchOptions` | `storage.WatchOptions` | Watch options struct |
+| `DeleteOption` | `storage.DeleteOption` | Delete options (`WithDeleteRevision`); not accepted by any method yet |
+| `DeleteOptions` | `storage.DeleteOptions` | Delete options struct; not accepted by any method yet |
+
+### KVEntry (alias of storage.Entry)
+
+Metadata and value returned for stored keys:
 
 ```go
-type Entry struct {
+type Entry struct { // storage.Entry
     Bucket    string        // Bucket name
     Key       string        // Key name
     Value     []byte        // Value data (nil for delete markers)
@@ -391,7 +300,7 @@ type Entry struct {
 
 ```go
 type KeyWatcher interface {
-    Updates() <-chan *Entry  // nil entry signals initial sync complete
+    Updates() <-chan *KVEntry  // nil entry signals initial sync complete
     Stop() error
 }
 ```
@@ -408,66 +317,66 @@ type BucketStatus struct {
 }
 ```
 
-## Sentinel Errors
+### Sentinel Errors
 
-The plugin provides sentinel errors for programmatic error handling:
+The plugin provides sentinel errors for programmatic error handling. They are aliases of the `pkg/storage` errors, so `errors.Is(err, storage.ErrKeyNotFound)` and `errors.Is(err, kvjetstream.ErrKeyNotFound)` are interchangeable:
 
 ```go
 var (
-    ErrKeyNotFound      = errors.New("key not found")
-    ErrKeyExists        = errors.New("key already exists")
-    ErrRevisionMismatch = errors.New("revision mismatch")
-    ErrBucketNotFound   = errors.New("bucket not found")
+    ErrKeyNotFound      = storage.ErrKeyNotFound
+    ErrKeyExists        = storage.ErrKeyExists
+    ErrRevisionMismatch = storage.ErrRevisionMismatch
+    ErrBucketNotFound   = storage.ErrBucketNotFound
 )
 ```
+
+`ErrBucketNotFound` is declared for backends; the plugin never returns it, and `Bucket(name)` returns nil for an unknown bucket.
+
+### Missing Keys
+
+Missing keys: `Get` returns `nil, nil`; `GetEntry` returns an error wrapping `ErrKeyNotFound`; `Update` returns an error wrapping `ErrRevisionMismatch` (use `Create` to write a key that may not exist); `Delete` and `Purge` of a missing key are not errors.
 
 ## Usage Examples
 
 ### Basic CRUD Operations
 
-{% hint style="info" %}
-**Get vs GetEntry**: Use `Get()` for simple value retrieval when you just need the bytes. Use `GetEntry()` when you need the revision number for subsequent `Update()` calls (optimistic locking).
-{% endhint %}
-
 ```go
 // Set (create or overwrite) - simple storage, no revision returned
-err := bucket.Set("user:123", []byte(`{"name":"Alice"}`), 0) // 0 = no expiration
+err := bucket.Set("user.123", []byte(`{"name":"Alice"}`), 0) // 0 = no expiration
 if err != nil {
     return err
 }
 
 // PutWithRevision - when you need the revision number for optimistic locking
-rev, err := bucket.PutWithRevision("user:123", []byte(`{"name":"Alice"}`), 0)
+rev, err := bucket.PutWithRevision("user.123", []byte(`{"name":"Alice"}`), 0)
 if err != nil {
     return err
 }
 fmt.Printf("Stored with revision: %d\n", rev)
 
 // Get - returns value only
-data, err := bucket.Get("user:123")
+data, err := bucket.Get("user.123")
 if err != nil {
     return err
 }
 fmt.Printf("Value: %s\n", string(data))
 
 // GetEntry - returns value with revision metadata
-entry, err := bucket.GetEntry("user:123")
+entry, err := bucket.GetEntry("user.123")
 if err != nil {
     return err
 }
 fmt.Printf("Value: %s, Revision: %d\n", string(entry.Value), entry.Revision)
+```
 
+To remove a key, use one of:
+
+```go
 // Delete (soft delete - leaves tombstone)
-err = bucket.Delete("user:123")
-if err != nil {
-    return err
-}
+err = bucket.Delete("user.123")
 
-// Purge (hard delete - removes all history)
-err = bucket.Purge("user:123")
-if err != nil {
-    return err
-}
+// Or Purge (hard delete - removes all history)
+err = bucket.Purge("user.123")
 ```
 
 ### Atomic Create (Fails if Key Exists)
@@ -475,7 +384,7 @@ if err != nil {
 ```go
 // Create only succeeds if key doesn't exist
 // Signature: Create(key string, val []byte, exp time.Duration) (uint64, error)
-rev, err := bucket.Create("lock:resource", []byte("owner-123"), 0)
+rev, err := bucket.Create("lock.resource", []byte("owner-123"), 0)
 if errors.Is(err, kvjetstream.ErrKeyExists) {
     fmt.Println("Resource is already locked")
     return err
@@ -488,6 +397,11 @@ fmt.Printf("Lock acquired with revision: %d\n", rev)
 ```go
 // Get current value and revision (use GetEntry for revision metadata)
 entry, err := bucket.GetEntry("counter")
+if errors.Is(err, kvjetstream.ErrKeyNotFound) {
+    // First use: create the counter instead
+    _, err = bucket.Create("counter", []byte("1"), 0)
+    return err
+}
 if err != nil {
     return err
 }
@@ -529,18 +443,26 @@ if err != nil {
 }
 defer watcher.Stop()
 
-for entry := range watcher.Updates() {
-    if entry == nil {
-        // Initial sync complete
-        fmt.Println("Caught up with existing values")
-        continue
-    }
+for {
+    select {
+    case <-ctx.Done():
+        return ctx.Err()
+    case entry, ok := <-watcher.Updates():
+        if !ok {
+            return nil // channel closed: watcher stopped
+        }
+        if entry == nil {
+            // Initial sync complete
+            fmt.Println("Caught up with existing values")
+            continue
+        }
 
-    switch entry.Operation {
-    case kvjetstream.KeyOperationPut:
-        fmt.Printf("Key %s updated: %s\n", entry.Key, entry.Value)
-    case kvjetstream.KeyOperationDelete:
-        fmt.Printf("Key %s deleted\n", entry.Key)
+        switch entry.Operation {
+        case kvjetstream.KeyOperationPut:
+            fmt.Printf("Key %s updated: %s\n", entry.Key, entry.Value)
+        case kvjetstream.KeyOperationDelete:
+            fmt.Printf("Key %s deleted\n", entry.Key)
+        }
     }
 }
 ```
@@ -590,27 +512,12 @@ func (m *CacheModule) Start(ctx context.Context) error {
     m.sessions = m.kv.Bucket("sessions")
 
     // Use different buckets for different purposes
-    m.cache.Set("config:app", configData, 0)
-    m.sessions.Set("sess:user123", sessionData, time.Hour) // expires in 1 hour
+    m.cache.Set("config.app", configData, 0)
+    m.sessions.Set("sess.user123", sessionData, 0) // expiry comes from the bucket's TTL
 
     return nil
 }
 ```
-
-## Plugin Lifecycle
-
-1. **Startup**: Plugin starts FIRST (before middleware and regular modules)
-2. **Bucket Creation**: All configured buckets are created/updated in JetStream
-3. **Consumer Access**: Consumer modules receive plugin via `SetPlugin()`
-4. **Shutdown**: Plugin stops LAST (after all modules and middleware)
-
-## Performance Characteristics
-
-- **Read Latency**: Sub-millisecond for in-memory, 1-5ms for disk-based
-- **Write Latency**: 1-10ms depending on replication factor
-- **Throughput**: Up to 50,000 ops/sec for in-memory buckets
-- **Storage Overhead**: ~200 bytes per key for metadata
-- **Revision Tracking**: Atomic, linearizable updates
 
 ## Best Practices
 
@@ -630,25 +537,37 @@ func (m *CacheModule) Start(ctx context.Context) error {
 - Mix different data types in one bucket
 - Rely on TTL for critical cleanup logic
 
-## Comparison with File Storage
+## How It Works
 
-| Aspect | kv-jetstream | fs-jetstream |
-|--------|------------|------------|
-| Data Model | Key-value pairs | Objects (binary) |
-| Max Value Size | ~1MB recommended | Unlimited |
-| Concurrency Control | Revision-based locking | None |
-| Real-Time Notifications | Watch API | Not supported |
-| Streaming Support | Not supported | Reader/Writer |
-| Use Case | Cache, sessions, config | Files, documents, media |
+The plugin uses a hexagonal (ports & adapters) architecture:
+
+```
+Consumer Module
+     │
+     │ uses
+     ▼
+KVStoragePort (interface)       ← Consumer-facing interface
+     │
+     │ implemented by
+     ▼
+KVStorageAdapter (struct)       ← Wraps backend, can add logging
+     │
+     │ wraps
+     ▼
+storage.Storage (+ StorageWith*) ← Backend contract from pkg/storage
+     │
+     │ implemented by
+     ▼
+JetStreamKVBackend (struct)     ← JetStream KV implementation
+```
+
+This design allows for future alternative backends (Redis, etc.) without changing consumer code.
 
 ## Related Documentation
 
 - [Storage API](../api/storage.md) - Unified storage interface documentation
+- [Storage Backends](../guides/storage-backends.md) - Choosing between kv-jetstream and fs-jetstream
 - [Plugin System Overview](README.md)
 - [File Storage Plugin (fs-jetstream)](fs-jetstream.md)
 - [Creating Custom Plugins](creating-plugins.md)
 - [Core Concepts - Modules](../core-concepts/modules.md)
-
----
-
-For large file storage, see [fs-jetstream](fs-jetstream.md). For creating your own plugins, see [Creating Plugins](creating-plugins.md).

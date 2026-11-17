@@ -128,13 +128,15 @@ func WithNATSInProcessConn() MonoFrameworkOption {
 }
 
 // WithNATSConfigFile sets the path to a NATS server configuration file.
-// The file is processed using NATS server.ProcessConfigFile() during startup.
+// The file is processed using NATS server.ProcessConfigFile() when
+// NewMonoApplication starts the embedded server.
 //
 // When both a config file and programmatic options (like WithNATSPort) are specified,
 // the config file provides base settings and programmatic options override them.
 // This allows using a standard NATS config file while customizing specific settings.
 //
-// The path cannot be empty. File existence and validity are checked during Start().
+// The path cannot be empty. File existence and validity are checked when
+// NewMonoApplication starts the embedded server, not when the option is applied.
 //
 // Example:
 //

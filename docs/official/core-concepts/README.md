@@ -2,7 +2,9 @@
 
 Understanding these core concepts will help you effectively design and implement applications using the Monolith Framework.
 
-## The Five Key Concepts
+## The Key Concepts
+
+The concepts below follow the order of this section in the navigation.
 
 ### 1. [Modules](modules.md)
 
@@ -20,29 +22,29 @@ The public APIs of your modules.
 - **Why**: Explicit dependencies, managed startup order, type-safe communication
 - **Learn**: ServiceContainer, service registration, dependency injection
 
-### 3. [Inter-Module Communication](inter-module-communication.md)
+### 3. [Event Consumers](consumers.md)
+
+How modules react to events from other modules.
+
+- **What**: EventConsumer (NATS Core) and EventStreamConsumer (JetStream)
+- **Why**: Loose coupling: consumers do not depend on emitters
+- **Learn**: EventRegistry, event discovery, acknowledgment
+
+### 4. [Inter-Module Communication](inter-module-communication.md)
 
 How modules interact with each other.
 
 - **What**: Service patterns and Event patterns for different use cases
 - **Why**: Loose coupling, performance, durability based on your needs
-- **Learn**: Service Communication (4 patterns) and Event Communication (2 patterns)
+- **Learn**: Service Communication (5 patterns, including Cron) and Event Communication (2 patterns)
 
-### 4. [Architecture](architecture.md)
+### 5. [Architecture](architecture.md)
 
-How the framework components fit together.
+How the framework components fit together, around the embedded NATS server at its heart.
 
-- **What**: Embedded NATS, modular monolith design, layered architecture
-- **Why**: Scalability, observability, operational simplicity
-- **Learn**: Framework components and their responsibilities
-
-### 5. Embedded NATS
-
-The framework's heart.
-
-- **What**: NATS is an embedded message broker that runs in your process
-- **Why**: Inter-module communication without external dependencies
-- **Learn**: JetStream for persistence, subject naming conventions
+- **What**: Embedded NATS (a message broker running in your process), modular monolith design, layered architecture
+- **Why**: Inter-module communication without external dependencies; scalability, observability, operational simplicity
+- **Learn**: Framework components and their responsibilities, JetStream for persistence, subject naming conventions
 
 ## Quick Reference
 
@@ -70,12 +72,16 @@ Start here:
    - Learn how services establish dependencies
    - See how the framework manages startup order
 
-3. **[Inter-Module Communication](inter-module-communication.md)** (15 min)
+3. **[Event Consumers](consumers.md)**
+   - Consume events without depending on the emitter
+   - Choose between EventConsumer and EventStreamConsumer
+
+4. **[Inter-Module Communication](inter-module-communication.md)** (15 min)
    - Choose the right pattern for your use case
    - Understand Service vs Event communication
    - See examples of each pattern
 
-4. **[Architecture](architecture.md)** (10 min)
+5. **[Architecture](architecture.md)** (10 min)
    - Understand how the framework is organized
    - Learn about the layered architecture
    - Understand subject naming conventions
@@ -100,7 +106,6 @@ Modules don't call each other directly. They communicate through:
 This enables:
 - Independent module development
 - Easy testing with mocks
-- Hot module replacement (future)
 
 ### 3. **The Framework Handles Lifecycle**
 
@@ -146,6 +151,8 @@ A: Yes, but avoid it for loose coupling. Use NATS patterns instead:
 - Queue Groups for async work
 - Events for broadcasting
 
+The framework records boundary crossings (`app.ModuleBoundaries()`), and `WithStrictModuleBoundaries()` rejects them; `monotest.CheckImports` enforces the contract-package import rule.
+
 **Q: How do I handle dependencies between modules?**
 
 A: Use the DependentModule interface to declare them:
@@ -165,7 +172,7 @@ A:
 
 **Q: Can I use external message brokers?**
 
-A: Yes! The embedded NATS is optional. The framework provides interfaces you can implement with any broker.
+A: No. The embedded NATS server is always started, and all service and event communication goes through it. You can connect external NATS clients, cluster several instances (`WithNATSClustering`), or supply a NATS config file (`WithNATSConfigFile`).
 
 ## Next Steps
 
@@ -175,12 +182,12 @@ Ready to dive deeper?
 2. **[Services](services.md)** - Learn how modules expose public APIs and establish dependencies
 3. **[Inter-Module Communication](inter-module-communication.md)** - Choose the right pattern for your use case
 4. **[Framework Architecture](architecture.md)** - See how the pieces fit together
-5. **[Examples](../../../examples/)** - Learn from working code
+5. **[Examples](../../../examples/basic/README.md)** - Learn from working code
 
 ## Resources
 
 - **API Reference**: https://pkg.go.dev/github.com/go-monolith/mono
-- **Examples**: ../../../examples/ directory
+- **Examples**: [examples](../../../examples/basic/README.md)
 - **GitHub**: https://github.com/go-monolith/mono
 
 ---

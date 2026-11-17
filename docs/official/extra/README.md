@@ -1,59 +1,15 @@
 # Extra Resources
 
-This section contains additional resources beyond the main documentation, including frequently asked questions and supplementary materials.
+Additional resources beyond the main documentation.
 
-## What's in This Section
-
-### Frequently Asked Questions (FAQ)
-
-The [FAQ section](faq.md) addresses common questions developers ask when working with the Monolith Framework:
-
-- **Module Development**: How to add and structure modules
-- **Inter-Module Communication**: Different communication patterns and when to use them
-- **Framework Features**: JetStream, health checks, and other features
-- **Project Setup**: Recommended structures and best practices
-- **Testing and Error Handling**: Common patterns and approaches
-
-### Kubernetes Deployment Strategies
-
-[Kubernetes Deployment Strategies](kubernetes-deployment.md) covers changing a running JetStream cluster on Kubernetes: rolling updates, canaries, bad releases and rollback, node drains, and blue-green cutovers, with measured results and a cutover runbook.
-
-## Quick Links
-
-### Get Answers to Common Questions
-
-**Start here:** [Frequently Asked Questions](faq.md)
-
-Common questions covered:
-
-1. How do I add a new module?
-2. How do modules communicate with each other?
-3. What's the difference between Channel and Request-Reply services?
-4. How do I handle errors in handlers?
-5. How do I test modules in isolation?
-6. Can I use this framework without JetStream?
-7. How do I implement health checks?
-8. What's the recommended project structure?
-
-## When to Use This Section
-
-- You have a question that isn't covered in the main guides
-- You need clarification on common patterns or features
-- You're troubleshooting an issue
-- You want to understand best practices for a specific scenario
-
-## Organization
-
-- **[Frequently Asked Questions](faq.md)** - Answers to the most common developer questions
-- **[Kubernetes Deployment Strategies](kubernetes-deployment.md)** - Rolling, canary and blue-green deployments of a JetStream cluster, measured
-- **[Code Coverage](code-coverage.md)** - Test coverage statistics and quality metrics
+| Page | What it covers | Use it when |
+|------|----------------|-------------|
+| [Frequently Asked Questions](faq.md) | Short answers on modules, communication patterns, errors, testing, JetStream, health checks, project structure and troubleshooting, each with a link to the full page | You have a question that isn't covered in the main guides, or you're troubleshooting an issue |
+| [Kubernetes Deployment Strategies](kubernetes-deployment.md) | Changing a running JetStream cluster on Kubernetes: rolling updates, canaries, bad releases and rollback, node drains, and blue-green cutovers, with measured results and a cutover runbook | You deploy or change a clustered application |
+| [Code Coverage](code-coverage.md) | How test coverage is measured and enforced | You contribute to the framework |
 
 ## Related Documentation
 
 - [How-To Guides](../guides/README.md) - Step-by-step instructions for common tasks
 - [API Reference](../api/README.md) - Complete API documentation
 - [Core Concepts](../core-concepts/README.md) - Foundational concepts and architecture
-
----
-
-If you have a question that's not covered here, check the [Core Concepts](../core-concepts/README.md) or [How-To Guides](../guides/README.md) sections for more detailed information.

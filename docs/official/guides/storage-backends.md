@@ -1,65 +1,10 @@
 # Storage Backends Guide
 
-This guide explains the unified storage interface pattern used by storage plugins and how to work with different storage backends effectively.
+This guide explains how to write code against the storage plugins through the shared `pkg/storage` interfaces: which backend to choose, how to detect what a backend can do, and practical patterns for streaming, watching and optimistic locking. Read it when you choose between [fs-jetstream](../plugins/fs-jetstream.md) and [kv-jetstream](../plugins/kv-jetstream.md), or write code that should work with more than one backend. The exact signatures are in the [Storage API reference](../api/storage.md).
 
 ## Overview
 
 The Monolith Framework provides a unified storage abstraction through the `pkg/storage` package. This allows you to write code that works with different storage backends (file storage, key-value storage) using a common interface pattern.
-
-### GoFiber Storage Compatibility
-
-The `mono.Storage` interface is **fully compatible** with the [GoFiber Storage](https://github.com/gofiber/storage) interface. This means you can use any of the 40+ storage implementations from the GoFiber ecosystem directly within this framework.
-
-```go
-// mono.Storage interface is identical to fiber.Storage
-type Storage interface {
-    Get(key string) ([]byte, error)
-    GetWithContext(ctx context.Context, key string) ([]byte, error)
-    Set(key string, val []byte, exp time.Duration) error
-    SetWithContext(ctx context.Context, key string, val []byte, exp time.Duration) error
-    Delete(key string) error
-    DeleteWithContext(ctx context.Context, key string) error
-    Reset() error
-    ResetWithContext(ctx context.Context) error
-    Close() error
-}
-```
-
-**Available GoFiber Storage Backends:**
-
-| Category | Backends |
-|----------|----------|
-| **SQL Databases** | MySQL, PostgreSQL, SQLite3, MSSQL |
-| **NoSQL** | MongoDB, Couchbase, DynamoDB |
-| **Key-Value Stores** | Redis, Valkey, Memcache, BadgerDB, Bbolt, Pebble |
-| **Cloud Storage** | S3, Azure Blob, Cloudflare KV |
-| **Embedded** | Ristretto, memory, rueidis |
-
-**Example: Using Redis from GoFiber:**
-
-```go
-import (
-    "github.com/gofiber/storage/redis/v3"
-    "github.com/go-monolith/mono/pkg/storage"
-)
-
-// Create a Redis storage from gofiber
-redisStore := redis.New(redis.Config{
-    Host:     "localhost",
-    Port:     6379,
-    Database: 0,
-})
-
-// Use it anywhere mono.Storage is expected
-var s storage.Storage = redisStore
-
-// Works seamlessly
-s.Set("key", []byte("value"), time.Hour)
-```
-
-For the complete list of available backends and their configuration options, visit the [GoFiber Storage repository](https://github.com/gofiber/storage).
-
-### Key Benefits
 
 The key benefits of this design:
 - **Consistent API**: Same methods across different storage backends
@@ -69,40 +14,7 @@ The key benefits of this design:
 
 ## Interface Hierarchy
 
-The storage package defines a base `Storage` interface and several extension interfaces:
-
-```
-Storage (base)
-     │
-     ├── StorageWithBucket      ← Bucket identification
-     ├── StorageWithList        ← Object enumeration
-     ├── StorageWithStat        ← Metadata retrieval
-     ├── StorageWithReader      ← Streaming I/O for large files
-     ├── StorageWithWatch       ← Real-time notifications
-     ├── StorageWithRevision    ← Optimistic locking
-     ├── StorageWithKeys        ← Key enumeration
-     └── StorageWithStatus      ← Storage status info
-```
-
-### Base Storage Interface
-
-All storage backends implement the base `Storage` interface:
-
-```go
-type Storage interface {
-    Get(key string) ([]byte, error)
-    GetWithContext(ctx context.Context, key string) ([]byte, error)
-    Set(key string, val []byte, exp time.Duration) error
-    SetWithContext(ctx context.Context, key string, val []byte, exp time.Duration) error
-    Delete(key string) error
-    DeleteWithContext(ctx context.Context, key string) error
-    Reset() error
-    ResetWithContext(ctx context.Context) error
-    Close() error
-}
-```
-
-### Extended Interfaces
+Every backend implements the base `Storage` interface (Get, Set, Delete, Reset, Close, each with a `...WithContext` variant except Close). Extended interfaces add capabilities; they are standalone (they do not embed `Storage`), so check for them with type assertions:
 
 | Interface | Purpose | Methods |
 |-----------|---------|---------|
@@ -114,6 +26,55 @@ type Storage interface {
 | `StorageWithRevision` | Optimistic locking via revisions | `Create()`, `Update()`, `GetEntry()`, `PutWithRevision()`, `Purge()` |
 | `StorageWithKeys` | Key enumeration | `Keys()`, `KeysWithContext()` |
 | `StorageWithStatus` | Storage status information | `Status()`, `StatusWithContext()` |
+| `StorageWithConn[T]` | Underlying driver connection | `Conn()` |
+
+See the [Storage API reference](../api/storage.md#interface-hierarchy) for the signatures.
+
+## Backend Comparison
+
+### Implemented Interfaces by Backend
+
+| Interface | fs-jetstream | kv-jetstream |
+|-----------|:------------:|:------------:|
+| `Storage` (base) | ✅ | ✅ |
+| `StorageWithBucket` | ✅ | ✅ |
+| `StorageWithList` | ✅ | ❌ |
+| `StorageWithStat` | ✅ | ❌ |
+| `StorageWithReader` | ✅ | ❌ |
+| `StorageWithWatch` | ❌ | ✅ |
+| `StorageWithRevision` | ❌ | ✅ |
+| `StorageWithKeys` | ❌ | ✅ |
+| `StorageWithStatus` | ❌ | ✅ |
+
+### Feature Comparison
+
+| Feature | fs-jetstream | kv-jetstream |
+|---------|-------------|--------------|
+| **Data Model** | Binary objects (files) | Key-value pairs |
+| **Max Value Size** | Unlimited (streaming) | ~1MB recommended |
+| **Streaming Support** | Yes (GetReader/PutReader) | No |
+| **Object Listing** | Yes (with prefix filter) | No (use Keys instead) |
+| **Watch Changes** | No | Yes (pattern-based) |
+| **Optimistic Locking** | No | Yes (revision-based) |
+| **Metadata Retrieval** | Yes (Stat) | Yes (GetEntry) |
+| **TTL Support** | Yes (bucket-level only) | Yes (bucket-level only) |
+| **Compression** | Yes (S2) | Yes (S2) |
+
+### When to Use Each Backend
+
+**Use fs-jetstream when:**
+- Storing large files (documents, images, videos)
+- Need streaming read/write for memory efficiency
+- Files may exceed 1MB
+- Need to list objects by prefix
+- File metadata (size, hash, modtime) is important
+
+**Use kv-jetstream when:**
+- Storing small configuration values
+- Need real-time change notifications (Watch)
+- Require optimistic locking for concurrent updates
+- Building cache or session storage
+- Values are typically JSON or small binary data
 
 ## Capability Detection
 
@@ -187,52 +148,6 @@ func requireAdvancedStorage(s storage.Storage) error {
     return nil
 }
 ```
-
-## Backend Comparison
-
-### Implemented Interfaces by Backend
-
-| Interface | fs-jetstream | kv-jetstream |
-|-----------|:------------:|:------------:|
-| `Storage` (base) | ✅ | ✅ |
-| `StorageWithBucket` | ✅ | ✅ |
-| `StorageWithList` | ✅ | ❌ |
-| `StorageWithStat` | ✅ | ❌ |
-| `StorageWithReader` | ✅ | ❌ |
-| `StorageWithWatch` | ❌ | ✅ |
-| `StorageWithRevision` | ❌ | ✅ |
-| `StorageWithKeys` | ❌ | ✅ |
-| `StorageWithStatus` | ❌ | ✅ |
-
-### Feature Comparison
-
-| Feature | fs-jetstream | kv-jetstream |
-|---------|-------------|--------------|
-| **Data Model** | Binary objects (files) | Key-value pairs |
-| **Max Value Size** | Unlimited (streaming) | ~1MB recommended |
-| **Streaming Support** | Yes (GetReader/PutReader) | No |
-| **Object Listing** | Yes (with prefix filter) | No (use Keys instead) |
-| **Watch Changes** | No | Yes (pattern-based) |
-| **Optimistic Locking** | No | Yes (revision-based) |
-| **Metadata Retrieval** | Yes (Stat) | Yes (GetEntry) |
-| **TTL Support** | Yes | Yes |
-| **Compression** | Yes (S2) | Yes (S2) |
-
-### When to Use Each Backend
-
-**Use fs-jetstream when:**
-- Storing large files (documents, images, videos)
-- Need streaming read/write for memory efficiency
-- Files may exceed 1MB
-- Need to list objects by prefix
-- File metadata (size, hash, modtime) is important
-
-**Use kv-jetstream when:**
-- Storing small configuration values
-- Need real-time change notifications (Watch)
-- Require optimistic locking for concurrent updates
-- Building cache or session storage
-- Values are typically JSON or small binary data
 
 ## Practical Examples
 
@@ -347,31 +262,6 @@ func IncrementCounter(ctx context.Context, s storage.Storage, key string) error 
 }
 ```
 
-## Sentinel Errors
-
-The storage package provides sentinel errors for programmatic error handling:
-
-```go
-import "github.com/go-monolith/mono/pkg/storage"
-
-// Check for specific errors
-if errors.Is(err, storage.ErrKeyNotFound) {
-    // Key doesn't exist
-}
-
-if errors.Is(err, storage.ErrKeyExists) {
-    // Key already exists (Create failed)
-}
-
-if errors.Is(err, storage.ErrRevisionMismatch) {
-    // Concurrent modification detected
-}
-
-if errors.Is(err, storage.ErrBucketNotFound) {
-    // Bucket doesn't exist
-}
-```
-
 ## Best Practices
 
 ### Capability Checking
@@ -404,6 +294,29 @@ if errors.Is(err, storage.ErrBucketNotFound) {
 
 ### Error Handling
 
+The storage package provides sentinel errors for programmatic error handling (see [Sentinel Errors](../api/storage.md#sentinel-errors) for the full list):
+
+```go
+import "github.com/go-monolith/mono/pkg/storage"
+
+// Check for specific errors
+if errors.Is(err, storage.ErrKeyNotFound) {
+    // Key doesn't exist
+}
+
+if errors.Is(err, storage.ErrKeyExists) {
+    // Key already exists (Create failed)
+}
+
+if errors.Is(err, storage.ErrRevisionMismatch) {
+    // Concurrent modification detected
+}
+
+if errors.Is(err, storage.ErrBucketNotFound) {
+    // Bucket doesn't exist (declared for backends; the built-in plugins never return it)
+}
+```
+
 ✅ **Do**
 - Check for sentinel errors using `errors.Is()`
 - Retry on `ErrRevisionMismatch` for optimistic locking
@@ -414,9 +327,37 @@ if errors.Is(err, storage.ErrBucketNotFound) {
 - Ignore revision mismatches in concurrent scenarios
 - Silently swallow storage errors
 
+## Aside: GoFiber Storage Compatibility
+
+`storage.Storage` (package `github.com/go-monolith/mono/pkg/storage`) has the same method set as the [GoFiber Storage](https://github.com/gofiber/storage) `Storage` interface, so a GoFiber store can be passed to code that accepts `storage.Storage`. The framework does not wrap or test them.
+
+**Example: Using Redis from GoFiber:**
+
+```go
+import (
+    "github.com/gofiber/storage/redis/v3"
+    "github.com/go-monolith/mono/pkg/storage"
+)
+
+// Create a Redis storage from gofiber
+redisStore := redis.New(redis.Config{
+    Host:     "localhost",
+    Port:     6379,
+    Database: 0,
+})
+
+// Use it anywhere storage.Storage is expected
+var s storage.Storage = redisStore
+
+// Works seamlessly
+s.Set("key", []byte("value"), time.Hour)
+```
+
+For the available backends and their configuration options, see the [GoFiber Storage repository](https://github.com/gofiber/storage) (external; not maintained or tested by this project).
+
 ## Related Documentation
 
-- [Storage API Reference](../api/storage.md) - Complete API documentation
+- [Storage API Reference](../api/storage.md) - Complete API documentation, including every interface's signatures
 - [File Storage Plugin](../plugins/fs-jetstream.md) - fs-jetstream plugin guide
 - [Key-Value Storage Plugin](../plugins/kv-jetstream.md) - kv-jetstream plugin guide
 - [Creating Custom Plugins](../plugins/creating-plugins.md) - Build your own storage plugin

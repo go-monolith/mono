@@ -136,30 +136,41 @@ go run .
 You should see:
 
 ```
-INFO [main] app/framework.go:XXX framework starting
-INFO [main] app/nats.go:XXX NATS server started
-INFO [main] app/framework.go:XXX registering module: order
-INFO [main] app/framework.go:XXX module order started
-INFO [main] app/framework.go:XXX framework started
+time=... level=INFO msg="NATS server started" server_name=... host=127.0.0.1 port=4222 jetstream=false
+time=... level=INFO msg="NATS client connected via TCP" url=nats://127.0.0.1:4222
+time=... level=INFO msg="Application initialized"
+time=... level=INFO msg="Module registered" module=order
+time=... level=INFO msg="Starting application"
+...
+... INFO Starting order module
+time=... level=INFO msg="Module started" module=order duration=...
+time=... level=INFO msg="Application started successfully"
 
 === Application Started ===
 Modules: [order]
 
 === Creating Orders ===
-INFO [order] ... Order created orderID=ORD-000001 customer=CUST-001 product=laptop amount=1299.99
-INFO [order] ... Order created orderID=ORD-000002 customer=CUST-002 product=mouse amount=29.99
-INFO [order] ... Order created orderID=ORD-000003 customer=CUST-003 product=keyboard amount=79.99
+... INFO Order created orderID=ORD-000001 customer=CUST-001 product=laptop amount=1299.99
+... INFO Order created orderID=ORD-000002 customer=CUST-002 product=mouse amount=29.99
+... INFO Order created orderID=ORD-000003 customer=CUST-003 product=keyboard amount=79.99
 
 === Health Check ===
 Healthy: true
 NATS Healthy: true
 
 === Shutting Down ===
-INFO [main] app/framework.go:XXX stopping framework
-INFO [order] ... Stopping order module
-INFO [main] app/framework.go:XXX framework stopped
+time=... level=INFO msg="Stopping application"
+...
+... INFO Stopping order module
+time=... level=INFO msg="Module stopped" module=order
+...
+time=... level=INFO msg="NATS server stopped successfully"
+time=... level=INFO msg="Application stopped successfully"
+time=... level=INFO msg="Shutdown completed"
 Application stopped successfully!
 ```
+
+The `time=... level=INFO msg=...` lines come from the framework logger; the `... INFO` lines come from the module's calls to the standard `log/slog` default logger.
 
 {% hint style="success" %}
 **Congratulations!** You've built your first Monolith Framework application.
@@ -174,6 +185,8 @@ Every module must implement three methods:
 - **`Name()`** - Unique identifier for the module (used in logs and discovery)
 - **`Start(ctx)`** - Called when the application starts (initialize resources here)
 - **`Stop(ctx)`** - Called when the application shuts down (clean up resources)
+
+Optional interfaces (see [Common Patterns](#common-patterns)) are called before `Start`, in this order: `SetDependencyServiceContainer`, `SetEventBus`, `RegisterServices`, `RegisterEventConsumers`, then `Start`. See [Module Lifecycle](../core-concepts/modules.md#module-lifecycle).
 
 ### Logging
 
@@ -204,8 +217,8 @@ mono.NewMonoApplication(
 ### Graceful Shutdown
 
 Always call `app.Stop()` to gracefully shut down:
-- Stops all modules in reverse order
-- Drains in-flight operations
+- Drains subscriptions and waits for in-flight handlers
+- Stops all modules in reverse dependency order
 - Stops the embedded NATS server
 
 ## Common Patterns
@@ -226,10 +239,10 @@ func (m *OrderModule) RegisterServices(container mono.ServiceContainer) error {
 Implement `HealthCheckableModule` for custom health logic:
 
 ```go
-func (m *OrderModule) Health(ctx context.Context) mono.ModuleHealth {
-    return mono.ModuleHealth{
+func (m *OrderModule) Health(ctx context.Context) mono.HealthStatus {
+    return mono.HealthStatus{
         Healthy: true,
-        Status: "Running",
+        Message: "running",
     }
 }
 ```
@@ -257,12 +270,13 @@ Now that you understand the basics:
 
 ## Troubleshooting
 
-### "address already in use"
+### "NATS server not ready after 10s timeout"
 
-Another application is using port 4222. Either:
+`NewMonoApplication` fails with `failed to start NATS: NATS server not ready after 10s timeout` when the embedded server cannot accept connections, usually because another application is using port 4222. Either:
 - Stop the other application
 - Use a different port: `mono.WithNATSPort(4223)`
 - Or use a config file with port override: `mono.WithNATSConfigFile("server.conf")` with `mono.WithNATSPort(4223)`
+- Or, when nothing outside the process needs to connect, no TCP listener at all: `mono.WithNATSDontListen()` with `mono.WithNATSInProcessConn()`
 
 ### Module won't start
 

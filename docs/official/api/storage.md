@@ -1,5 +1,7 @@
 # Storage Interface
 
+This page is the reference for package `github.com/go-monolith/mono/pkg/storage`: its interfaces, data types, sentinel errors and options. Read it when you write code against the storage plugins' ports or implement a storage backend of your own. For how to choose a backend and practical patterns, see the [Storage Backends guide](../guides/storage-backends.md).
+
 The `pkg/storage` package provides a unified storage interface for communicating with different storage backends. This abstraction enables consistent storage operations across different implementations (JetStream KV, JetStream ObjectStore, and future backends like Redis or S3).
 
 ## Overview
@@ -9,7 +11,7 @@ The storage package defines a composable interface hierarchy where implementatio
 - **Backend Agnostic Code**: Write storage code once, swap backends without changes
 - **Capability Detection**: Check for extended capabilities using type assertions
 - **Consistent Patterns**: Same API patterns across KV store, file storage, and future implementations
-- **GoFiber Compatibility**: The base `Storage` interface is fully compatible with [GoFiber Storage](https://github.com/gofiber/storage), allowing you to use any of its 40+ storage implementations (Redis, PostgreSQL, MongoDB, S3, DynamoDB, etc.) within this framework
+- **GoFiber Compatibility**: `storage.Storage` has the same method set as [GoFiber Storage](https://github.com/gofiber/storage)'s `Storage`, so a GoFiber store can be passed to code that accepts `storage.Storage`. The framework does not wrap or test them
 
 ## Interface Hierarchy
 
@@ -32,8 +34,12 @@ Storage (base)
      │
      ├── StorageWithKeys        - Key enumeration (kv-jetstream)
      │
-     └── StorageWithStatus      - Status information (kv-jetstream)
+     ├── StorageWithStatus      - Status information (kv-jetstream)
+     │
+     └── StorageWithConn[T]     - Underlying driver connection (not implemented by the built-in plugins)
 ```
+
+The extended interfaces are standalone (they do not embed `Storage`): check for them with type assertions on a `Storage` value.
 
 ## Base Interface
 
@@ -49,7 +55,9 @@ type Storage interface {
     GetWithContext(ctx context.Context, key string) ([]byte, error)
 
     // Set stores a value with optional expiration.
-    // exp=0 means no expiration.
+    // exp=0 means no expiration. Backends may ignore exp: fs-jetstream and
+    // kv-jetstream apply only the bucket TTL.
+    // An empty key or nil value is ignored without error.
     Set(key string, val []byte, exp time.Duration) error
     SetWithContext(ctx context.Context, key string, val []byte, exp time.Duration) error
 
@@ -189,6 +197,18 @@ type StorageWithStatus interface {
 
 **Used by**: [Key-Value Storage Plugin (kv-jetstream)](../plugins/kv-jetstream.md)
 
+### StorageWithConn
+
+Generic access to the underlying driver connection.
+
+```go
+type StorageWithConn[T any] interface {
+    Conn() T
+}
+```
+
+Not implemented by the built-in plugins.
+
 ## Data Types
 
 ### ObjectInfo
@@ -279,6 +299,8 @@ var (
 )
 ```
 
+`ErrBucketNotFound` is declared for backends; the built-in plugins never return it (their `Bucket(name)` returns nil for an unknown bucket).
+
 **Usage:**
 ```go
 entry, err := bucket.GetEntry("key")
@@ -339,6 +361,28 @@ Options for delete operations.
 storage.WithDeleteRevision(expectedRevision)
 ```
 
+{% hint style="warning" %}
+`DeleteOption` is not accepted by any method yet: `Delete` and `DeleteWithContext` take no options.
+{% endhint %}
+
+### Implementing a Backend
+
+Custom backends receive the options as functional options and resolve them with the `Apply*Options` helpers:
+
+| Option type | Struct (fields) | Helper |
+|-------------|-----------------|--------|
+| `ListOption` | `ListOptions{Prefix string}` | `storage.ApplyListOptions(opts...) *ListOptions` |
+| `PutOption` | `PutOptions{Description string; Headers map[string]string}` | `storage.ApplyPutOptions(opts...) *PutOptions` |
+| `WatchOption` | `WatchOptions{UpdatesOnly, IgnoreDeletes, MetaOnly bool; ResumeFromRevision uint64}` | `storage.ApplyWatchOptions(opts...) *WatchOptions` |
+| `DeleteOption` | `DeleteOptions{Revision uint64}` | `storage.ApplyDeleteOptions(opts...) *DeleteOptions` |
+
+```go
+func (b *MyBackend) ListWithContext(ctx context.Context, opts ...storage.ListOption) ([]storage.ObjectInfo, error) {
+    options := storage.ApplyListOptions(opts...)
+    return b.list(ctx, options.Prefix)
+}
+```
+
 ## Context Variants Pattern
 
 Most methods have two variants:
@@ -359,47 +403,24 @@ data, err := bucket.GetWithContext(ctx, "key")
 
 ## Capability Detection
 
-Check for extended capabilities using type assertions:
+Check for extended capabilities with a type assertion on a `Storage` value; a backend implements only the interfaces it supports:
 
 ```go
-// Check if storage supports watching
-if watcher, ok := storage.(storage.StorageWithWatch); ok {
-    w, err := watcher.Watch("user.*")
-    if err != nil {
-        return err
-    }
-    defer w.Stop()
-
-    for entry := range w.Updates() {
-        fmt.Printf("Key %s changed\n", entry.Key)
-    }
-}
-
-// Check if storage supports revisions
-if revStore, ok := storage.(storage.StorageWithRevision); ok {
+// s is a storage.Storage
+if revStore, ok := s.(storage.StorageWithRevision); ok {
     entry, err := revStore.GetEntry("key")
     if err != nil {
         return err
     }
-    // Use entry.Revision for optimistic locking
+    fmt.Printf("Revision for optimistic locking: %d\n", entry.Revision)
 }
 ```
 
-## Plugin Implementations
-
-The following plugins implement subsets of the storage interface:
-
-| Plugin | Base Interfaces | Extended Interfaces |
-|--------|-----------------|---------------------|
-| [kv-jetstream](../plugins/kv-jetstream.md) | Storage, StorageWithBucket | StorageWithWatch, StorageWithRevision, StorageWithKeys, StorageWithStatus |
-| [fs-jetstream](../plugins/fs-jetstream.md) | Storage, StorageWithBucket | StorageWithList, StorageWithStat, StorageWithReader |
+The [Storage Backends guide](../guides/storage-backends.md#capability-detection) shows the pattern for every capability, including watching; the [Backend Comparison](../guides/storage-backends.md#backend-comparison) lists which interfaces each built-in plugin implements.
 
 ## Related Documentation
 
 - [Key-Value Storage Plugin (kv-jetstream)](../plugins/kv-jetstream.md)
 - [File Storage Plugin (fs-jetstream)](../plugins/fs-jetstream.md)
+- [Storage Backends guide](../guides/storage-backends.md)
 - [Creating Custom Plugins](../plugins/creating-plugins.md)
-
----
-
-For plugin-specific documentation, see the individual plugin pages. For creating custom storage backends, implement the relevant interfaces from this package.

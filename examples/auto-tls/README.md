@@ -11,6 +11,44 @@ so it cannot complete inside a dev container or CI. Running it with no
 configuration is safe: it prints what it would do and exits without contacting
 any CA.
 
+## Running the Example
+
+Prerequisites for a real run:
+
+1. A public DNS A record for the domain, pointing at the host.
+2. Inbound TCP port 80 reachable from the internet, for the http-01 challenge.
+3. Permission to bind port 80 — root, or `CAP_NET_BIND_SERVICE`.
+4. A cache directory that survives restarts.
+
+```bash
+# Dry run: prints the configuration and prerequisites, contacts nothing.
+cd examples/auto-tls && go run .
+
+# For real, against Let's Encrypt staging. From the repository root:
+MONO_ACME_DOMAIN=nats.example.com \
+MONO_ACME_EMAIL=ops@example.com \
+MONO_ACME_CACHE_DIR=/var/lib/mono/acme \
+  go run ./examples/auto-tls
+```
+
+`MONO_ACME_CACHE_DIR` defaults to `$TMPDIR/mono-autotls-example` in this
+example. Set it to a persistent path for anything but a one-off try.
+`MONO_ACME_EMAIL` is optional (`AutoTLSConfig.Email`).
+
+There is no `make run-example-N` target for this example, because it cannot
+complete without public DNS.
+
+## Code Structure
+
+```
+examples/auto-tls/
+├── main.go     # Configuration from the environment, AutoTLS options, dry run when MONO_ACME_DOMAIN is unset
+├── module.go   # EchoModule: the "say" request-reply service (services.echo.say)
+└── README.md   # This file
+```
+
+## Key Patterns
+
 ```go
 app, err := mono.NewMonoApplication(
     mono.WithNATSHost("0.0.0.0"),
@@ -24,15 +62,13 @@ app, err := mono.NewMonoApplication(
 )
 ```
 
-## Key points
-
 - **Client-to-server connections only**: the certificate is installed on the
   NATS client listener. Route (cluster), gateway, leafnode, websocket and MQTT
   listeners each have their own separate TLS configuration and are untouched, so
   traffic between cluster nodes stays plaintext unless you configure it
   yourself. Routes are peer-to-peer and conventionally use mutual TLS, which
   needs a client certificate autocert does not issue — use an internal CA and a
-  `cluster { tls { ... } }` block in a [NATS config file](../nats-config/)
+  `cluster { tls { ... } }` block in a [NATS config file](../nats-config/README.md)
   instead.
 - **http-01 only**: the framework serves the challenge from its own listener on
   port 80, for the whole life of the process — every renewal re-runs the
@@ -49,38 +85,16 @@ app, err := mono.NewMonoApplication(
 - **Enabling AutoTLS makes TLS mandatory**: plaintext clients are rejected once
   a certificate is configured. Turning it on is a breaking change for an
   existing deployment.
-- **Startup is fail-fast**: the certificate is obtained before the framework
-  reports ready, so a misconfigured domain or an unreachable port 80 fails
-  startup instead of surfacing as a handshake error hours later.
+- **Startup is fail-fast**: the certificate is obtained inside
+  `mono.NewMonoApplication` (bounded by `StartupIssueTimeout`, default 60 s),
+  so a misconfigured domain or an unreachable port 80 makes
+  `NewMonoApplication` return an error instead of surfacing as a handshake
+  error hours later.
 - **Staging first**: this example defaults to the Let's Encrypt staging
   endpoint, whose rate limits are far more forgiving while DNS and firewall
   rules are still being sorted out. Staging issues from an untrusted root, so
   clients must be told to trust it. Drop `DirectoryURL` to use production once a
   staging run succeeds.
-
-## Prerequisites
-
-1. A public DNS A record for the domain, pointing at the host.
-2. Inbound TCP port 80 reachable from the internet, for the http-01 challenge.
-3. Permission to bind port 80 — root, or `CAP_NET_BIND_SERVICE`.
-4. A cache directory that survives restarts.
-
-## Run
-
-```bash
-# Dry run: prints the configuration and prerequisites, contacts nothing.
-cd examples/auto-tls && go run .
-
-# For real, against Let's Encrypt staging.
-MONO_ACME_DOMAIN=nats.example.com \
-MONO_ACME_EMAIL=ops@example.com \
-MONO_ACME_CACHE_DIR=/var/lib/mono/acme \
-  go run ./examples/auto-tls
-```
-
-There is no `make run-example-N` target for this example, because it cannot
-complete without public DNS — the same reason `event-emitter` and `nats-config`
-have none.
 
 Once started, the echo service is reachable over TLS:
 
@@ -90,9 +104,35 @@ reply, err := nc.Request("services.echo.say", []byte("hello"), 5*time.Second)
 // reply.Data == "echo: hello"
 ```
 
-## Related Documentation
+## Expected Output
 
-- [Foundation Spec — AutoTLS Design](../../docs/spec/foundation.md)
-- [Implementation Spec](../../internal/nats/autotls.spec.md)
+Without `MONO_ACME_DOMAIN` (the dry run; `CacheDir` shows the default under `$TMPDIR`):
+
+```
+=== Mono-Framework AutoTLS Example ===
+Demonstrates: automatic ACME certificates for the embedded NATS server
+
+MONO_ACME_DOMAIN is not set, so no certificate authority will be contacted.
+
+This example would configure AutoTLS as:
+
+    mono.WithNATSAutoTLS(types.AutoTLSConfig{
+        Domains:      []string{"nats.example.com"},
+        Email:        "ops@example.com",
+        CacheDir:     "/tmp/mono-autotls-example",
+        AcceptTOS:    true,
+        DirectoryURL: "https://acme-staging-v02.api.letsencrypt.org/directory",
+    })
+
+To run it for real you need:
+  ...
+
+Example completed!
+```
+
+## Next Steps
+
+- [Foundation Spec — AutoTLS Design](https://github.com/go-monolith/mono/blob/main/docs/spec/foundation.md)
+- [Implementation Spec](https://github.com/go-monolith/mono/blob/main/internal/nats/autotls.spec.md)
 - [NATS Config File Example](../nats-config/README.md)
-- [SECURITY.md](../../SECURITY.md)
+- [SECURITY.md](https://github.com/go-monolith/mono/blob/main/SECURITY.md)

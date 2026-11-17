@@ -41,11 +41,9 @@ make COVERAGE_THRESHOLD=90 test-coverage-check
 
 Three trees are excluded from the enforced figure. Including them would measure how much example and benchmark code the repository carries rather than how well the framework itself is tested — `examples/` alone drags the raw number from ~92% down to ~61%.
 
-Expect the exact figure to move a little with the Go release you build under: the compiler's statement-counting granularity changes between versions, so the same tree reports 3807 in-scope statements under Go 1.26 and 5226 under Go 1.27 (91.2% and 92.4% respectively). The percentage barely shifts, but any check written against an absolute statement count has to tolerate the spread.
-
 | Excluded | Why |
 | --- | --- |
-| `examples/` | Documentation programs, built and run by `make run-example-*` rather than unit tested |
+| `examples/` | Documentation programs; four of them (basic, multi-module, analytics, cron-scheduler) are built and run by `make run-example-1` to `make run-example-4`, none are unit tested |
 | `bench/` | Performance benchmarks and the benchmark JSON parser |
 | `test/` | Integration suite, run separately via `make test-integration` under `-tags=integration` |
 
@@ -62,7 +60,7 @@ Changing the exclusions therefore means editing both files together. If the shap
 
 ## Coverage in CI
 
-Coverage runs on a single Go version leg of the pull-request matrix — the figure does not meaningfully vary by toolchain version, and running it on all six would send Codecov six duplicate uploads of the same commit. The push-to-`main` workflow uploads too, which is what gives Codecov a base report for per-pull-request deltas.
+Coverage runs on a single Go version leg of the pull-request matrix — the figure does not meaningfully vary by toolchain version, and running it on both legs would send Codecov two duplicate uploads of the same commit. The push-to-`main` workflow uploads too, which is what gives Codecov a base report for per-pull-request deltas.
 
 Each workflow runs three separate steps rather than one combined target:
 
@@ -79,6 +77,10 @@ When contributing to the framework, ensure:
 1. **New code has tests** — all new public functions and methods should have corresponding tests
 2. **Edge cases are covered** — include tests for error conditions and boundary cases
 3. **Coverage doesn't decrease** — the Codecov comment on your pull request shows exactly which lines your diff left uncovered
+
+## Note: Figures Vary by Go Release
+
+Expect the exact figure to move a little with the Go release you build under: the compiler's statement-counting granularity changes between versions, so the same tree reports 3807 in-scope statements under Go 1.26 and 5226 under Go 1.27 (91.2% and 92.4% respectively). The percentage barely shifts, but any check written against an absolute statement count has to tolerate the spread.
 
 ## Related Documentation
 

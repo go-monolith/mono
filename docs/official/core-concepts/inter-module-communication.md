@@ -1,6 +1,8 @@
 # Inter-Module Communication
 
-The Monolith Framework provides **two categories of communication patterns** for modules to interact with each other. Understanding the difference between these patterns is critical for designing your module architecture.
+Modules talk to each other in two ways: **services** (one module calls another, which makes it a dependency) and **events** (a module announces something, and any module may react). Read this page to choose a pattern and see how each one is used. The exact methods are in the [ServiceContainer API](../api/container.md) and the [EventRegistry API](../api/eventregistry.md).
+
+If you are unsure which pattern to use, start with [Choosing the Right Pattern](#choosing-the-right-pattern).
 
 ## Communication Categories
 
@@ -30,17 +32,22 @@ Service communication creates a **direct dependency** between modules. Use these
 
 ### Service Pattern Comparison
 
-| Pattern | Latency | Durability | Use Case | Synchronous |
-|---------|---------|-----------|----------|------------|
-| **Channel** | ~µs | None | In-process, high throughput | Yes |
-| **Request-Reply** | ~1ms | None | Synchronous service calls | Yes |
-| **Queue Group** | ~1ms | None | Load-balanced async work | No |
-| **Stream Consumer** | ~1ms | JetStream | Durable message processing | No |
-| **Cron** | scheduled | JetStream | Periodic / scheduled work | No |
+| Pattern | Durability | Use Case | Synchronous |
+|---------|-----------|----------|------------|
+| **Channel** | None | In-process, high throughput | Yes |
+| **Request-Reply** | None | Synchronous service calls | Yes |
+| **Queue Group** | None | Load-balanced async work | No |
+| **Stream Consumer** | JetStream | Durable message processing | No |
+| **Cron** | JetStream | Periodic / scheduled work | No |
+
+Typical latencies are in [Performance Characteristics](#performance-characteristics).
 
 ### Typed Service Contracts
 
-A contract declares a service once, in the provider's `contract` sub-package, with its request and response types; the provider registers through it and consumers call through it, so the service name, kind and serialization live in one place and consumers never import the provider's module package:
+A contract declares a service once, in the provider's `contract` sub-package, with its request and response types. The provider registers through it and consumers call through it, so:
+
+- the service name, kind and serialization live in one place;
+- consumers never import the provider's module package.
 
 ```go
 // inventory/contract/contract.go
@@ -56,6 +63,8 @@ resp, err := inventorycontract.CheckStock.Call(ctx, m.inventory, inventorycontra
 ```
 
 `helper.QueueGroupService[T]` (`Register`/`Send`) and `helper.StreamConsumerService[T]` (`Register`/`Publish`) follow the same shape; `WithMarshaler`/`WithUnmarshaler` change the codec. Declare what a module calls with `ConsumeServices()` (see [ServiceConsumerModule](../api/module.md#serviceconsumermodule)) and the framework checks it at startup. The [Module Boundaries Guide](../guides/module-boundaries.md) covers the full contract/ports/adapters layout, the runtime boundary report and the `monotest` harness.
+
+The patterns below use contracts where one exists. Each also has a raw, string-based form (`container.Register*` / `Get*`, `helper.CallRequestReplyService`, `helper.SendQueueGroupService`, `helper.PublishStreamConsumerService`), documented in the [ServiceContainer API](../api/container.md).
 
 ### Declaring Service Dependencies
 
@@ -82,29 +91,7 @@ func (m *OrderModule) SetDependencyServiceContainer(dep string, container mono.S
 }
 ```
 
-3. **Use the service** from the container:
-
-```go
-func (m *OrderModule) processOrder(ctx context.Context, order *Order) error {
-        // Call payment service using the dependency's ServiceContainer
-    var response PaymentResponse
-    err := helper.CallRequestReplyService(
-        ctx,
-        m.paymentContainer,  // ServiceContainer from SetDependencyServiceContainer
-        "process-payment",   // service name
-        json.Marshal,
-        json.Unmarshal,
-        &PaymentRequest{Amount: order.Total},
-        &response,
-    )
-    if err != nil {
-        return err
-    }
-    fmt.Printf("Transaction: %s\n", response.TransactionID)
-    // Continue processing...
-    return nil
-}
-```
+3. **Use the service** through that container, as shown in each pattern below.
 
 ---
 
@@ -121,23 +108,27 @@ Direct in-process communication using Go channels.
 
 #### Example
 
+Channel services have no typed contract.
+
 **Service Provider (Registration)**:
 
 ```go
 func (m *AnalyticsModule) RegisterServices(container mono.ServiceContainer) error {
-    // Create channel for event processing
-    eventCh := make(chan *Event, 100)
+    // Create the bidirectional channels
+    in := make(chan *mono.Msg, 100)
+    out := make(chan *mono.Msg, 100)
 
     // Start handler goroutine
-    go m.processEvents(eventCh)
+    go m.processEvents(in, out)
 
     // Register the channel service
-    return container.RegisterChannelService("events", eventCh)
+    return container.RegisterChannelService("events", in, out)
 }
 
-func (m *AnalyticsModule) processEvents(ch chan *Event) {
-    for event := range ch {
-        // Process event
+func (m *AnalyticsModule) processEvents(in <-chan *mono.Msg, out chan<- *mono.Msg) {
+    for msg := range in {
+        // Process the message, then reply
+        out <- msg
     }
 }
 ```
@@ -183,23 +174,26 @@ Synchronous service calls with immediate response.
 
 #### Example
 
+**Contract**:
+
+```go
+// payment/contract/contract.go
+var ProcessPayment = helper.RequestReplyService[PaymentRequest, PaymentResponse]("payment", "process-payment")
+```
+
 **Service Provider (Registration)**:
 
 ```go
 func (m *PaymentModule) RegisterServices(container mono.ServiceContainer) error {
-    return container.RegisterRequestReplyService(
-        "process-payment",
-        m.handleProcessPayment,
-    )
+    return contract.ProcessPayment.Register(container, m.handleProcessPayment)
 }
 
-func (m *PaymentModule) handleProcessPayment(ctx context.Context,
-    req *PaymentRequest) (*PaymentResponse, error) {
+func (m *PaymentModule) handleProcessPayment(ctx context.Context, req contract.PaymentRequest, msg *mono.Msg) (contract.PaymentResponse, error) {
     // Process payment
     if req.Amount <= 0 {
-        return nil, fmt.Errorf("invalid amount")
+        return contract.PaymentResponse{}, fmt.Errorf("invalid amount")
     }
-    return &PaymentResponse{TransactionID: "TXN-001"}, nil
+    return contract.PaymentResponse{TransactionID: "TXN-001"}, nil
 }
 ```
 
@@ -207,16 +201,8 @@ func (m *PaymentModule) handleProcessPayment(ctx context.Context,
 
 ```go
 // Call the payment service using the dependency's ServiceContainer
-var response PaymentResponse
-err := helper.CallRequestReplyService(
-    ctx,
-    m.paymentContainer,  // ServiceContainer from SetDependencyServiceContainer
-    "process-payment",   // service name
-    json.Marshal,
-    json.Unmarshal,
-    &PaymentRequest{Amount: 100.00},
-    &response,
-)
+response, err := paymentcontract.ProcessPayment.Call(ctx, m.paymentContainer,
+    paymentcontract.PaymentRequest{Amount: 100.00})
 if err != nil {
     return err
 }
@@ -238,7 +224,7 @@ fmt.Printf("Transaction: %s\n", response.TransactionID)
 Each service runs its handler on a bounded worker pool per instance. By default up to `runtime.GOMAXPROCS(0) * 4` requests are handled at once; when the pool and its pending queue are full, further requests fail fast with `ErrServiceOverloaded` so the caller can retry on another instance. Tune per service, or app-wide with `mono.WithDefaultServiceConcurrency(n)`:
 
 ```go
-container.RegisterRequestReplyService("process-payment", m.handleProcessPayment,
+contract.ProcessPayment.Register(container, m.handleProcessPayment,
     mono.WithMaxConcurrency(32), // handlers running at once
     mono.WithMaxPending(128),    // requests waiting for a worker
 )
@@ -261,21 +247,27 @@ Load-balanced asynchronous processing.
 
 #### Example
 
+**Contract**:
+
+```go
+// email/contract/contract.go
+var SendEmail = helper.QueueGroupService[EmailRequest]("email", "send-email")
+```
+
 **Service Provider (Registration)**:
 
 ```go
+import "github.com/go-monolith/mono/pkg/types"
+
 func (m *EmailModule) RegisterServices(container mono.ServiceContainer) error {
-    return container.RegisterQueueGroupService(
-        "send-email",
-        "email-workers",  // Queue group name
-        m.handleSendEmail,
+    return contract.SendEmail.Register(container,
+        types.TypedQGHP[contract.EmailRequest]{QueueGroup: "email-workers", Handler: m.handleSendEmail},
     )
 }
 
-func (m *EmailModule) handleSendEmail(ctx context.Context,
-    req *EmailRequest) error {
+func (m *EmailModule) handleSendEmail(ctx context.Context, req contract.EmailRequest, msg *mono.Msg) error {
     // Send email (fire-and-forget)
-    return m.sendEmail(ctx, req)
+    return m.sendEmail(ctx, &req)
 }
 ```
 
@@ -283,13 +275,13 @@ func (m *EmailModule) handleSendEmail(ctx context.Context,
 
 ```go
 // Send message to queue group (no response expected)
-err := helper.SendQueueGroupService(ctx, eventBus, "email", "send-email", &EmailRequest{
-    To: "user@example.com",
+err := emailcontract.SendEmail.Send(ctx, m.emailContainer, emailcontract.EmailRequest{
+    To:      "user@example.com",
     Subject: "Welcome",
-    Body: "Welcome to our app!",
+    Body:    "Welcome to our app!",
 })
 if err != nil {
-    // Log error (worker already started processing)
+    // Not accepted: no worker online, overloaded, or timed out
     return err
 }
 // Continue immediately (don't wait for email)
@@ -338,44 +330,53 @@ Durable message processing with JetStream.
 
 #### Example
 
+**Contract**:
+
+```go
+// archive/contract/contract.go
+var ArchiveOrder = helper.StreamConsumerService[ArchiveRequest]("archive", "archive-order")
+```
+
 **Service Provider (Registration)**:
 
 ```go
 func (m *ArchiveModule) RegisterServices(container mono.ServiceContainer) error {
-    return container.RegisterStreamConsumerService(
-        "archive-order",
-        "archive-orders-stream",
-        &mono.FetchConfig{MaxMessages: 100, IdleTimeout: 10 * time.Second},
-        m.handleArchiveOrder,
+    return contract.ArchiveOrder.Register(container,
+        mono.StreamConsumerConfig{
+            Stream: mono.StreamConfig{Name: "archive-orders"},
+            Fetch:  mono.FetchConfig{BatchSize: 100, Timeout: 10 * time.Second},
+        },
+        m.handleArchiveOrders,
     )
 }
 
-func (m *ArchiveModule) handleArchiveOrder(ctx context.Context,
-    req *ArchiveRequest, msg *mono.Msg) error {
-    // Process message
-    err := m.archive(ctx, req)
-
-    if err != nil {
-        // Negative acknowledgment (retry later)
-        return msg.Nak()
+// The handler receives a batch and acknowledges each message itself.
+func (m *ArchiveModule) handleArchiveOrders(ctx context.Context, reqs []contract.ArchiveRequest, msgs []*mono.Msg) error {
+    for i, req := range reqs {
+        if err := m.archive(ctx, &req); err != nil {
+            msgs[i].Nak() // Negative acknowledgment (retry later)
+            continue
+        }
+        msgs[i].Ack() // Positive acknowledgment (message processed)
     }
-
-    // Positive acknowledgment (message processed)
-    return msg.Ack()
+    return nil
 }
 ```
+
+If any message in a batch fails to decode, the typed handler is not called and the batch returns an error without acknowledging any message, so the batch is redelivered after `AckWait` until `MaxDeliver`. To drop a malformed message with `msg.Term()` instead, register a raw `StreamConsumerHandler` (see the [Service Container API](../api/container.md)).
 
 **Service Consumer (Publishing)**:
 
 ```go
 // Publish to stream (persisted in JetStream)
-err := helper.PublishStreamConsumerService(
-    ctx,
-    eventBus,
-    "archive",
-    "archive-order",
-    &ArchiveRequest{OrderID: "ORD-001"},
+ack, err := archivecontract.ArchiveOrder.Publish(ctx, m.archiveContainer,
+    archivecontract.ArchiveRequest{OrderID: "ORD-001"},
+    helper.WithMsgID("archive-ORD-001"), // optional: makes a retry safe
 )
+if err != nil {
+    return err
+}
+fmt.Printf("Stored in %s at sequence %d\n", ack.Stream(), ack.Sequence())
 ```
 
 #### Characteristics
@@ -393,7 +394,10 @@ err := helper.PublishStreamConsumerService(
 
 ### Pattern 5: Cron Services
 
-Periodic work driven by a **server-side** cron schedule (NATS JetStream message scheduler, nats-server v2.14+). The schedule lives on the server, so in a multi-node cluster **exactly one** message fires per occurrence — no client-side ticker and no leader election. Each occurrence is delivered through a durable pull consumer with explicit acknowledgement (at-least-once).
+Periodic work driven by a **server-side** cron schedule (NATS JetStream message scheduler, nats-server v2.14+).
+
+- The schedule lives on the server, so in a multi-node cluster **exactly one** message fires per occurrence — no client-side ticker and no leader election.
+- Each occurrence is delivered through a durable pull consumer with explicit acknowledgement (at-least-once).
 
 #### When to Use
 
@@ -438,12 +442,13 @@ func (m *ReportModule) handleRollup(ctx context.Context, msg *mono.Msg) error {
 | Named alias | `"@daily"`, `"@hourly"`, `"@weekly"` | Convenience aliases |
 | Interval | `"@every 5m"` | Minimum 1s; `TimeZone` not applicable |
 
-Additional `CronServiceConfig` options: `TimeZone` (cron expressions only), `TTL` (per-occurrence message TTL, ≥1s), `SourceSubject` (deliver the last message seen on a subject instead of a static `Payload` — mutually exclusive with `Payload`), and `Deprecated` (see below).
+Additional `CronServiceConfig` options: `TimeZone` (cron expressions only), `TTL` (per-occurrence message TTL, ≥1s), `SourceSubject` (deliver the last message seen on a subject instead of a static `Payload` — mutually exclusive with `Payload`), and `Deprecated` (see below). All fields are listed in the [ServiceContainer API](../api/container.md#registercronservice).
 
 #### Updating and Retiring a Schedule
 
 - **Update**: change `Schedule`/`Payload`/`TimeZone`/`TTL` and redeploy — the schedule is re-published idempotently and overwritten in place (rollup by subject).
-- **Retire (two-phase, revertible)**: set `Deprecated: true` and deploy — the framework purges the server-side schedule and does not start the consumer, while keeping the registration code. In a later release, delete the `RegisterCronService` call. Removing the call without first deprecating leaves an orphaned durable schedule; the framework logs a warning on startup when it detects one.
+- **Retire (two-phase, revertible)**: set `Deprecated: true` and deploy — the framework purges the server-side schedule and does not start the consumer, while keeping the registration code. In a later release, delete the `RegisterCronService` call.
+- Removing the call without first deprecating leaves an orphaned durable schedule; the framework logs a warning on startup when it detects one.
 
 ```go
 container.RegisterCronService("nightly-rollup", mono.CronServiceConfig{
@@ -513,7 +518,7 @@ Event communication enables **loose coupling** between modules. Emitters declare
 
 ### Declaring Events (Emitter Side)
 
-Module A declares which events it will emit:
+Module A declares which events it will emit. Both event patterns below use this declaration:
 
 ```go
 // Define the event (typically in a shared package or the module itself)
@@ -530,44 +535,11 @@ func (m *OrderModule) EmitEvents() []mono.BaseEventDefinition {
         OrderShippedV1.ToBase(),
     }
 }
-
-// Later, publish the event
-func (m *OrderModule) createOrder(ctx context.Context, order *Order) error {
-    // ... create order logic ...
-
-    // Publish event (fire-and-forget for EventConsumer)
-    return OrderCreatedV1.Publish(m.eventBus, OrderCreatedEvent{
-        OrderID: order.ID,
-        Amount:  order.Total,
-    }, nil)
-}
 ```
 
 ### Consuming Events (Consumer Side)
 
-Any module can consume events **without declaring a dependency**:
-
-```go
-// Module B implements EventConsumerModule
-func (m *NotificationModule) RegisterEventConsumers(registry mono.EventRegistry) error {
-    // Discover the event from the registry
-    eventDef, ok := registry.GetEventByName("OrderCreated", "v1", "order")
-    if !ok {
-        return fmt.Errorf("event not found: OrderCreated.v1 from order")
-    }
-
-    // Register consumer handler
-    return registry.RegisterEventConsumer(eventDef, m.handleOrderCreated, m)
-}
-
-func (m *NotificationModule) handleOrderCreated(ctx context.Context, msg *mono.Msg) error {
-    var event OrderCreatedEvent
-    if err := json.Unmarshal(msg.Data, &event); err != nil {
-        return err
-    }
-    return m.sendNotification(ctx, event)
-}
-```
+Any module can consume events **without declaring a dependency**: it discovers the event in the registry and registers a handler, as shown in each pattern below.
 
 ---
 
@@ -584,17 +556,10 @@ Fire-and-forget event consumption via standard NATS subscriptions.
 
 #### Example
 
-**Emitter Module**:
+**Emitter Module** (declared as in [Declaring Events](#declaring-events-emitter-side)):
 
 ```go
-// Declare events
-func (m *OrderModule) EmitEvents() []mono.BaseEventDefinition {
-    return []mono.BaseEventDefinition{
-        OrderCreatedV1.ToBase(),
-    }
-}
-
-// Publish event
+// Publish event (fire-and-forget)
 err := OrderCreatedV1.Publish(m.eventBus, OrderCreatedEvent{
     OrderID: "ORD-001",
     Amount:  99.99,
@@ -630,7 +595,7 @@ func (m *NotificationModule) handleOrderCreated(ctx context.Context, msg *mono.M
 
 #### Characteristics
 
-- ✓ Lowest latency (~1ms)
+- ✓ Low latency
 - ✓ Simple setup
 - ✓ Broadcast to multiple consumers
 - ✓ Queue groups for load balancing
@@ -657,16 +622,9 @@ Durable event consumption via JetStream pull consumers.
 
 #### Example
 
-**Emitter Module**:
+**Emitter Module** (declared as in [Declaring Events](#declaring-events-emitter-side)):
 
 ```go
-// Declare events
-func (m *OrderModule) EmitEvents() []mono.BaseEventDefinition {
-    return []mono.BaseEventDefinition{
-        OrderCreatedV1.ToBase(),
-    }
-}
-
 // Publish to JetStream (persisted)
 ack, err := OrderCreatedV1.EventStreamPublish(ctx, m.eventBus, OrderCreatedEvent{
     OrderID: "ORD-001",
@@ -693,8 +651,8 @@ func (m *AuditModule) RegisterEventConsumers(registry mono.EventRegistry) error 
             Retention: mono.WorkQueuePolicy,
         },
         Fetch: mono.FetchConfig{
-            BatchSize:   10,
-            IdleTimeout: 5 * time.Second,
+            BatchSize: 10,
+            Timeout:   5 * time.Second,
         },
     }
 
@@ -733,7 +691,7 @@ func (m *AuditModule) handleOrderEvents(ctx context.Context, msgs []*mono.Msg) e
 - ✓ Event replay capability
 - ✓ Batch processing support
 - ✓ No dependency on emitter module
-- ✗ Slightly higher latency (~5ms with persistence)
+- ✗ Slightly higher latency (persistence overhead)
 - ✗ More complex setup
 - ✗ Requires JetStream configuration
 
@@ -744,15 +702,16 @@ func (m *AuditModule) handleOrderEvents(ctx context.Context, msgs []*mono.Msg) e
 ### Decision Tree
 
 ```
-┌─ Is this a direct service call (caller needs result)?
+┌─ Does the caller know which module does the work?
 │  ├─ YES → Use Service Communication (Part 1)
 │  │  ├─ Periodic / scheduled work? → Cron
-│  │  ├─ Need durability? → Stream Consumer
-│  │  ├─ Need response? → Request-Reply
-│  │  ├─ Need highest performance? → Channel
-│  │  └─ Fire-and-forget work? → Queue Group
+│  │  ├─ Need a response? → Request-Reply
+│  │  │  └─ Same process and need highest performance? → Channel
+│  │  └─ No response needed (fire-and-forget)?
+│  │     ├─ Need durability? → Stream Consumer
+│  │     └─ Otherwise → Queue Group
 │  │
-│  └─ NO → Use Event Communication (Part 2)
+│  └─ NO (announce that something happened) → Use Event Communication (Part 2)
 │     ├─ Message loss acceptable? → EventConsumer
 │     └─ Message loss unacceptable? → EventStreamConsumer
 
@@ -779,17 +738,17 @@ Additional considerations:
 
 ## Performance Characteristics
 
-Typical latencies on modern hardware:
+Indicative latencies (not benchmarked by this project; actual figures depend on message size, load and configuration):
 
-| Pattern | Latency | Throughput | Durability |
-|---------|---------|-----------|------------|
-| Channel | ~1µs | >1M msgs/sec | None |
-| Request-Reply | ~1ms | ~10K msgs/sec | None |
-| Queue Group | ~1ms | ~10K msgs/sec | None |
-| Stream Consumer | ~5ms | ~5K msgs/sec | JetStream |
-| Cron | schedule-driven | per-schedule | JetStream |
-| EventConsumer | ~1ms | ~10K msgs/sec | None |
-| EventStreamConsumer | ~5ms | ~5K msgs/sec | JetStream |
+| Pattern | Latency | Durability |
+|---------|---------|------------|
+| Channel | ~1µs (in-process) | None |
+| Request-Reply | ~1ms | None |
+| Queue Group | ~1ms | None |
+| Stream Consumer | higher (persistence) | JetStream |
+| Cron | schedule-driven | JetStream |
+| EventConsumer | ~1ms | None |
+| EventStreamConsumer | higher (persistence) | JetStream |
 
 ---
 
@@ -801,9 +760,9 @@ The framework enforces consistent naming:
 - Example: `services.payment.process-payment`
 - Framework computes automatically (no wildcards)
 
-**Event Subjects**: `events.<domain>.<version>.<event-type>`
-- Example: `events.order.v1.OrderCreated`
-- Supports wildcards for routing
+**Event Subjects**: `events.<module>.<version>.<event-name>` by default (name in kebab-case)
+- Example: `events.order.v1.order-created`
+- A custom subject is allowed if it is kebab-case and contains the version token. Wildcards are not allowed in definitions, only in subscriptions
 
 **Reserved**: `_mono.*` (internal use only)
 
@@ -815,7 +774,7 @@ See the [multi-module example](../../../examples/multi-module/README.md) for a c
 
 ## Next Steps
 
-- Explore [Module Examples](../../../examples/)
+- Explore [Module Examples](../../../examples/multi-module/README.md)
 - Learn about [Framework Architecture](architecture.md)
 - Review [Core Concepts Overview](README.md)
 

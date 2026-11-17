@@ -20,18 +20,18 @@ redirects:
   core-concepts: core-concepts/README.md
   modules: core-concepts/modules.md
   architecture: core-concepts/architecture.md
-  communication: core-concepts/communication.md
+  communication: core-concepts/inter-module-communication.md
 
   # Guide section
-  guide: guide/README.md
-  configuration: guide/configuration.md
-  error-handling: guide/error-handling.md
-  testing: guide/testing.md
-  logging: guide/logging.md
+  guide: guides/README.md
+  configuration: api/framework.md
+  error-handling: guides/error-handling.md
+  testing: guides/testing.md
+  logging: guides/logging.md
 
   # API Reference section
   api: api/README.md
-  middleware: api/middleware/README.md
+  middleware: middleware/README.md
 
   # Extra resources
   faq: extra/faq.md

@@ -1,14 +1,8 @@
 # Logging Guide
 
-This guide covers structured logging best practices with the Monolith Framework's Logger interface, including using the logger, adding contextual information, choosing log levels, and integrating with monitoring systems.
+This guide shows how to configure the framework logger, how to hand it to your modules, and how to write useful structured log lines: key-value context, log levels and common mistakes. Read it when you set up logging for an application or add logging to a module.
 
 **Time to complete:** 15 minutes
-
-**What you'll learn:**
-- Using the Logger interface effectively
-- Structured logging with key-value pairs
-- Choosing appropriate log levels
-- Avoiding common logging mistakes
 
 **Prerequisites:**
 - Familiarity with Go's `log/slog` package
@@ -18,15 +12,79 @@ This guide covers structured logging best practices with the Monolith Framework'
 
 ## Overview
 
-The Monolith Framework provides a structured logging interface compatible with Go's `log/slog` package. All modules receive a Logger instance from the framework, enabling consistent logging across your application.
+The Monolith Framework provides a structured logging interface (`mono.Logger`) backed by Go's `log/slog` package.
+
+- The framework creates one logger, configured with the options below, and returns it from `app.Logger()`.
+- Modules do **not** receive a logger automatically: pass `app.Logger().WithModule(name)` to the module's constructor and keep it in a field (`m.logger`). The examples in this guide use that field.
+- The framework already logs every error a handler returns (see [Framework Log Lines](#framework-log-lines)).
 
 {% hint style="info" %}
 **Structured logging:** Always use key-value pairs instead of string concatenation. This makes logs searchable and parseable by monitoring tools.
 {% endhint %}
 
+## Accessing the Logger
+
+### Passing the Framework Logger to a Module
+
+```go
+type OrderModule struct {
+    logger mono.Logger
+}
+
+func NewOrderModule(logger mono.Logger) *OrderModule {
+    return &OrderModule{logger: logger.WithModule("orders")}
+}
+
+// In main.go
+app, _ := mono.NewMonoApplication()
+app.Logger().Info("Application created")
+app.Register(NewOrderModule(app.Logger()))
+```
+
+### Using Go's slog Package
+
+You can also call Go's standard `log/slog` package directly (`slog.Info("Order module starting")`). Package-level `slog` writes to slog's default logger: it is **not** affected by `WithLogLevel`, `WithLogFormat` or `WithLogOutput`.
+
+## Configuration
+
+### Logger Options
+
+The framework logger is configured when the application is created; the level cannot be changed at runtime.
+
+```go
+app, err := mono.NewMonoApplication(
+    mono.WithLogLevel(mono.LogLevelInfo),     // Default: Info
+    mono.WithLogFormat(mono.LogFormatJSON),   // Default: mono.LogFormatText
+    mono.WithLogOutput(os.Stderr),            // Default: os.Stdout
+    mono.WithLogSource(true),                 // Default: false (adds file:line)
+)
+```
+
+| Option | Description | Default |
+|--------|-------------|---------|
+| `WithLogLevel(level)` | `mono.LogLevelDebug`, `LogLevelInfo`, `LogLevelWarn`, `LogLevelError` | `LogLevelInfo` |
+| `WithLogFormat(format)` | `mono.LogFormatText` or `mono.LogFormatJSON` | `LogFormatText` |
+| `WithLogOutput(w)` | Output writer (nil rejected) | `os.Stdout` |
+| `WithLogSource(enable)` | Include source file and line | `false` |
+| `WithLogger(logger)` / `WithCustomLogger(logger)` | Use your own logger instead; it must implement `mono.Logger` (the level, format, output and source options are then ignored) | - |
+| `WithNATSLogging(debug, trace, sysTrace)` | Route the embedded NATS server's debug/trace logs through the framework logger | all `false` |
+
+### Framework Log Lines
+
+The framework logs every error a handler returns, at Error level with an `error` field (and `panic`/`stack` fields for a recovered panic):
+
+- `RequestReply handler error`
+- `QueueGroup handler error`
+- `Event consumer handler error`
+- `Event stream consumer handler error`
+- `Cron handler error`
+- `Handler error` (stream consumer services)
+
+A handler that returns an error does not need to log it as well: add context to the returned error instead.
+
 ## Logger Interface
 
-The Logger interface provides four log levels and context methods:
+`mono.Logger` provides four log levels and three context methods:
 
 ```go
 type Logger interface {
@@ -43,52 +101,9 @@ type Logger interface {
 }
 ```
 
-## Accessing the Logger
-
-### Using Go's slog Package
-
-The recommended approach is to use Go's standard `log/slog` package directly:
-
-```go
-import "log/slog"
-
-type OrderModule struct {}
-
-func (m *OrderModule) Name() string {
-    return "orders"
-}
-
-func (m *OrderModule) Start(ctx context.Context) error {
-    slog.Info("Order module starting")
-
-    // Initialize module...
-
-    slog.Info("Order module started")
-    return nil
-}
-
-func (m *OrderModule) Stop(ctx context.Context) error {
-    slog.Info("Order module stopping")
-    return nil
-}
-```
-
-### Via Framework Logger
-
-You can also access the framework's Logger via `app.Logger()`:
-
-```go
-// In main.go, after creating the application
-app, _ := mono.NewMonoApplication()
-logger := app.Logger()
-logger.Info("Application created")
-```
-
 ## Structured Logging with Key-Value Pairs
 
 ### Basic Logging
-
-Use key-value pairs for context:
 
 ```go
 m.logger.Info("Processing order",
@@ -98,7 +113,8 @@ m.logger.Info("Processing order",
 )
 ```
 
-Output in JSON format:
+Output with `mono.WithLogFormat(mono.LogFormatJSON)` (the default format is text):
+
 ```json
 {
   "time": "2025-01-15T10:30:45.123Z",
@@ -112,14 +128,12 @@ Output in JSON format:
 
 ### Adding Request Context
 
-Add request IDs for tracing:
+With the [Request ID middleware](../middleware/requestid.md), read the request ID from the handler context:
 
 ```go
 func (m *OrderModule) handleCreateOrder(ctx context.Context, req *CreateOrderRequest) (*Order, error) {
-    // Extract request ID from context (if using Request ID middleware)
-    requestID := requestid.FromContext(ctx)
+    requestID := requestid.GetRequestID(ctx)
 
-    // Log with request context
     m.logger.Info("Creating order",
         "request_id", requestID,
         "customer_id", req.CustomerID,
@@ -132,18 +146,13 @@ func (m *OrderModule) handleCreateOrder(ctx context.Context, req *CreateOrderReq
 
 ### Adding Error Context
 
-Log errors with full context:
+Put the context into the error you return; the handler that finally returns it is logged by the framework:
 
 ```go
 func (m *OrderModule) processPayment(ctx context.Context, order *Order) error {
     result, err := m.paymentService.Charge(ctx, order.Amount)
     if err != nil {
-        m.logger.Error("Payment processing failed",
-            "order_id", order.ID,
-            "amount", order.Amount,
-            "error", err,
-        )
-        return fmt.Errorf("payment failed: %w", err)
+        return fmt.Errorf("payment for order %s (amount %d) failed: %w", order.ID, order.Amount, err)
     }
 
     m.logger.Info("Payment processed successfully",
@@ -159,19 +168,17 @@ func (m *OrderModule) processPayment(ctx context.Context, order *Order) error {
 
 ### Adding Persistent Context
 
-The `With()` method returns a new logger with additional context:
+`With()` returns a new logger with additional context:
 
 ```go
 func (m *OrderModule) handleCreateOrder(ctx context.Context, customerID string) error {
-    // Create a logger with customer context
     custLogger := m.logger.With("customer_id", customerID)
 
     custLogger.Info("Starting order creation")
 
     // All logs from custLogger include customer_id
     if err := m.validateCustomer(ctx, customerID); err != nil {
-        custLogger.Error("Customer validation failed", "error", err)
-        return err
+        return fmt.Errorf("validate customer %s: %w", customerID, err)
     }
 
     custLogger.Info("Order creation completed")
@@ -179,52 +186,36 @@ func (m *OrderModule) handleCreateOrder(ctx context.Context, customerID string) 
 }
 ```
 
-### Using WithModule()
+### Using WithModule() and Chaining
 
-Set the module name for logs:
-
-```go
-func (m *OrderModule) Start(ctx context.Context) error {
-    // Create logger with module context
-    logger := m.logger.WithModule(m.Name())
-
-    logger.Info("Starting")
-    // Output: module="orders", msg="Starting"
-
-    return nil
-}
-```
-
-### Chaining Context Methods
-
-Chain multiple context additions:
+`WithModule()` adds the `module` attribute. Call it once, on the framework logger (as in the constructor above); calling it again on a logger that already has it adds a second `module` attribute.
 
 ```go
-logger := m.logger.
+logger := app.Logger().
     With("request_id", "req-123").
     With("customer_id", "cust-456").
     WithModule("orders")
 
 logger.Info("Processing request")
-// Output: request_id="req-123", customer_id="cust-456", module="orders"
+// Text output: time=... level=INFO msg="Processing request" request_id=req-123 customer_id=cust-456 module=orders
 ```
 
 ## Choosing Log Levels
 
-### Debug Level
+| Level | Use for |
+|-------|---------|
+| Debug | Detailed information about function execution, variable values and state transitions, entry/exit points; information only needed for troubleshooting. Typically disabled in production: don't rely on it for critical information. |
+| Info | Successful completion of operations, significant state changes, important business events, module startup/shutdown |
+| Warn | Recoverable errors that are handled, deprecated API usage, configuration issues with fallbacks, performance degradation |
+| Error | Unexpected failures that impact functionality, external service failures, data integrity issues. Error logs should be actionable: Error implies "someone needs to investigate this"; if nothing can be done, consider Warn. |
 
-{% hint style="info" %}
-**Debug logs are typically disabled in production.** Use them freely for detailed tracing, but don't rely on them for critical information.
-{% endhint %}
-
-Use Debug for development and troubleshooting:
+### Debug
 
 ```go
 func (m *OrderModule) validateOrder(order *Order) error {
     m.logger.Debug("Validating order",
         "order_id", order.ID,
         "has_items", len(order.Items) > 0,
-        "total_amount", calculateTotal(order),
     )
 
     if order.ID == "" {
@@ -237,28 +228,15 @@ func (m *OrderModule) validateOrder(order *Order) error {
 }
 ```
 
-When to use Debug:
-- Detailed information about function execution
-- Variable values and state transitions
-- Entry/exit points in complex functions
-- Information only needed for troubleshooting
-
-### Info Level
-
-Use Info for important application events:
+### Info
 
 ```go
 func (m *OrderModule) handleCreateOrder(ctx context.Context, req *CreateOrderRequest) (*Order, error) {
-    m.logger.Info("Creating order",
-        "customer_id", req.CustomerID,
-        "amount", req.Amount,
-    )
-
     order := &Order{ID: generateID()}
 
     if err := m.persistOrder(ctx, order); err != nil {
-        m.logger.Error("Failed to persist order", "error", err)
-        return nil, err
+        // Logged by the framework as "RequestReply handler error"
+        return nil, fmt.Errorf("persist order %s: %w", order.ID, err)
     }
 
     m.logger.Info("Order created successfully",
@@ -270,15 +248,9 @@ func (m *OrderModule) handleCreateOrder(ctx context.Context, req *CreateOrderReq
 }
 ```
 
-When to use Info:
-- Successful completion of operations
-- Significant state changes
-- Important business events
-- Module startup/shutdown
+### Warn
 
-### Warn Level
-
-Use Warn for recoverable issues:
+A handled, recoverable failure: log it and carry on.
 
 ```go
 func (m *OrderModule) processOrderBatch(ctx context.Context, orders []*Order) error {
@@ -306,58 +278,35 @@ func (m *OrderModule) processOrderBatch(ctx context.Context, orders []*Order) er
 }
 ```
 
-When to use Warn:
-- Recoverable errors that are handled
-- Deprecated API usage
-- Configuration issues with fallbacks
-- Performance degradation
+### Error
 
-### Error Level
-
-{% hint style="warning" %}
-**Error logs should be actionable.** If nothing can be done about it, consider Warn instead. Error implies "someone needs to investigate this."
-{% endhint %}
-
-Use Error for serious problems that need attention:
+In a handler, an error you return is already logged at Error by the framework, so add context to the error instead of logging it again:
 
 ```go
 func (m *OrderModule) handleGetOrder(ctx context.Context, orderID string) (*Order, error) {
     order, err := m.findOrder(ctx, orderID)
     if err != nil {
-        m.logger.Error("Database query failed",
-            "order_id", orderID,
-            "error", err,
-        )
-        return nil, fmt.Errorf("failed to retrieve order: %w", err)
+        // Logged by the framework as "RequestReply handler error"
+        return nil, fmt.Errorf("failed to retrieve order %s: %w", orderID, err)
     }
 
     if order == nil {
-        m.logger.Error("Order not found in database",
-            "order_id", orderID,
-        )
-        return nil, fmt.Errorf("order not found")
+        return nil, fmt.Errorf("order %s not found", orderID)
     }
 
     return order, nil
 }
 ```
 
-When to use Error:
-- Unexpected failures that impact functionality
-- External service failures
-- Data integrity issues
-- Errors requiring operator attention
-
 ## Logging Patterns
 
 ### Request Lifecycle Logging
 
-Log the full lifecycle of a request:
+Log the start and the successful end of a request yourself; failures are logged by the framework with the error you return:
 
 ```go
 func (m *OrderModule) handleCreateOrder(ctx context.Context, req *CreateOrderRequest) (*Order, error) {
-    requestID := requestid.FromContext(ctx)
-    logger := m.logger.With("request_id", requestID)
+    logger := m.logger.With("request_id", requestid.GetRequestID(ctx))
 
     startTime := time.Now()
     logger.Info("Request started",
@@ -365,26 +314,15 @@ func (m *OrderModule) handleCreateOrder(ctx context.Context, req *CreateOrderReq
         "customer_id", req.CustomerID,
     )
 
-    // Validate request
     if err := m.validateRequest(req); err != nil {
-        logger.Warn("Request validation failed",
-            "error", err,
-            "duration_ms", time.Since(startTime).Milliseconds(),
-        )
-        return nil, err
+        return nil, fmt.Errorf("validate request: %w", err)
     }
 
-    // Process
     order, err := m.createOrder(ctx, req)
     if err != nil {
-        logger.Error("Order creation failed",
-            "error", err,
-            "duration_ms", time.Since(startTime).Milliseconds(),
-        )
-        return nil, err
+        return nil, fmt.Errorf("create order: %w", err)
     }
 
-    // Success
     logger.Info("Request completed successfully",
         "order_id", order.ID,
         "duration_ms", time.Since(startTime).Milliseconds(),
@@ -396,7 +334,7 @@ func (m *OrderModule) handleCreateOrder(ctx context.Context, req *CreateOrderReq
 
 ### Error Recovery Logging
 
-Log when recovering from errors:
+Log retries at Warn; the final error is returned (and logged once by whoever handles it):
 
 ```go
 func (m *OrderModule) retryableOperation(ctx context.Context) error {
@@ -405,7 +343,6 @@ func (m *OrderModule) retryableOperation(ctx context.Context) error {
     for attempt := 1; attempt <= 3; attempt++ {
         if err := m.doOperation(ctx); err != nil {
             lastErr = err
-
             if attempt < 3 {
                 m.logger.Warn("Operation failed, retrying",
                     "attempt", attempt,
@@ -413,28 +350,19 @@ func (m *OrderModule) retryableOperation(ctx context.Context) error {
                     "next_retry_in_seconds", attempt,
                 )
                 time.Sleep(time.Duration(attempt) * time.Second)
-            } else {
-                m.logger.Error("Operation failed after all retries",
-                    "attempts", attempt,
-                    "error", err,
-                )
             }
             continue
         }
 
-        m.logger.Info("Operation succeeded",
-            "attempt", attempt,
-        )
+        m.logger.Info("Operation succeeded", "attempt", attempt)
         return nil
     }
 
-    return fmt.Errorf("operation failed: %w", lastErr)
+    return fmt.Errorf("operation failed after 3 attempts: %w", lastErr)
 }
 ```
 
 ### Performance Monitoring
-
-Log performance metrics:
 
 ```go
 func (m *OrderModule) handleListOrders(ctx context.Context) ([]*Order, error) {
@@ -442,17 +370,10 @@ func (m *OrderModule) handleListOrders(ctx context.Context) ([]*Order, error) {
 
     orders, err := m.fetchOrders(ctx)
     if err != nil {
-        m.logger.Error("Failed to fetch orders",
-            "error", err,
-            "duration_ms", time.Since(startTime).Milliseconds(),
-        )
-        return nil, err
+        return nil, fmt.Errorf("fetch orders: %w", err)
     }
 
-    duration := time.Since(startTime)
-    durationMs := duration.Milliseconds()
-
-    // Log performance metrics
+    durationMs := time.Since(startTime).Milliseconds()
     m.logger.Info("Orders fetched",
         "count", len(orders),
         "duration_ms", durationMs,
@@ -467,8 +388,6 @@ func (m *OrderModule) handleListOrders(ctx context.Context) ([]*Order, error) {
 
 ### Log Structured Fields for Monitoring
 
-Include fields that monitoring systems can parse:
-
 ```go
 m.logger.Info("Service metrics",
     "service_name", m.Name(),
@@ -480,45 +399,37 @@ m.logger.Info("Service metrics",
 
 ### Combining Logs with Traces
 
-Include trace information in logs:
-
 ```go
 func (m *OrderModule) handleCreateOrder(ctx context.Context, req *CreateOrderRequest) (*Order, error) {
-    requestID := requestid.FromContext(ctx)
-
-    // Add trace ID if available
-    traceID := extractTraceID(ctx)
-
     logger := m.logger.With(
-        "request_id", requestID,
-        "trace_id", traceID,
+        "request_id", requestid.GetRequestID(ctx),
+        "trace_id", extractTraceID(ctx), // your tracer's ID, if available
     )
 
     logger.Info("Creating order")
 
     // Framework's request ID middleware automatically propagates
     // request IDs to downstream calls for distributed tracing
+    // (request-reply, queue group and stream consumer calls; not events)
     return m.createOrder(ctx, req)
 }
 ```
 
 ### Health Status Logging
 
-Log health status for monitoring:
-
 ```go
-func (m *OrderModule) checkHealth(ctx context.Context) types.HealthStatus {
+// Health implements mono.HealthCheckableModule.
+func (m *OrderModule) Health(ctx context.Context) mono.HealthStatus {
     // Check health...
 
     if healthy {
         m.logger.Debug("Health check passed")
-        return types.HealthStatusHealthy
-    } else {
-        m.logger.Warn("Health check failed",
-            "reason", "database unavailable",
-        )
-        return types.HealthStatusUnhealthy
+        return mono.HealthStatus{Healthy: true, Message: "operational"}
     }
+    m.logger.Warn("Health check failed",
+        "reason", "database unavailable",
+    )
+    return mono.HealthStatus{Healthy: false, Message: "database unavailable"}
 }
 ```
 
@@ -527,8 +438,6 @@ func (m *OrderModule) checkHealth(ctx context.Context) types.HealthStatus {
 {% hint style="danger" %}
 **Security:** Never log passwords, API keys, tokens, credit card numbers, or other sensitive data. Even in debug logs. Logs are often stored and accessed by many systems.
 {% endhint %}
-
-### Don't Log Sensitive Information
 
 ```go
 // ❌ BAD: Logging passwords
@@ -544,90 +453,34 @@ m.logger.Info("User login attempt",
 )
 ```
 
-### Don't Log at Multiple Levels
-
 ```go
-// ❌ BAD: Logging and then logging the same error at a higher level
-err := m.doSomething()
-if err != nil {
+// ❌ BAD: The same error logged twice
+if err := m.doSomething(); err != nil {
     m.logger.Error("Operation failed", "error", err)
     m.logger.Error("Critical error", "error", err)  // ❌ Duplicate
 }
 
-// ✅ GOOD: Log once at appropriate level
-if err := m.doSomething(); err != nil {
-    m.logger.Error("Operation failed", "error", err)
-}
-```
-
-### Don't Log Without Context
-
-```go
-// ❌ BAD: Generic error message
+// ❌ BAD: Generic message without context
 m.logger.Error("Failed")
 
-// ✅ GOOD: Include context
-m.logger.Error("Failed to process order",
-    "order_id", order.ID,
-    "error", err,
-)
-```
-
-## Configuration
-
-### Setting Log Level
-
-The framework sets the default log level:
-
-```go
-app, err := mono.NewMonoApplication(
-    mono.WithLogLevel(types.LogLevelInfo),  // Default to Info
-)
-```
-
-Modules can change it:
-
-```go
-func (m *OrderModule) Start(ctx context.Context) error {
-    // Logger instance is configured by the framework
-    // and passed to modules during initialization
-    return nil
+// ✅ GOOD: Log once, with context
+if err := m.doSomething(); err != nil {
+    m.logger.Error("Failed to process order",
+        "order_id", order.ID,
+        "error", err,
+    )
 }
 ```
 
-## Checklist for Logging
+## Checklist
 
-When implementing logging in your module:
-
-- [ ] Log significant events (start, stop, errors)
-- [ ] Include relevant context (IDs, amounts, users)
-- [ ] Use appropriate log levels
-- [ ] Include request IDs for tracing
+- [ ] Pass the framework logger to each module (`app.Logger().WithModule(name)`)
+- [ ] Use structured key-value pairs, never string concatenation
+- [ ] Include relevant context (IDs, amounts, users) and request IDs
+- [ ] Use appropriate log levels; don't use Debug for critical information
+- [ ] Log each error once: a handler returns it, the framework logs it
 - [ ] Don't log sensitive information
-- [ ] Use structured key-value pairs
-- [ ] Log errors with full context
 - [ ] Log performance metrics where relevant
-
-## Best Practices Summary
-
-✓ **Do**
-- Use structured logging with key-value pairs
-- Include request IDs for request tracing
-- Add context using `With()` methods
-- Log at appropriate levels
-- Include operation IDs and entity IDs
-- Log error details for debugging
-- Log performance metrics
-- Chain context methods for clarity
-
-✗ **Don't**
-- Log sensitive data (passwords, tokens, API keys)
-- Use generic error messages
-- Log the same information multiple times
-- Ignore log levels
-- Mix formatted and structured logging
-- Log without context
-- Use Debug logs for critical information
 
 ## Related Documentation
 
@@ -636,7 +489,3 @@ When implementing logging in your module:
 - [Access Log Middleware](../middleware/accesslog.md)
 - [Request ID Middleware](../middleware/requestid.md)
 - [Core Concepts - Modules](../core-concepts/modules.md)
-
----
-
-For more information on Go's logging package, see [Go's log/slog documentation](https://pkg.go.dev/log/slog).

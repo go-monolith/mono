@@ -71,6 +71,8 @@ type Module struct {
     service *Service
 }
 
+func NewModule() *Module { return &Module{} }
+
 func (m *Module) Name() string { return "order" }
 
 func (m *Module) Start(ctx context.Context) error {
@@ -88,9 +90,7 @@ func (m *Module) Stop(ctx context.Context) error {
 ```go
 package order
 
-import "log/slog"
-
-type Service struct {}
+type Service struct{}
 
 func NewService() *Service {
     return &Service{}
@@ -98,6 +98,7 @@ func NewService() *Service {
 
 func (s *Service) CreateOrder(customerID, productID string, quantity int) (*Order, error) {
     // Implementation
+    return &Order{CustomerID: customerID}, nil
 }
 ```
 
@@ -120,12 +121,12 @@ type OrderItem struct {
 }
 ```
 
-**`events.go`** - Event definitions (if using EventEmitterModule):
+**`contract/events.go`** - Event definitions (if using EventEmitterModule):
 
 ```go
-package order
+package contract
 
-import "github.com/go-monolith/mono"
+import "github.com/go-monolith/mono/pkg/helper"
 
 type OrderCreatedEvent struct {
     OrderID    string
@@ -133,12 +134,8 @@ type OrderCreatedEvent struct {
     Total      float64
 }
 
-var OrderCreatedV1 = mono.EventDefinition[OrderCreatedEvent]{
-    Name:   "OrderCreated",
-    Version: "v1",
-    Domain: "order",
-    // ... schema details
-}
+// Module "order", event "OrderCreated", version "v1"; the subject is derived.
+var OrderCreatedV1 = helper.EventDefinition[OrderCreatedEvent]("order", "OrderCreated", "v1")
 ```
 
 ## Application Setup
@@ -151,13 +148,15 @@ package main
 import (
     "context"
     "log"
-    "time"
+    "os"
+    "os/signal"
+    "syscall"
 
     "github.com/go-monolith/mono"
     "my-mono-app/config"
+    "my-mono-app/modules/notification"
     "my-mono-app/modules/order"
     "my-mono-app/modules/payment"
-    "my-mono-app/modules/notification"
 )
 
 func main() {
@@ -174,9 +173,11 @@ func main() {
     }
 
     // Register modules
-    app.Register(order.NewModule())
-    app.Register(payment.NewModule())
-    app.Register(notification.NewModule())
+    for _, m := range []mono.Module{order.NewModule(), payment.NewModule(), notification.NewModule()} {
+        if err := app.Register(m); err != nil {
+            log.Fatalf("Failed to register module: %v", err)
+        }
+    }
 
     // Start application
     ctx := context.Background()
@@ -186,8 +187,10 @@ func main() {
 
     defer app.Stop(ctx)
 
-    // Run application
-    select {} // Keep running
+    // Run until SIGINT or SIGTERM (the framework does not handle signals)
+    sigCtx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
+    defer stop()
+    <-sigCtx.Done()
 }
 ```
 
@@ -233,8 +236,8 @@ Use dependency injection for module dependencies:
 
 ```go
 type Module struct {
-    logger           mono.Logger
-    paymentService   *payment.Service
+    service *Service
+    payment mono.ServiceLookup // read side of the payment module's container
 }
 
 // Declare dependency
@@ -243,14 +246,19 @@ func (m *Module) Dependencies() []string {
 }
 
 // Receive dependency
-func (m *Module) SetDependencyServiceContainer(
-    module string,
-    container mono.ServiceContainer) {
-    if module == "payment" {
-        m.paymentService = container.RequestReplyServiceClient(...)
+func (m *Module) SetDependencyServiceContainer(dependency string, container mono.ServiceContainer) {
+    if dependency == "payment" {
+        m.payment = container
     }
 }
+
+// Call the payment service at use time, through its published contract
+func (m *Module) charge(ctx context.Context, req paymentcontract.ChargeRequest) (paymentcontract.ChargeResponse, error) {
+    return paymentcontract.Charge.Call(ctx, m.payment, req)
+}
 ```
+
+Here `paymentcontract` is `my-mono-app/modules/payment/contract`, which declares `var Charge = helper.RequestReplyService[ChargeRequest, ChargeResponse]("payment", "charge")`.
 
 ## Service Registration
 
@@ -258,14 +266,17 @@ If your module provides services:
 
 ```go
 func (m *Module) RegisterServices(container mono.ServiceContainer) error {
-    // Register a request-reply service
-    return container.RegisterRequestReplyService(
+    // Register a typed request-reply service (helper = github.com/go-monolith/mono/pkg/helper)
+    return helper.RegisterTypedRequestReplyService(
+        container,
         "create-order",
+        json.Unmarshal,
+        json.Marshal,
         m.handleCreateOrder,
     )
 }
 
-func (m *Module) handleCreateOrder(ctx context.Context, req *CreateOrderRequest) (*Order, error) {
+func (m *Module) handleCreateOrder(ctx context.Context, req CreateOrderRequest, msg *mono.Msg) (*Order, error) {
     return m.service.CreateOrder(req.CustomerID, req.ProductID, req.Quantity)
 }
 ```
@@ -281,7 +292,6 @@ package tests
 import (
     "context"
     "testing"
-    "time"
 
     "github.com/go-monolith/mono"
     "my-mono-app/modules/order"
@@ -309,7 +319,7 @@ Each module should have:
 ### Separate Public and Internal APIs
 
 ```go
-// ✓ Public API (used by other modules)
+// ✓ Exported: called by this module's handlers (other modules reach it only through the contract)
 func (s *Service) CreateOrder(req *CreateOrderRequest) (*Order, error)
 
 // ✓ Internal helper (not used by other modules)
@@ -361,18 +371,9 @@ modules/
     └── account/
 ```
 
-### Shared Types
+### Types Used by Several Modules
 
-For types used by multiple modules:
-
-```
-shared/
-├── types.go         # Common domain types
-├── events.go        # Shared event definitions
-└── errors.go        # Common error types
-```
-
-But prefer event-driven communication over shared dependencies. Types that cross a module boundary belong in the owning module's `contract` package: request and response types with the provider, event types with the emitter. That removes the need for a shared events package.
+Types that cross a module boundary belong in the owning module's `contract` package: request and response types with the provider, event types with the emitter. No shared types or events package is needed. Prefer event-driven communication over shared dependencies.
 
 ## Complete Example
 

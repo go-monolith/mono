@@ -1,6 +1,8 @@
 # Services
 
-Services are the **public APIs** of modules in the Monolith Framework. When a module exposes functionality for other modules to use, it does so by registering services. Services establish explicit dependencies between modules and enable the framework to manage startup order automatically.
+Services are the **public APIs** of modules. A module that exposes functionality to other modules registers services; a module that uses them declares the provider as a dependency, so the framework can start the provider first. Read this page to understand how services connect modules; the five kinds of service are compared in [Inter-Module Communication](inter-module-communication.md), and every method is in the [ServiceContainer API](../api/container.md).
+
+The recommended way to declare and call a service is a [typed service contract](#typed-service-contracts-recommended).
 
 ## What is a Service?
 
@@ -53,7 +55,26 @@ When Module B uses a service from Module A, this creates an **explicit dependenc
 | B declares dependency on A | Framework starts A before B |
 | B receives A's ServiceContainer | B can call A's services |
 
-This is different from **events**, which do not create dependencies. Services are for direct, point-to-point communication where the caller knows which module provides the functionality.
+This is different from **events**, which do not create dependencies (see [Services vs Events](#services-vs-events)). Services are for direct, point-to-point communication where the caller knows which module provides the functionality.
+
+## Typed Service Contracts (Recommended)
+
+Since v0.1.0, declare a service once in the provider's `contract` sub-package and use the same value on both sides. The service name, the types and the encoding are then written once:
+
+```go
+// payment/contract/contract.go
+var Process = helper.RequestReplyService[PaymentRequest, PaymentResponse]("payment", "process-payment")
+
+// Provider
+func (m *PaymentModule) RegisterServices(container mono.ServiceContainer) error {
+    return contract.Process.Register(container, m.process)
+}
+
+// Consumer
+resp, err := paymentcontract.Process.Call(ctx, m.paymentContainer, paymentcontract.PaymentRequest{Amount: order.Total})
+```
+
+`helper.QueueGroupService[T]` and `helper.StreamConsumerService[T]` follow the same shape. See the [Module Boundaries Guide](../guides/module-boundaries.md).
 
 ## The ServiceContainer
 
@@ -62,19 +83,19 @@ Each module receives its own `ServiceContainer` for two purposes:
 1. **Registering services** the module provides
 2. **Accessing services** from dependency modules
 
-### ServiceContainer Interface
-
 ```go
+// Abridged; see the ServiceContainer API for every method.
 type ServiceContainer interface {
     // Register services (provider side)
     RegisterChannelService(name string, in chan *Msg, out chan *Msg) error
-    RegisterRequestReplyService(name string, handler RequestReplyHandler) error
+    RegisterRequestReplyService(name string, handler RequestReplyHandler, opts ...ServiceOption) error
     RegisterQueueGroupService(name string, pairs ...QGHP) error
     RegisterStreamConsumerService(name string, config StreamConsumerConfig, handler StreamConsumerHandler) error
     RegisterCronService(name string, config CronServiceConfig, handler CronHandler) error
 
     // Get services (consumer side)
     GetChannelService(serviceName string, consumerModule string) (in chan *Msg, out chan *Msg, err error)
+    MustGetChannelService(serviceName string, consumerModule string) (in chan *Msg, out chan *Msg)
     GetRequestReplyService(name string) (RequestReplyServiceClient, error)
     GetQueueGroupService(name string) (QueueGroupServiceClient, error)
     GetStreamConsumerService(name string) (StreamConsumerServiceClient, error)
@@ -83,10 +104,15 @@ type ServiceContainer interface {
     // Query
     Has(name string) bool
     Entries() []*ServiceEntry
+    Unregister(name string) error
 }
 ```
 
-## Registering Services (Provider Side)
+## Without Contracts: Raw Registration and Calls
+
+The contract above wraps these lower-level calls.
+
+### Registering Services (Provider Side)
 
 A module provides services by implementing `ServiceProviderModule`:
 
@@ -139,13 +165,13 @@ func (m *PaymentModule) handleSendReceipt(ctx context.Context, msg *mono.Msg) er
 }
 ```
 
-## Consuming Services (Consumer Side)
+### Consuming Services (Consumer Side)
 
-A module consumes services by:
+A module consumes services in three steps:
 
-1. **Declaring dependencies** via `DependentModule`
-2. **Receiving ServiceContainers** via `SetDependencyServiceContainer`
-3. **Calling services** via the container's Get methods
+1. **Declare dependencies** via `DependentModule`
+2. **Receive ServiceContainers** via `SetDependencyServiceContainer`
+3. **Call services** via the container's Get methods
 
 ```go
 // OrderModule uses PaymentModule's services
@@ -196,28 +222,9 @@ func (m *OrderModule) createOrder(ctx context.Context, order *Order) error {
 }
 ```
 
-## Typed Service Contracts (Recommended)
+### Using Helper Functions
 
-Since v0.1.0, declare a service once in the provider's `contract` sub-package and use the same value on both sides. The service name, the types and the encoding are then written once:
-
-```go
-// payment/contract/contract.go
-var Process = helper.RequestReplyService[PaymentRequest, PaymentResponse]("payment", "process-payment")
-
-// Provider
-func (m *PaymentModule) RegisterServices(container mono.ServiceContainer) error {
-    return contract.Process.Register(container, m.process)
-}
-
-// Consumer
-resp, err := paymentcontract.Process.Call(ctx, m.paymentContainer, paymentcontract.PaymentRequest{Amount: order.Total})
-```
-
-`helper.QueueGroupService[T]` and `helper.StreamConsumerService[T]` follow the same shape. See the [Module Boundaries Guide](../guides/module-boundaries.md).
-
-## Using Helper Functions
-
-The string-based helpers are the lower-level form of the contracts above:
+The string-based helpers do the marshaling for you, without a contract:
 
 ```go
 import "github.com/go-monolith/mono/pkg/helper"
@@ -293,7 +300,9 @@ The framework detects and rejects circular dependencies at startup:
 // OrderModule depends on PaymentModule
 // PaymentModule depends on OrderModule (circular!)
 
-// Error: circular dependency detected: order -> payment -> order
+// Error: failed to resolve dependencies: ... circular dependency detected (chain: order -> payment -> order)
+// errors.Is(err, monoerrors.ErrCircularDependency) reports true
+// (monoerrors = "github.com/go-monolith/mono/pkg/errors")
 ```
 
 ## Subject Naming Convention
@@ -350,63 +359,7 @@ Use **events** when:
 - The emitter doesn't care who consumes
 - You want loose coupling
 
-### Type-Safe Event Handlers
-
-Events support type-safe batch handlers via `TypedEventStreamConsumerHandler[T]` for durable JetStream consumption:
-
-```go
-// Handler signature for type-safe batch event consumption
-type TypedEventStreamConsumerHandler[T any] func(ctx context.Context, events []T, msgs []*Msg) error
-```
-
-**Example:**
-
-```go
-import "github.com/go-monolith/mono/pkg/helper"
-
-func (m *AuditModule) RegisterEventConsumers(registry mono.EventRegistry) error {
-    config := mono.StreamConsumerConfig{
-        Stream: mono.StreamConfig{Name: "audit-events"},
-        Fetch:  mono.FetchConfig{BatchSize: 10},
-    }
-
-    // Type-safe registration with automatic unmarshaling
-    return helper.RegisterTypedEventStreamConsumer(
-        registry,
-        order.OrderCreatedV1,  // EventDefinition[OrderCreatedEvent]
-        config,
-        m.handleOrderEvents,
-        m,
-    )
-}
-
-// Handler receives pre-deserialized events
-func (m *AuditModule) handleOrderEvents(
-    ctx context.Context,
-    events []order.OrderCreatedEvent,  // Already unmarshaled!
-    msgs []*mono.Msg,
-) error {
-    for i, event := range events {
-        if err := m.auditLog(ctx, event); err != nil {
-            msgs[i].NakWithDelay(5 * time.Second)  // Retry with delay
-            continue
-        }
-        msgs[i].Ack()  // Successfully processed
-    }
-    return nil
-}
-```
-
-**Ack/Nack Semantics:**
-
-| Method | Effect |
-|--------|--------|
-| `msg.Ack()` | Message processed, remove from queue |
-| `msg.Nak()` | Retry immediately |
-| `msg.NakWithDelay(d)` | Retry after delay |
-| `msg.Term()` | Stop redelivery (poison message) |
-
-For complete event consumer documentation, see [Event Consumers](consumers.md).
+Event consumers, including type-safe batch handlers (`TypedEventStreamConsumerHandler[T]`) and their Ack/Nak semantics, are covered in [Event Consumers](consumers.md).
 
 ## Complete Example
 
