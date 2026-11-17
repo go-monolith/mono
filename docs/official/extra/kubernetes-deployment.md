@@ -63,7 +63,7 @@ What to expect:
 
 - **Both versions run side by side for a while** (about 11 s in the test). Every service is shared through NATS: request-reply calls, stream consumer messages and cron occurrences go to whichever instance takes them, old or new. Keep message formats and handler behaviour compatible across one version step.
 - **A few messages are delayed by the ack wait.** A message fetched by a pod that is shutting down is left unacknowledged and is delivered again after the consumer's `AckWait` (30 s by default). The test saw 3 visits handled about 31 s after they were published. They are delayed, not lost or duplicated.
-- **Leader moves log one `Fetch error`** per fetch loop (`nats: leadership change` or `nats: server shutdown`), at ERROR level although they clear by themselves within seconds ([#37](https://github.com/go-monolith/mono/issues/37)).
+- **Leader moves log one `Fetch error`** per fetch loop at Warn (`nats: leadership change` or `nats: server shutdown`), followed by `Fetch error cleared` within seconds. Versions up to v0.2.1 logged these two at Error.
 
 ## Canary with Partition
 
