@@ -1,83 +1,19 @@
 # Analytics Example - Channel-Based Services
 
-This example demonstrates channel-based services in the Monolith-Framework for high-performance in-process communication.
+An analytics module that tracks events through a **channel service** (`track-event`, in-process Go channels) and serves them back through a **request-reply service** (`get-event`) via a typed adapter. Events are persisted in a KV bucket of the kv-jetstream plugin, so JetStream is enabled with `WithJetStreamStorageDir`.
+It shows how to register a bidirectional channel service, run its handler goroutine, and clean up channels and goroutines on shutdown with a context and a WaitGroup.
 
-## Overview
+## Running the Example
 
-The Analytics module shows how to implement channel-based services for scenarios requiring ultra-low latency and high throughput within a single process.
+```bash
+cd examples/analytics
+go run .
 
-## What You'll Learn
+# Or, from the repository root (stops after 5 s):
+make run-example-3
+```
 
-1. **Channel Service Registration**: How to register bidirectional channel services
-2. **Goroutine Handler Pattern**: Setting up background handlers for channel processing
-3. **Graceful Shutdown**: Proper cleanup of channels and goroutines using context and WaitGroup
-4. **When to Use Channels**: Understanding channel services vs NATS-based services
-5. **Plugin storage**: Persisting events with the kv-jetstream plugin (JetStream enabled with `WithJetStreamStorageDir`)
-6. **Adapter pattern**: Retrieving events through a typed adapter over a request-reply service
-
-## Channel Services vs NATS Services
-
-### Channel Services (In-Process)
-
-**Characteristics:**
-- Transport: Go channels (in-memory)
-- Latency: Ultra-low (~microseconds)
-- Scope: Same process only
-- Response: Bidirectional (separate in/out channels)
-- Setup: Create channels, spawn handler goroutine
-- Shutdown: Cancel context, close channels, wait for goroutine
-
-**Use When:**
-- All modules run in the same process
-- Need microsecond-level latency
-- High-frequency operations (>10k ops/sec)
-- Want synchronous backpressure
-
-**Examples:**
-- High-frequency analytics tracking
-- In-process caching
-- Local event aggregation
-- Rate limiting services
-
-### RequestReply Services (NATS-Based)
-
-**Characteristics:**
-- Transport: NATS (can be distributed)
-- Latency: Low (~milliseconds)
-- Scope: Can span processes/machines
-- Response: Synchronous reply
-- Setup: Register handler function
-- Shutdown: Framework handles unsubscribe
-
-**Use When:**
-- Need synchronous request/response
-- Services may be distributed
-- Want service discovery via NATS
-
-**Examples:**
-- Inventory checks
-- Payment processing
-- Authentication services
-
-### QueueGroup Services (NATS-Based)
-
-**Characteristics:**
-- Transport: NATS (can be distributed)
-- Latency: Low (~milliseconds)
-- Scope: Can span processes/machines
-- Response: Fire-and-forget
-- Setup: Register handler with queue group
-- Shutdown: Framework handles unsubscribe
-
-**Use When:**
-- Asynchronous commands
-- Need load balancing across workers
-- Fire-and-forget operations
-
-**Examples:**
-- Email sending
-- Background jobs
-- Notification dispatch
+The program runs five scenarios: tracking events over the channel service (single, multiple, concurrent, invalid) and retrieving them over `get-event`. Then it waits for Ctrl+C.
 
 ## Code Structure
 
@@ -91,9 +27,11 @@ examples/analytics/
 └── README.md                   # This file
 ```
 
-## Module Implementation
+## Key Patterns
 
-### Service Registration
+### 1. Service Registration
+
+The module owns two buffered channels (`trackEventIn` receives requests, `trackEventOut` sends responses), created with `make(chan *mono.Msg, 100)`. Buffer size affects backpressure behavior and performance.
 
 ```go
 func (m *AnalyticModule) RegisterServices(container mono.ServiceContainer) error {
@@ -108,7 +46,9 @@ func (m *AnalyticModule) RegisterServices(container mono.ServiceContainer) error
 }
 ```
 
-### Handler Goroutine Setup
+### 2. Handler Goroutine
+
+`Start` fetches the KV bucket, creates a cancellable context for coordinated shutdown, and starts the handler goroutine tracked by a WaitGroup:
 
 ```go
 func (m *AnalyticModule) Start(_ context.Context) error {
@@ -132,7 +72,7 @@ func (m *AnalyticModule) Start(_ context.Context) error {
 }
 ```
 
-### Handler Pattern
+The handler processes requests until the context is cancelled or the input channel is closed. The inner `select` sends the response with a timeout, so the handler never blocks during shutdown:
 
 ```go
 func (m *AnalyticModule) handleTrackEventChannel() {
@@ -168,7 +108,9 @@ func (m *AnalyticModule) handleTrackEventChannel() {
 }
 ```
 
-### Graceful Shutdown
+### 3. Graceful Shutdown
+
+`Stop` cancels the context, closes the input channel, waits for the handler, then closes the output channel:
 
 ```go
 // Simplified: the real Stop also prints progress and reports the number of
@@ -201,26 +143,11 @@ func (m *AnalyticModule) Stop(_ context.Context) error {
 }
 ```
 
-## Running the Example
+### 4. Testing
 
-```bash
-# Navigate to the example directory
-cd examples/analytics
+The module needs a kv-jetstream plugin injected with `SetPlugin("kv", ...)` before `Start`; `monotest.New` runs a module through the real lifecycle.
 
-# Run the example
-go run .
-
-# Expected output shows:
-# - App initialization with JetStream and the kv-jetstream plugin
-# - Five scenarios: tracking events over the channel service (single,
-#   multiple, concurrent, invalid) and retrieving them over get-event
-# - Graceful shutdown with proper cleanup
-
-# Or, from the repository root (stops after 5 s):
-# make run-example-3
-```
-
-### Expected Output
+## Expected Output
 
 Framework and plugin log lines are interleaved and omitted here; event IDs contain timestamps, and the concurrent workers finish in any order.
 
@@ -276,128 +203,33 @@ Shutdown signal received...
 Example completed!
 ```
 
-## Key Concepts Demonstrated
-
-### 1. Bidirectional Channels
-
-```go
-trackEventIn  chan *mono.Msg  // Receives requests
-trackEventOut chan *mono.Msg  // Sends responses
-```
-
-Separate channels for request and response flow.
-
-### 2. Buffer Sizing
-
-```go
-// Create buffered channels for better performance
-trackEventIn:  make(chan *mono.Msg, 100)
-trackEventOut: make(chan *mono.Msg, 100)
-```
-
-Buffer size affects backpressure behavior and performance.
-
-### 3. Context-Based Cancellation
-
-```go
-m.ctx, m.cancel = context.WithCancel(context.Background())
-```
-
-Enables coordinated shutdown across goroutines.
-
-### 4. WaitGroup for Goroutine Tracking
-
-```go
-m.wg.Add(1)
-go m.handleTrackEventChannel()
-// ... later ...
-m.wg.Wait() // Wait for handler to complete
-```
-
-Ensures all goroutines complete before shutdown.
-
-### 5. Select for Non-Blocking Operations
-
-```go
-select {
-case m.trackEventOut <- response:
-    // Sent successfully
-case <-time.After(1 * time.Second):
-    // Timeout
-case <-m.ctx.Done():
-    // Shutdown
-}
-```
-
-Prevents blocking during shutdown.
-
-## Comparison Table
+## Channel Services vs NATS Services
 
 | Feature | Channel Services | RequestReply | QueueGroup |
 |---------|-----------------|--------------|------------|
+| Transport | Go channels (in-memory) | NATS | NATS |
 | Latency | ~microseconds | ~milliseconds | ~milliseconds |
 | Distribution | Same process | Multi-process | Multi-process |
-| Response | Bidirectional | Synchronous | Fire-and-forget |
+| Response | Bidirectional (separate in/out channels) | Synchronous | Fire-and-forget |
 | Load Balancing | Manual | Automatic (queue group, one responder per request) | Automatic |
 | Ordering | Per channel | None (pooled, concurrent handlers) | Arrival order per instance by default (`MaxConcurrency` 1) |
 | Backpressure | Channel buffer | Fail fast with `ErrServiceOverloaded` when the worker pool is full | Blocks in the NATS client buffer |
+| Setup and shutdown | Create channels, run and stop the handler goroutine yourself | Register a handler; the framework unsubscribes | Register a handler with a queue group; the framework unsubscribes |
+| Use for | High-frequency in-process work (analytics tracking, caching, local aggregation, rate limiting) | Synchronous calls that may be distributed (inventory checks, payments, authentication) | Asynchronous, load-balanced commands (email, background jobs, notifications) |
 
-## Advanced Topics
+Channel services cannot span processes, and their goroutines, channels and cleanup are yours to manage. Use NATS services (RequestReply/QueueGroup) when you need distribution or service discovery.
 
-### Buffer Sizing Considerations
+## Next Steps
 
-- **Small buffers** (10-50): Low memory, more backpressure
-- **Medium buffers** (100-500): Balanced performance
-- **Large buffers** (1000+): High throughput, more memory
-
-### Testing Strategies
-
-A sketch, not part of the example (the module also needs a kv-jetstream plugin injected with `SetPlugin("kv", ...)` before `Start`; `monotest.New` runs a module through the real lifecycle):
-
-```go
-// Unit test channel service (sketch)
-func TestChannelService(t *testing.T) {
-    module := NewModule()
-
-    // Test registration
-    container := &mockContainer{}
-    err := module.RegisterServices(container)
-    assert.NoError(t, err)
-
-    // Test request/response
-    module.Start(context.Background())
-    module.trackEventIn <- testRequest
-    response := <-module.trackEventOut
-    assert.Equal(t, expectedResponse, response)
-
-    // Test shutdown
-    module.Stop(context.Background())
-}
-```
-
-## Extending the Example
-
-Ideas for learning:
+Ideas for experimenting with the example:
 
 1. **Add Multiple Services**: Register multiple channel services in one module
 2. **Implement Backpressure Handling**: Monitor buffer usage and apply backpressure
 3. **Add Performance Metrics**: Track latency, throughput, buffer usage
 4. **Implement Priority Queues**: Use multiple channels for different priorities
 5. **Add Request Batching**: Buffer multiple requests for batch processing
-6. **Create Integration Tests**: Test with real framework lifecycle
 
-## Limitations
-
-Channel services have these limitations:
-
-1. **No Distribution**: Cannot span multiple processes
-2. **No Discovery**: Other modules must know the service exists
-3. **Manual Management**: Must handle goroutines, channels, cleanup
-4. **Memory Overhead**: Channels consume memory for buffering
-
-Use NATS services (RequestReply/QueueGroup) when you need distribution or service discovery.
-
-## See Also
+See also:
 
 - [Basic Example](../basic/README.md) - Simple single-module introduction
 - [Multi-Module Example](../multi-module/README.md) - RequestReply and QueueGroup patterns

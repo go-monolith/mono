@@ -24,6 +24,31 @@ instance serves every service, and the services behave as one application:
         ▲ Service mono-cluster:8080 (load-balanced HTTP API)
 ```
 
+## Build and deploy
+
+Requirements: a Kubernetes cluster (1.30+) with at least **3 schedulable
+nodes**, a default StorageClass for the PersistentVolumeClaims, and a registry
+the nodes can pull from.
+
+```bash
+# From the repository root
+IMAGE=registry.example.com/mono-k8s-cluster:0.2.0
+docker build -f examples/k8s-cluster/Dockerfile -t $IMAGE .
+docker push $IMAGE
+```
+
+Set `image:` in `deploy/k8s.yaml` to `$IMAGE`, then:
+
+```bash
+examples/k8s-cluster/deploy/create-route-secret.sh   # namespace mono-demo
+kubectl apply -f examples/k8s-cluster/deploy/k8s.yaml
+kubectl -n mono-demo rollout status sts/mono-cluster
+kubectl -n mono-demo get pods -o wide                # one pod per node
+```
+
+When you change the code, use a new tag: with `imagePullPolicy: IfNotPresent`,
+a node keeps the image it already has.
+
 ## Files
 
 | File | Purpose |
@@ -35,7 +60,7 @@ instance serves every service, and the services behave as one application:
 | `deploy/k8s.yaml` | Namespace, headless and HTTP Services, StatefulSet, PodDisruptionBudget |
 | `deploy/create-route-secret.sh` | Creates the Secret with a random route password and system account password |
 
-## How the cluster is configured
+## Framework options
 
 Every replica runs the same configuration; only the pod name differs.
 
@@ -78,26 +103,30 @@ mono.NewMonoApplication(
   streams the framework creates for the visits stream consumer and the cron
   schedule. The visits consumer is durable (`greeter-visits`), so it keeps its
   position across restarts, including a stop of every pod.
-- **StatefulSet settings:**
-  - `podManagementPolicy: Parallel`: a pod is Ready only once JetStream has
-    quorum, which needs two of the three pods. With the default ordered
-    start, `mono-cluster-1` would never be created.
-  - `publishNotReadyAddresses: true` on the headless Service, so routes resolve
-    before the pods are Ready.
-  - Required `podAntiAffinity` on `kubernetes.io/hostname`: one pod per node.
-  - The liveness probe (`/healthz`) only checks the process. It never depends
-    on JetStream quorum, or losing pods would restart the others.
-  - `/readyz` reports `Health()`, including its `jetstream` section, and is
-    ready while the framework and NATS are healthy, not only while JetStream
-    has quorum.
-  - A `preStop` sleep of 5 s keeps the pod serving while it is removed from
-    the Service endpoints, so clients don't get connection errors during a
-    rolling update. It uses the `sleep` action, which needs no shell in the
-    image (Kubernetes 1.30+). Older clusters reject the manifest: use
-    `exec: {command: ["sleep", "5"]}` instead, with a base image that has a
-    `sleep` binary (the distroless image used here has none).
-  - A PodDisruptionBudget with `minAvailable: 2`, so node drains evict one
-    pod at a time and JetStream keeps its quorum.
+
+## Kubernetes manifest
+
+`deploy/k8s.yaml` sets these StatefulSet and Service options:
+
+- `podManagementPolicy: Parallel`: a pod is Ready only once JetStream has
+  quorum, which needs two of the three pods. With the default ordered
+  start, `mono-cluster-1` would never be created.
+- `publishNotReadyAddresses: true` on the headless Service, so routes resolve
+  before the pods are Ready.
+- Required `podAntiAffinity` on `kubernetes.io/hostname`: one pod per node.
+- The liveness probe (`/healthz`) only checks the process. It never depends
+  on JetStream quorum, or losing pods would restart the others.
+- `/readyz` reports `Health()`, including its `jetstream` section, and is
+  ready while the framework and NATS are healthy, not only while JetStream
+  has quorum.
+- A `preStop` sleep of 5 s keeps the pod serving while it is removed from
+  the Service endpoints, so clients don't get connection errors during a
+  rolling update. It uses the `sleep` action, which needs no shell in the
+  image (Kubernetes 1.30+). Older clusters reject the manifest: use
+  `exec: {command: ["sleep", "5"]}` instead, with a base image that has a
+  `sleep` binary (the distroless image used here has none).
+- A PodDisruptionBudget with `minAvailable: 2`, so node drains evict one
+  pod at a time and JetStream keeps its quorum.
 
 ## Configuration (environment)
 
@@ -114,31 +143,6 @@ mono.NewMonoApplication(
 | `JS_READY_TIMEOUT` | `10m` | how long `Start` waits for clustered JetStream |
 | `HTTP_ADDR` | `:8080` | HTTP API address |
 | `NATS_DEBUG` | unset | `true` adds the embedded server's own log (routes, RAFT elections) at debug level |
-
-## Build and deploy
-
-Requirements: a Kubernetes cluster (1.30+) with at least **3 schedulable
-nodes**, a default StorageClass for the PersistentVolumeClaims, and a registry
-the nodes can pull from.
-
-```bash
-# From the repository root
-IMAGE=registry.example.com/mono-k8s-cluster:0.2.0
-docker build -f examples/k8s-cluster/Dockerfile -t $IMAGE .
-docker push $IMAGE
-```
-
-Set `image:` in `deploy/k8s.yaml` to `$IMAGE`, then:
-
-```bash
-examples/k8s-cluster/deploy/create-route-secret.sh   # namespace mono-demo
-kubectl apply -f examples/k8s-cluster/deploy/k8s.yaml
-kubectl -n mono-demo rollout status sts/mono-cluster
-kubectl -n mono-demo get pods -o wide                # one pod per node
-```
-
-When you change the code, use a new tag: with `imagePullPolicy: IfNotPresent`,
-a node keeps the image it already has.
 
 ## Try it
 
