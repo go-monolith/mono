@@ -1,10 +1,12 @@
 # Event Consumers
 
-Event consumers enable **loose coupling** between modules. Unlike services, events do NOT create dependencies between modules. Emitters declare events they publish; any interested module can consume them without knowing about or depending on the emitter.
+This page explains how modules react to events published by other modules: how events differ from services, how to emit an event, and the two ways to consume one (NATS Core or JetStream).
+
+**When to read it:** before writing a module that implements `EventEmitterModule` or `EventConsumerModule`. For the full method reference, see the [EventRegistry API](../api/eventregistry.md).
 
 ## What is an Event Consumer?
 
-An event consumer is a handler registered by a module to receive events published by other modules. Think of events as a broadcast mechanism:
+An event consumer is a handler a module registers to receive events published by other modules. Events are a broadcast mechanism: emitters declare the events they publish, and any interested module can consume them without knowing about or depending on the emitter.
 
 ```
 ┌───────────────────────────────────────────────────────────────────────────┐
@@ -74,102 +76,124 @@ func (m *NotificationModule) RegisterEventConsumers(registry mono.EventRegistry)
 }
 ```
 
-## Event Consumer Patterns
+## Choosing a Pattern
 
 The framework supports two patterns for consuming events:
 
-| Pattern | Interface | Durability | Use Case |
-|---------|-----------|------------|----------|
-| **EventConsumer** | `EventConsumerHandler` | None (fire-and-forget) | Real-time notifications, low latency |
-| **EventStreamConsumer** | `EventStreamConsumerHandler` | JetStream (at-least-once) | Critical events, audit trails |
+| Aspect | EventConsumer | EventStreamConsumer |
+|--------|---------------|---------------------|
+| **Handler** | `EventConsumerHandler` | `EventStreamConsumerHandler` (batch) |
+| **Underlying System** | NATS Core | JetStream |
+| **Durability** | None (fire-and-forget) | Messages persisted |
+| **Delivery Guarantee** | At-most-once | At-least-once |
+| **Acknowledgment** | No | Required |
+| **Message Loss Risk** | Yes (if no consumer is available) | No |
+| **Latency (indicative)** | ~1ms | Higher (persistence) |
+| **Replay** | No | Yes |
+| **Batch Processing** | No | Yes |
+| **Best For** | Real-time, non-critical | Critical, auditable |
 
-### Pattern 1: EventConsumer (NATS Core)
+### Decision Guide
 
-Fire-and-forget event consumption via standard NATS subscriptions.
-
-#### When to Use
-
-- Real-time notifications
-- Events where occasional message loss is acceptable
-- Low-latency pub/sub scenarios
-- Simple broadcast patterns
-
-#### Handler Signature
-
-```go
-// Raw handler - manual JSON unmarshaling
-type EventConsumerHandler func(ctx context.Context, msg *Msg) error
-
-// Typed handler - automatic unmarshaling
-type TypedEventConsumerHandler[T any] func(ctx context.Context, event T, msg *Msg) error
+```
+Is message loss acceptable?
+├── YES → Use EventConsumer
+│   Examples: UI updates, real-time analytics, notifications
+│
+└── NO → Use EventStreamConsumer
+    Examples: Payment events, audit trails, order processing
 ```
 
-#### Example
+---
 
-**Emitter Module** (declares events it will emit):
+## Emitting Events
+
+Consumers need an event to consume. An emitter module defines the event, declares it in `EmitEvents()`, and publishes it.
+
+### Emitter Step 1: Define Event Definitions
 
 ```go
 import "github.com/go-monolith/mono/pkg/helper"
 
-// Define the event
+// Define typed event definitions
 var OrderCreatedV1 = helper.EventDefinition[OrderCreatedEvent](
-    "order",        // Module name
+    "order",        // Module name (domain)
     "OrderCreated", // Event name
     "v1",           // Version
 )
 
-// Implement EventEmitterModule
+var OrderShippedV1 = helper.EventDefinition[OrderShippedEvent]("order", "OrderShipped", "v1")
+
+// Event payload
+type OrderCreatedEvent struct {
+    OrderID    string  `json:"order_id"`
+    CustomerID string  `json:"customer_id"`
+    Amount     float64 `json:"amount"`
+}
+
+type OrderShippedEvent struct {
+    OrderID string `json:"order_id"`
+}
+```
+
+### Emitter Step 2: Implement EventEmitterModule Interface
+
+```go
+type OrderModule struct {
+    eventBus mono.EventBus
+}
+
+// Required: Implement EventBusAwareModule (embedded in EventEmitterModule)
+func (m *OrderModule) SetEventBus(bus mono.EventBus) {
+    m.eventBus = bus
+}
+
+// Required: Declare events this module emits
 func (m *OrderModule) EmitEvents() []mono.BaseEventDefinition {
     return []mono.BaseEventDefinition{
         OrderCreatedV1.ToBase(),
+        OrderShippedV1.ToBase(),
     }
 }
+```
 
-// Publish the event
+### Emitter Step 3: Publish Events
+
+```go
 func (m *OrderModule) createOrder(ctx context.Context, order *Order) error {
     // Business logic...
 
-    // Fire-and-forget publish
-    return OrderCreatedV1.Publish(m.eventBus, OrderCreatedEvent{
-        OrderID: order.ID,
-        Amount:  order.Total,
-    }, nil)
-}
-```
-
-**Consumer Module** (receives events with no dependency):
-
-```go
-// Implement EventConsumerModule
-func (m *NotificationModule) RegisterEventConsumers(registry mono.EventRegistry) error {
-    // Discover the event from the registry
-    eventDef, ok := registry.GetEventByName("OrderCreated", "v1", "order")
-    if !ok {
-        return fmt.Errorf("event not found: OrderCreated.v1 from order")
+    event := OrderCreatedEvent{
+        OrderID:    order.ID,
+        CustomerID: order.CustomerID,
+        Amount:     order.Total,
     }
 
-    // Register consumer handler
-    return registry.RegisterEventConsumer(
-        eventDef,
-        m.handleOrderCreated,
-        m,
-    )
-}
-
-func (m *NotificationModule) handleOrderCreated(ctx context.Context, msg *mono.Msg) error {
-    var event OrderCreatedEvent
-    if err := json.Unmarshal(msg.Data, &event); err != nil {
+    // Option 1: Fire-and-forget (NATS Core)
+    if err := OrderCreatedV1.Publish(m.eventBus, event, nil); err != nil {
         return err
     }
 
-    // Send notification
-    return m.sendEmail(ctx, event.OrderID, event.CustomerEmail)
+    // Option 2: Durable publish (JetStream)
+    ack, err := OrderCreatedV1.EventStreamPublish(ctx, m.eventBus, event, nil)
+    if err != nil {
+        return err
+    }
+    log.Printf("Published with sequence: %d", ack.Sequence())
+
+    return nil
 }
 ```
 
-#### Using Typed Handlers
+---
 
-For type-safe event consumption with automatic unmarshaling:
+## Pattern 1: EventConsumer (NATS Core)
+
+Fire-and-forget event consumption via standard NATS subscriptions. Use it for real-time notifications and other events where occasional loss is acceptable.
+
+### Typed Handler (recommended)
+
+Import the emitter's contract package and register with `helper.RegisterTypedEventConsumer`. The payload arrives already unmarshaled:
 
 ```go
 import (
@@ -199,7 +223,39 @@ func (m *NotificationModule) handleOrderCreated(
 }
 ```
 
-#### Queue Groups for Load Balancing
+### Raw Handler (runtime discovery)
+
+Find the event with `GetEventByName` and unmarshal the payload yourself:
+
+```go
+// Implement EventConsumerModule
+func (m *NotificationModule) RegisterEventConsumers(registry mono.EventRegistry) error {
+    // Discover the event from the registry
+    eventDef, ok := registry.GetEventByName("OrderCreated", "v1", "order")
+    if !ok {
+        return fmt.Errorf("event not found: OrderCreated.v1 from order")
+    }
+
+    // Register consumer handler
+    return registry.RegisterEventConsumer(
+        eventDef,
+        m.handleOrderCreated,
+        m,
+    )
+}
+
+func (m *NotificationModule) handleOrderCreated(ctx context.Context, msg *mono.Msg) error {
+    var event OrderCreatedEvent
+    if err := json.Unmarshal(msg.Data, &event); err != nil {
+        return err
+    }
+
+    // Send notification
+    return m.sendEmail(ctx, event.OrderID, event.CustomerEmail)
+}
+```
+
+### Queue Groups for Load Balancing
 
 Multiple consumers in the same queue group share event processing:
 
@@ -213,7 +269,7 @@ return registry.RegisterEventConsumer(
 )
 ```
 
-#### Concurrency and Ordering
+### Concurrency and Ordering
 
 Event consumers are serial by default: each instance handles one event at a time, in arrival order. To handle events concurrently, register with options:
 
@@ -226,66 +282,61 @@ return registry.RegisterEventConsumerWithOptions(eventDef, m.handleOrderCreated,
 
 `helper.RegisterTypedEventConsumerWithOptions` does the same for typed handlers. A full pool holds events back; it does not drop them. Two registrations of one event in one module share the default queue group (the module name), so each event reaches only one of them: give each its own queue group.
 
-#### Characteristics
-
-| Aspect | Details |
-|--------|---------|
-| Latency | ~1ms |
-| Durability | None (fire-and-forget) |
-| Acknowledgment | No |
-| Message Loss Risk | Yes (if no consumer available) |
-| Use Case | Real-time notifications, UI updates |
-
 ---
 
-### Pattern 2: EventStreamConsumer (JetStream)
+## Pattern 2: EventStreamConsumer (JetStream)
 
-Durable event consumption via JetStream pull consumers with explicit acknowledgment.
+Durable event consumption via JetStream pull consumers with explicit acknowledgment. Use it when message loss is unacceptable (payments, orders, audits), or when you need replay or batch processing.
 
-Each registration gets a durable consumer named
-`<consumer-module>-<event-module>-<event>-<version>`, for example
-`analytics-billing-PaymentProcessed-v1`. The name does not change across restarts or when
-other modules are added or removed, so the consumer resumes where it left off. If you are
-upgrading from v0.0.11 or earlier, see
-[RegisterEventStreamConsumer](../api/eventregistry.md#registereventstreamconsumer) for how
-existing durables are carried over.
+Publish these events to JetStream with `EventStreamPublish` (see [Emitting Events](#emitting-events)).
 
-#### When to Use
+Each registration gets a durable consumer named `<consumer-module>-<event-module>-<event>-<version>`, for example `analytics-billing-PaymentProcessed-v1`. The name does not change across restarts or when other modules are added or removed, so the consumer resumes where it left off. If you are upgrading from v0.0.11 or earlier, see [Upgrading Legacy Consumers](../api/eventregistry.md#upgrading-legacy-consumers) for how existing durables are carried over.
 
-- Event-Driven Architecture (EDA) patterns
-- Message loss is unacceptable
-- Need at-least-once delivery guarantee
-- Require event replay capability
-- Batch processing of events
-- Critical business events (payments, orders, audits)
-
-#### Handler Signature
+### Typed Handler (recommended)
 
 ```go
-// Raw batch handler - manual JSON unmarshaling
-type EventStreamConsumerHandler func(ctx context.Context, msgs []*Msg) error
+import (
+    "github.com/go-monolith/mono/pkg/helper"
 
-// Typed batch handler - automatic unmarshaling
-type TypedEventStreamConsumerHandler[T any] func(ctx context.Context, events []T, msgs []*Msg) error
-```
+    "myapp/modules/order/contract" // the emitter's contract package
+)
 
-#### Example
+func (m *AuditModule) RegisterEventConsumers(registry mono.EventRegistry) error {
+    config := mono.StreamConsumerConfig{
+        Stream: mono.StreamConfig{
+            Name:      "audit-order-events",
+            Retention: mono.WorkQueuePolicy,
+        },
+        Fetch: mono.FetchConfig{BatchSize: 10},
+    }
 
-**Emitter Module** (publishes to JetStream for durability):
-
-```go
-// Publish to JetStream (persisted)
-ack, err := OrderCreatedV1.EventStreamPublish(ctx, m.eventBus, OrderCreatedEvent{
-    OrderID: "ORD-001",
-    Amount:  99.99,
-}, nil)
-if err != nil {
-    return err
+    return helper.RegisterTypedEventStreamConsumer(
+        registry,
+        contract.OrderCreatedV1,
+        config,
+        m.handleOrderEvents,
+        m,
+    )
 }
-fmt.Printf("Published with sequence: %d\n", ack.Sequence())
+
+// Handler receives pre-deserialized events
+func (m *AuditModule) handleOrderEvents(
+    ctx context.Context,
+    events []contract.OrderCreatedEvent,  // Already unmarshaled!
+    msgs []*mono.Msg,
+) error {
+    for i, event := range events {
+        if err := m.auditLog(ctx, event); err != nil {
+            msgs[i].NakWithDelay(5 * time.Second)
+            continue
+        }
+        msgs[i].Ack()
+    }
+    return nil
+}
 ```
 
-**Consumer Module** (durable consumption with ack/nack):
+### Raw Handler (runtime discovery)
 
 ```go
 func (m *AuditModule) RegisterEventConsumers(registry mono.EventRegistry) error {
@@ -332,53 +383,7 @@ func (m *AuditModule) handleOrderEvents(ctx context.Context, msgs []*mono.Msg) e
 }
 ```
 
-#### Using Typed Handlers
-
-For type-safe batch event consumption:
-
-```go
-import (
-    "github.com/go-monolith/mono/pkg/helper"
-
-    "myapp/modules/order/contract" // the emitter's contract package
-)
-
-func (m *AuditModule) RegisterEventConsumers(registry mono.EventRegistry) error {
-    config := mono.StreamConsumerConfig{
-        Stream: mono.StreamConfig{
-            Name:      "audit-order-events",
-            Retention: mono.WorkQueuePolicy,
-        },
-        Fetch: mono.FetchConfig{BatchSize: 10},
-    }
-
-    return helper.RegisterTypedEventStreamConsumer(
-        registry,
-        contract.OrderCreatedV1,
-        config,
-        m.handleOrderEvents,
-        m,
-    )
-}
-
-// Handler receives pre-deserialized events
-func (m *AuditModule) handleOrderEvents(
-    ctx context.Context,
-    events []contract.OrderCreatedEvent,  // Already unmarshaled!
-    msgs []*mono.Msg,
-) error {
-    for i, event := range events {
-        if err := m.auditLog(ctx, event); err != nil {
-            msgs[i].NakWithDelay(5 * time.Second)
-            continue
-        }
-        msgs[i].Ack()
-    }
-    return nil
-}
-```
-
-#### Message Acknowledgment
+### Message Acknowledgment
 
 JetStream consumers must explicitly acknowledge messages:
 
@@ -390,49 +395,11 @@ JetStream consumers must explicitly acknowledge messages:
 | `msg.Term()` | Terminate redelivery (poison message) |
 | `msg.InProgress()` | Extend processing time, prevent timeout |
 
-#### Characteristics
-
-| Aspect | Details |
-|--------|---------|
-| Latency | ~5ms (persistence overhead) |
-| Durability | JetStream (messages persisted) |
-| Acknowledgment | Required (Ack/Nak) |
-| Delivery Guarantee | At-least-once |
-| Replay Capability | Yes |
-| Use Case | Audit trails, compliance, critical events |
-
----
-
-## EventConsumer vs EventStreamConsumer
-
-| Aspect | EventConsumer | EventStreamConsumer |
-|--------|---------------|---------------------|
-| **Underlying System** | NATS Core | JetStream |
-| **Durability** | None | Messages persisted |
-| **Delivery Guarantee** | At-most-once | At-least-once |
-| **Acknowledgment** | No | Required |
-| **Message Loss Risk** | Yes | No |
-| **Latency** | ~1ms | ~5ms |
-| **Replay** | No | Yes |
-| **Batch Processing** | No | Yes |
-| **Best For** | Real-time, non-critical | Critical, auditable |
-
-### Decision Guide
-
-```
-Is message loss acceptable?
-├── YES → Use EventConsumer
-│   Examples: UI updates, real-time analytics, notifications
-│
-└── NO → Use EventStreamConsumer
-    Examples: Payment events, audit trails, order processing
-```
-
 ---
 
 ## Implementing Event Consumer Modules
 
-### Step 1: Implement EventConsumerModule Interface
+### Step 1: Implement the EventConsumerModule Interface
 
 ```go
 type NotificationModule struct {
@@ -456,158 +423,12 @@ func (m *NotificationModule) RegisterEventConsumers(registry mono.EventRegistry)
 }
 ```
 
-### Step 2: Discover Events via EventRegistry
+### Step 2: Choose How to Find the Event
 
-Two patterns for event discovery:
+- **Direct import (type-safe):** import the emitter's contract package and use the typed helpers, as in the typed examples above. Mistakes show up at compile time.
+- **Runtime discovery (decoupled):** call `registry.GetEventByName(name, version, module)` and register a raw handler, as in the raw examples above. No import of the emitter is needed.
 
-**Pattern A: Direct Import (Type-Safe)**
-```go
-import "github.com/go-monolith/mono/pkg/helper"
-import "myapp/modules/order/contract"  // Import the emitter's contract package
-
-func (m *NotificationModule) RegisterEventConsumers(registry mono.EventRegistry) error {
-    // Type-safe registration with compile-time checks
-    return helper.RegisterTypedEventConsumer(
-        registry,
-        contract.OrderCreatedV1,  // Direct reference
-        m.handleOrderCreated,
-        m,
-    )
-}
-```
-
-**Pattern B: Runtime Discovery (Decoupled)**
-```go
-func (m *NotificationModule) RegisterEventConsumers(registry mono.EventRegistry) error {
-    // Runtime discovery - no import needed
-    eventDef, ok := registry.GetEventByName("OrderCreated", "v1", "order")
-    if !ok {
-        return fmt.Errorf("event not found: OrderCreated.v1 from order")
-    }
-
-    return registry.RegisterEventConsumer(eventDef, m.handleOrderCreated, m)
-}
-```
-
-### Step 3: Write Event Handlers
-
-```go
-// For EventConsumer
-func (m *NotificationModule) handleOrderCreated(ctx context.Context, msg *mono.Msg) error {
-    var event OrderCreatedEvent
-    if err := json.Unmarshal(msg.Data, &event); err != nil {
-        return err  // Error logged by framework
-    }
-
-    // Process the event
-    return m.sendNotification(ctx, event)
-}
-
-// For EventStreamConsumer (batch)
-func (m *AuditModule) handleOrderEvents(ctx context.Context, msgs []*mono.Msg) error {
-    for _, msg := range msgs {
-        // Process each message
-        // Must acknowledge each message!
-        msg.Ack()
-    }
-    return nil
-}
-```
-
----
-
-## Implementing Event Emitter Modules
-
-### Step 1: Define Event Definitions
-
-```go
-import "github.com/go-monolith/mono/pkg/helper"
-
-// Define typed event definition
-var OrderCreatedV1 = helper.EventDefinition[OrderCreatedEvent](
-    "order",        // Module name (domain)
-    "OrderCreated", // Event name
-    "v1",           // Version
-)
-
-// Event payload
-type OrderCreatedEvent struct {
-    OrderID    string  `json:"order_id"`
-    CustomerID string  `json:"customer_id"`
-    Amount     float64 `json:"amount"`
-}
-```
-
-### Step 2: Implement EventEmitterModule Interface
-
-```go
-type OrderModule struct {
-    eventBus mono.EventBus
-}
-
-// Required: Implement EventBusAwareModule (embedded in EventEmitterModule)
-func (m *OrderModule) SetEventBus(bus mono.EventBus) {
-    m.eventBus = bus
-}
-
-// Required: Declare events this module emits
-func (m *OrderModule) EmitEvents() []mono.BaseEventDefinition {
-    return []mono.BaseEventDefinition{
-        OrderCreatedV1.ToBase(),
-        OrderShippedV1.ToBase(),
-    }
-}
-```
-
-### Step 3: Publish Events
-
-```go
-func (m *OrderModule) createOrder(ctx context.Context, order *Order) error {
-    // Business logic...
-
-    event := OrderCreatedEvent{
-        OrderID:    order.ID,
-        CustomerID: order.CustomerID,
-        Amount:     order.Total,
-    }
-
-    // Option 1: Fire-and-forget (NATS Core)
-    if err := OrderCreatedV1.Publish(m.eventBus, event, nil); err != nil {
-        return err
-    }
-
-    // Option 2: Durable publish (JetStream)
-    ack, err := OrderCreatedV1.EventStreamPublish(ctx, m.eventBus, event, nil)
-    if err != nil {
-        return err
-    }
-    log.Printf("Published with sequence: %d", ack.Sequence())
-
-    return nil
-}
-```
-
----
-
-## EventRegistry Interface
-
-The `EventRegistry` provides event discovery and consumer registration (excerpt; see the [EventRegistry API](../api/eventregistry.md) for the full interface):
-
-```go
-type EventRegistry interface {
-    // Event Discovery
-    GetEventByName(name, version, moduleName string) (BaseEventDefinition, bool)
-    GetEventsByModule(moduleName string) []BaseEventDefinition
-    GetAllEvents() []BaseEventDefinition
-
-    // Consumer Registration
-    RegisterEventConsumer(eventDef, handler, module, queueGroup...) error
-    RegisterEventConsumerWithOptions(eventDef, handler, module, opts) error
-    RegisterEventStreamConsumer(eventDef, config, handler, module) error
-}
-```
-
-### Event Discovery Methods
+The registry also lists events (full interface in the [EventRegistry API](../api/eventregistry.md)):
 
 ```go
 // Find specific event by name, version, and emitter module
@@ -657,8 +478,8 @@ See the [event-emitter example](../../../examples/event-emitter/README.md) for a
 ## Summary
 
 - **Event consumers** receive events without creating dependencies on emitters
-- **EventConsumer** is fire-and-forget via NATS Core (~1ms latency)
-- **EventStreamConsumer** provides durable delivery via JetStream (~5ms latency)
+- **EventConsumer** is fire-and-forget via NATS Core
+- **EventStreamConsumer** provides durable, at-least-once delivery via JetStream
 - Use **EventRegistry** for event discovery and consumer registration
 - Emitters declare events via `EmitEvents()`, consumers register via `RegisterEventConsumers()`
 - Events enable **loose coupling** between modules

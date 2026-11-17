@@ -1,6 +1,8 @@
 # Framework Architecture
 
-This guide explains how the Monolith Framework is organized and how all the components work together.
+This page explains how the Monolith Framework is organized: its layers and components, the order in which it starts and stops modules, and the subject names it uses.
+
+**When to read it:** after [Modules](modules.md) and [Services](services.md), when you want to know what happens around your modules at startup and shutdown.
 
 ## Layered Architecture
 
@@ -57,17 +59,7 @@ app.Start(context.Background())
 
 ### 2. Module Registry
 
-Maintains the list of registered modules and their metadata:
-
-```
-┌──────────────────┐
-│  Module Registry │
-├──────────────────┤
-│ • order-module   │
-│ • payment-module │
-│ • email-module   │
-└──────────────────┘
-```
+Maintains the list of registered modules and their metadata.
 
 **Handles**:
 - Module registration
@@ -352,9 +344,9 @@ Modules are the primary abstraction:
 - Microservices architecture
 - Function-based organization
 
-### 3. **Pub/Sub Over RPC**
+### 3. **NATS Messaging Over Direct Calls**
 
-NATS pub/sub for inter-module communication:
+Modules communicate through NATS (events and request-reply), not by calling each other:
 
 ✓ **Why**:
 - Loose coupling
@@ -443,16 +435,15 @@ app, err := mono.NewMonoApplication(mono.WithLogger(myCustomLogger))
 
 ## Performance Characteristics
 
-Typical performance on commodity hardware:
+Indicative latencies:
 
-| Operation | Latency | Throughput |
-|-----------|---------|-----------|
-| Channel Service | ~1µs | >1M msg/s |
-| Request-Reply | ~1ms | ~10K msg/s |
-| Queue Group | ~1ms | ~10K msg/s |
-| Stream Consumer | ~5ms | ~5K msg/s |
+| Operation | Latency |
+|-----------|---------|
+| Channel Service | ~1µs |
+| Request-Reply | ~1ms |
+| Queue Group | ~1ms |
 
-Note: Actual performance depends on message size, system load, and configuration.
+Actual performance depends on message size, system load, and configuration.
 
 ## Deployment Model
 

@@ -4,6 +4,8 @@ Understanding these core concepts will help you effectively design and implement
 
 ## The Key Concepts
 
+The concepts below follow the order of this section in the navigation.
+
 ### 1. [Modules](modules.md)
 
 The foundation of your application architecture.
@@ -20,15 +22,7 @@ The public APIs of your modules.
 - **Why**: Explicit dependencies, managed startup order, type-safe communication
 - **Learn**: ServiceContainer, service registration, dependency injection
 
-### 3. [Inter-Module Communication](inter-module-communication.md)
-
-How modules interact with each other.
-
-- **What**: Service patterns and Event patterns for different use cases
-- **Why**: Loose coupling, performance, durability based on your needs
-- **Learn**: Service Communication (5 patterns, including Cron) and Event Communication (2 patterns)
-
-### [Event Consumers](consumers.md)
+### 3. [Event Consumers](consumers.md)
 
 How modules react to events from other modules.
 
@@ -36,21 +30,21 @@ How modules react to events from other modules.
 - **Why**: Loose coupling: consumers do not depend on emitters
 - **Learn**: EventRegistry, event discovery, acknowledgment
 
-### 4. [Architecture](architecture.md)
+### 4. [Inter-Module Communication](inter-module-communication.md)
 
-How the framework components fit together.
+How modules interact with each other.
 
-- **What**: Embedded NATS, modular monolith design, layered architecture
-- **Why**: Scalability, observability, operational simplicity
-- **Learn**: Framework components and their responsibilities
+- **What**: Service patterns and Event patterns for different use cases
+- **Why**: Loose coupling, performance, durability based on your needs
+- **Learn**: Service Communication (5 patterns, including Cron) and Event Communication (2 patterns)
 
-### 5. Embedded NATS ([Architecture](architecture.md))
+### 5. [Architecture](architecture.md)
 
-The framework's heart.
+How the framework components fit together, around the embedded NATS server at its heart.
 
-- **What**: NATS is an embedded message broker that runs in your process
-- **Why**: Inter-module communication without external dependencies
-- **Learn**: JetStream for persistence, subject naming conventions
+- **What**: Embedded NATS (a message broker running in your process), modular monolith design, layered architecture
+- **Why**: Inter-module communication without external dependencies; scalability, observability, operational simplicity
+- **Learn**: Framework components and their responsibilities, JetStream for persistence, subject naming conventions
 
 ## Quick Reference
 
@@ -78,14 +72,14 @@ Start here:
    - Learn how services establish dependencies
    - See how the framework manages startup order
 
-3. **[Inter-Module Communication](inter-module-communication.md)** (15 min)
+3. **[Event Consumers](consumers.md)**
+   - Consume events without depending on the emitter
+   - Choose between EventConsumer and EventStreamConsumer
+
+4. **[Inter-Module Communication](inter-module-communication.md)** (15 min)
    - Choose the right pattern for your use case
    - Understand Service vs Event communication
    - See examples of each pattern
-
-4. **[Event Consumers](consumers.md)**
-   - Consume events without depending on the emitter
-   - Choose between EventConsumer and EventStreamConsumer
 
 5. **[Architecture](architecture.md)** (10 min)
    - Understand how the framework is organized
@@ -112,7 +106,6 @@ Modules don't call each other directly. They communicate through:
 This enables:
 - Independent module development
 - Easy testing with mocks
-- Hot module replacement (future)
 
 ### 3. **The Framework Handles Lifecycle**
 

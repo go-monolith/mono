@@ -1,11 +1,13 @@
 # EventRegistry API
 
-API documentation for the `EventRegistry` interface, which manages event definitions and consumer registrations for the framework's event-driven communication system.
+The `EventRegistry` is the catalog of the application's events. Emitting modules declare their events in it, and consuming modules use it to find those events and register handlers.
+
+**When to read this page:** when a module consumes events from another module (it implements `EventConsumerModule`). To publish events, see [Publishing events](eventbus.md#publishing-events) on the EventBus page.
 
 ## Signatures
 
 ```go
-// Event registration (called by emitter modules)
+// Event registration (called by the framework with each module's EmitEvents())
 func RegisterEvent(def BaseEventDefinition) error
 
 // Event discovery
@@ -24,21 +26,23 @@ func StreamConsumerEntries() []EventStreamConsumerEntry
 ```
 
 {% hint style="info" %}
-**Consumer Selection:** Use `RegisterEventConsumer` for fire-and-forget events (~1ms, no persistence). Use `RegisterEventStreamConsumer` for critical events requiring at-least-once delivery with JetStream persistence.
+**Consumer Selection:**
+- `RegisterEventConsumer`: fire-and-forget events over NATS Core, no persistence (indicative latency ~1ms).
+- `RegisterEventStreamConsumer`: critical events that need at-least-once delivery, persisted in JetStream.
 {% endhint %}
 
 ## Overview
 
-EventRegistry serves as the central catalog for all events in the application, enabling:
-- Event producers to declare the events they will emit
-- Event consumers to discover and subscribe to events without direct dependencies
-- The framework to wire up NATS subscriptions automatically
+The registry lets modules exchange events with **loose coupling**:
 
-Unlike `ServiceContainer` which creates explicit module dependencies, EventRegistry enables **loose coupling**: emitters don't know their consumers, and consumers don't declare dependencies on emitters. This makes events ideal for broadcast notifications and decoupled architectures.
+- emitters declare the events they publish and don't know their consumers;
+- consumers find events by name and don't declare a dependency on the emitter;
+- the framework creates the NATS subscriptions and JetStream consumers.
+
+This differs from `ServiceContainer`, where a caller declares an explicit dependency on the provider.
 
 ## Initialization Sequence
 
-The registry is used during framework initialization in this order:
 1. The framework registers each `EventEmitterModule`'s `EmitEvents()` via `RegisterEvent()`
 2. `EventConsumerModule`s receive the registry via `RegisterEventConsumers(registry)`
 3. Consumer modules discover events via `GetEventByName()` during `RegisterEventConsumers()`
@@ -154,6 +158,14 @@ for _, event := range registry.GetAllEvents() {
 
 ## Consumer Registration Methods
 
+Each registration method has a typed helper in `pkg/helper` that unmarshals the payload for you. Use the typed helper when you can import the emitter's contract package; use the raw method with `GetEventByName` when you discover the event at runtime.
+
+| Raw method | Typed helper | Typed handler |
+|------------|--------------|---------------|
+| `RegisterEventConsumer` | `helper.RegisterTypedEventConsumer` | `TypedEventConsumerHandler[T]` |
+| `RegisterEventConsumerWithOptions` | `helper.RegisterTypedEventConsumerWithOptions` | `TypedEventConsumerHandler[T]` |
+| `RegisterEventStreamConsumer` | `helper.RegisterTypedEventStreamConsumer` | `TypedEventStreamConsumerHandler[T]` |
+
 ### RegisterEventConsumer
 
 ```go
@@ -177,20 +189,25 @@ Registers a fire-and-forget consumer for an event using NATS Core pub/sub.
 - `module` - The consuming module instance
 - `queueGroup` - Optional queue group name (defaults to module name)
 
-**Handler Signature:**
+**Typed (recommended):**
+
+```go
+type TypedEventConsumerHandler[T any] func(ctx context.Context, event T, msg *Msg) error
+```
+
+```go
+// contract is the order module's contract package (myapp/modules/order/contract)
+err := helper.RegisterTypedEventConsumer(registry, contract.OrderCreatedV1, m.handleOrderCreated, m)
+```
+
+`helper.RegisterTypedEventConsumer` takes an optional trailing queue group. An unmarshal error is returned as the handler error.
+
+**Raw:**
+
 ```go
 type EventConsumerHandler func(ctx context.Context, msg *Msg) error
 ```
 
-**Returns:**
-- `error` - Nil on success
-
-**Use Cases:**
-- Real-time notifications where occasional loss is acceptable
-- High-throughput event processing
-- Low-latency requirements (~1ms)
-
-**Example:**
 ```go
 func (m *NotificationModule) RegisterEventConsumers(registry mono.EventRegistry) error {
     eventDef, found := registry.GetEventByName("OrderCreated", "v1", "order")
@@ -212,28 +229,16 @@ func (m *NotificationModule) handleOrderCreated(ctx context.Context, msg *mono.M
 }
 ```
 
-**Queue Groups Example:**
+A non-nil handler error is logged (`Event consumer handler error`). Core NATS events are not redelivered.
+
+**Queue groups:**
+
 ```go
 // Multiple instances with same queue group share the load
 registry.RegisterEventConsumer(eventDef, m.handler, m, "notification-workers")
 ```
 
-Two registrations of the same event in the same module share the default queue group (the module name), so each event reaches only one of the two handlers. Give them different queue groups to have both run.
-
-**Typed Handler (helper):**
-
-For type-safe handlers with automatic unmarshaling, use `TypedEventConsumerHandler`:
-
-```go
-type TypedEventConsumerHandler[T any] func(ctx context.Context, event T, msg *Msg) error
-```
-
-Register it with `helper.RegisterTypedEventConsumer` (optional trailing queue group). An unmarshal error is returned as the handler error and logged:
-
-```go
-// contract is the order module's contract package (myapp/modules/order/contract)
-err := helper.RegisterTypedEventConsumer(registry, contract.OrderCreatedV1, m.handleOrderCreated, m)
-```
+Two registrations of the same event in the same module share the default queue group (the module name), so each event reaches only one of them. Give them different queue groups to have both run.
 
 ### RegisterEventConsumerWithOptions
 
@@ -255,9 +260,14 @@ type EventConsumerOptions struct {
 }
 ```
 
-Event handlers are **serial by default**: one event at a time, in publish order, as with `RegisterEventConsumer`. Set `MaxConcurrency` above 1 to handle events concurrently when the handler does not depend on order (see [Handler Concurrency](container.md#handler-concurrency-worker-pools)). Events carry no reply subject, so a full pool does not reject them: the subscription waits for a slot instead. Negative values fail registration.
+- Event handlers are **serial by default**: one event at a time, in publish order, as with `RegisterEventConsumer`.
+- Set `MaxConcurrency` above 1 to handle events concurrently when the handler does not depend on order (see [Handler Concurrency](container.md#handler-concurrency-worker-pools)).
+- Events carry no reply subject, so a full pool does not reject them: the subscription waits for a slot instead.
+- Negative values fail registration.
 
-**Example:**
+**Typed (recommended):** `helper.RegisterTypedEventConsumerWithOptions(registry, eventDef, handler, module, opts)`.
+
+**Raw:**
 ```go
 func (m *NotificationModule) RegisterEventConsumers(registry mono.EventRegistry) error {
     eventDef, found := registry.GetEventByName("OrderCreated", "v1", "order")
@@ -273,8 +283,6 @@ func (m *NotificationModule) RegisterEventConsumers(registry mono.EventRegistry)
 }
 ```
 
-**Typed Handler (helper):** `helper.RegisterTypedEventConsumerWithOptions(registry, eventDef, handler, module, opts)`.
-
 ### RegisterEventStreamConsumer
 
 ```go
@@ -286,7 +294,7 @@ func (registry EventRegistry) RegisterEventStreamConsumer(
 ) error
 ```
 
-Registers a JetStream durable consumer for an event with at-least-once delivery guarantees.
+Registers a JetStream durable consumer for an event, with at-least-once delivery. Use it for payments, audit logs, compliance events: any event where loss is unacceptable.
 
 **Parameters:**
 - `eventDef` - The event definition to consume
@@ -294,92 +302,27 @@ Registers a JetStream durable consumer for an event with at-least-once delivery 
 - `handler` - Batch handler function for processing event batches
 - `module` - The consuming module instance
 
-**Handler Signature:**
+The handler must acknowledge each message with `Ack()`, `Nak()`, `NakWithDelay()`, `Term()`, or `InProgress()`.
+
+**Typed (recommended):**
+
+```go
+type TypedEventStreamConsumerHandler[T any] func(ctx context.Context, events []T, msgs []*Msg) error
+```
+
+```go
+// contract is the order module's contract package (myapp/modules/order/contract)
+err := helper.RegisterTypedEventStreamConsumer(registry, contract.OrderCreatedV1, config, m.handleOrderBatch, m)
+```
+
+If any message in a batch fails to unmarshal, the handler is not called and the batch is returned as an error, unacknowledged. It is redelivered after `AckWait`, until `MaxDeliver`.
+
+**Raw:**
+
 ```go
 type EventStreamConsumerHandler func(ctx context.Context, msgs []*Msg) error
 ```
 
-Messages should be acknowledged individually using `Ack()`, `Nak()`, `NakWithDelay()`, `Term()`, or `InProgress()`.
-
-**Returns:**
-- `error` - Nil on success
-
-**Durable Consumer Name:**
-
-The framework names the durable JetStream consumer
-`<consumer-module>-<event-module>-<event>-<version>`, for example
-`analytics-billing-PaymentProcessed-v1`. `types.EventStreamConsumerName` (package `github.com/go-monolith/mono/pkg/types`) returns it. Any
-`Consumer.Name` or `Consumer.Durable` you set is overridden.
-
-- The name depends only on which module consumes which event, so it is the same on every
-  restart and does not change when modules are added or removed.
-- The consumer is a true JetStream durable: the server keeps it however long it goes without
-  pull requests, unless you set `Consumer.InactiveThreshold`.
-- If the same module registers the same event on the same stream more than once, the second
-  and later registrations get a `-2`, `-3`, ... suffix, in the order that module registers them.
-
-**Upgrading from v0.0.11 or earlier:**
-
-Earlier versions named the consumer `<event-module>-<event>-<version>-<N>`. `N` was a counter
-that followed module start order, which was not deterministic, so the name could change
-between restarts. Those consumers were also created without a durable name, so the server
-treated them as non-durable. The first startup on the new version handles any legacy durable
-it finds on the same stream. Once every consumer on a stream is set up, it marks the stream
-as migrated with the metadata entry `mono.legacy-consumer-migration: done`, and later
-startups only report leftovers:
-
-- **Work-queue streams:** the legacy durable is deleted before the new one is created. A
-  work-queue stream accepts only one unfiltered consumer, so this is the only way to start.
-  Messages it had not acknowledged stay in the stream and are delivered to the new durable.
-  If the consumer configuration is one the server rejects on a work-queue stream (a deliver
-  policy other than all, or acknowledgement other than explicit), startup fails before
-  anything is deleted.
-- **Other streams:** when the old position is unambiguous (one legacy durable, or several
-  that stopped at the same point), the new durable is positioned just after it, so the stream
-  is not replayed. This requires a deliver policy of all, by-start-sequence or by-start-time;
-  for other deliver policies a warning reports what was not carried over.
-- **Replay over loss:** legacy names do not record which module owned a durable. In the
-  following cases the new durable keeps its configured start, and a warning is logged:
-  - **Several modules consume the same event on the same stream:** a module may have no old
-    position of its own.
-  - **A module's legacy durables stopped at different positions:** for example, a name that
-    switched between restarts, or one left by a module removed in the same deploy.
-
-  Messages the stream still holds are then delivered again, so a handler that is not
-  idempotent sees duplicates; one that sums payments double-counts them. If you know which
-  legacy durable is stale, remove it before upgrading so the remaining position is carried
-  over exactly.
-- **Swapping the consumer of an event in one deploy:** names cannot catch this case. If a
-  single deploy removes the only module consuming an event on a stream and adds a different
-  one, the new module starts at the removed module's position. Split such a swap across two
-  deploys, or remove the legacy durable before upgrading.
-- **The framework does not delete legacy durables** on non-work-queue streams. A warning on
-  every startup names each one together with a `nats consumer rm <stream> <name>` command.
-  Remove them once the new durable is confirmed to be working: on an interest-retention stream
-  they keep retaining messages until removed. Since v0.2.0 the framework raises their
-  inactivity threshold to 1h at startup (nats-server v2.14.10 would otherwise delete them about
-  5s after the server starts, before the migration), so the server itself removes a legacy
-  durable that is no longer pulled 1h after its last pull.
-- **Consumers created after the migration** start from their configured deliver policy. This
-  covers a new module consuming the same event, or a durable an operator deleted to force a
-  replay. Such a consumer is never moved to a legacy position.
-- **Rolling upgrade with several replicas:**
-  - **Interest and limits streams:** old replicas keep consuming through their legacy durable
-    while new ones use the new durable. This can cause duplicates, never loss.
-  - **Work-queue streams:** the first new replica deletes the legacy durable the old replicas
-    fetch from. Their fetch loops log errors until they are replaced; the unacknowledged
-    messages stay in the stream for the new durable.
-- **Rolling back** to an older version: it picks up the legacy durables again from their old
-  ack floors, which replays everything processed since the upgrade. On a work-queue stream it
-  fails to start until the new durable is deleted.
-
-**Use Cases:**
-- Payment processing
-- Audit logs
-- Compliance events
-- Any event where loss is unacceptable
-
-**Example:**
 ```go
 func (m *AuditModule) RegisterEventConsumers(registry mono.EventRegistry) error {
     eventDef, found := registry.GetEventByName("OrderCreated", "v1", "order")
@@ -424,20 +367,18 @@ func (m *AuditModule) handleOrderBatch(ctx context.Context, msgs []*mono.Msg) er
 }
 ```
 
-**Typed Handler (helper):**
+**Durable Consumer Name:**
 
-For type-safe batch handlers, use `TypedEventStreamConsumerHandler`:
+The framework names the durable JetStream consumer `<consumer-module>-<event-module>-<event>-<version>`, for example `analytics-billing-PaymentProcessed-v1`. Any `Consumer.Name` or `Consumer.Durable` you set is overridden. `types.EventStreamConsumerName` (package `github.com/go-monolith/mono/pkg/types`) returns the name.
 
-```go
-type TypedEventStreamConsumerHandler[T any] func(ctx context.Context, events []T, msgs []*Msg) error
-```
+- The name depends only on which module consumes which event, so it is the same on every
+  restart and does not change when modules are added or removed.
+- The consumer is a true JetStream durable: the server keeps it however long it goes without
+  pull requests, unless you set `Consumer.InactiveThreshold`.
+- If the same module registers the same event on the same stream more than once, the second
+  and later registrations get a `-2`, `-3`, ... suffix, in the order that module registers them.
 
-Register it with `helper.RegisterTypedEventStreamConsumer`. If any message in a batch fails to unmarshal, the handler is not called and the batch is returned as an error, unacknowledged, so it is redelivered after `AckWait` until `MaxDeliver`:
-
-```go
-// contract is the order module's contract package (myapp/modules/order/contract)
-err := helper.RegisterTypedEventStreamConsumer(registry, contract.OrderCreatedV1, config, m.handleOrderBatch, m)
-```
+**Upgrading from v0.0.11 or earlier:** see [Upgrading Legacy Consumers](#upgrading-legacy-consumers) at the end of this page.
 
 ## Consumer Inspection Methods
 
@@ -500,15 +441,6 @@ for _, entry := range registry.StreamConsumerEntries() {
     )
 }
 ```
-
-## Configuration Table
-
-| Property | Type | Description | Example |
-|----------|------|-------------|---------|
-| Event Name | `string` | Unique event identifier | `"OrderCreated"` |
-| Event Version | `string` | Semantic version | `"v1"` |
-| Module Name | `string` | Emitting module name | `"order"` |
-| Queue Group | `string` | Load balancing group | `"workers"` |
 
 ## Default Configuration
 
@@ -639,11 +571,68 @@ func (m *AnalyticsModule) RegisterEventConsumers(registry mono.EventRegistry) er
 
 ### Don't
 
-- Import the emitter module directly (use discovery)
+- Import the emitter module's own packages (import its contract package, or use discovery)
 - Assume events will always be delivered (NATS Core)
 - Block indefinitely in event handlers
 - Ignore acknowledgment in stream consumers
 - Use events for request-response patterns (use ServiceContainer)
+
+## Upgrading Legacy Consumers
+
+This section applies when upgrading from v0.0.11 or earlier.
+
+Earlier versions named the consumer `<event-module>-<event>-<version>-<N>`. `N` was a counter
+that followed module start order, which was not deterministic, so the name could change
+between restarts. Those consumers were also created without a durable name, so the server
+treated them as non-durable. The first startup on the new version handles any legacy durable
+it finds on the same stream. Once every consumer on a stream is set up, it marks the stream
+as migrated with the metadata entry `mono.legacy-consumer-migration: done`, and later
+startups only report leftovers:
+
+- **Work-queue streams:** the legacy durable is deleted before the new one is created. A
+  work-queue stream accepts only one unfiltered consumer, so this is the only way to start.
+  Messages it had not acknowledged stay in the stream and are delivered to the new durable.
+  If the consumer configuration is one the server rejects on a work-queue stream (a deliver
+  policy other than all, or acknowledgement other than explicit), startup fails before
+  anything is deleted.
+- **Other streams:** when the old position is unambiguous (one legacy durable, or several
+  that stopped at the same point), the new durable is positioned just after it, so the stream
+  is not replayed. This requires a deliver policy of all, by-start-sequence or by-start-time;
+  for other deliver policies a warning reports what was not carried over.
+- **Replay over loss:** legacy names do not record which module owned a durable. In the
+  following cases the new durable keeps its configured start, and a warning is logged:
+  - **Several modules consume the same event on the same stream:** a module may have no old
+    position of its own.
+  - **A module's legacy durables stopped at different positions:** for example, a name that
+    switched between restarts, or one left by a module removed in the same deploy.
+
+  Messages the stream still holds are then delivered again, so a handler that is not
+  idempotent sees duplicates; one that sums payments double-counts them. If you know which
+  legacy durable is stale, remove it before upgrading so the remaining position is carried
+  over exactly.
+- **Swapping the consumer of an event in one deploy:** names cannot catch this case. If a
+  single deploy removes the only module consuming an event on a stream and adds a different
+  one, the new module starts at the removed module's position. Split such a swap across two
+  deploys, or remove the legacy durable before upgrading.
+- **The framework does not delete legacy durables** on non-work-queue streams. A warning on
+  every startup names each one together with a `nats consumer rm <stream> <name>` command.
+  Remove them once the new durable is confirmed to be working: on an interest-retention stream
+  they keep retaining messages until removed. Since v0.2.0 the framework raises their
+  inactivity threshold to 1h at startup (nats-server v2.14.10 would otherwise delete them about
+  5s after the server starts, before the migration), so the server itself removes a legacy
+  durable that is no longer pulled 1h after its last pull.
+- **Consumers created after the migration** start from their configured deliver policy. This
+  covers a new module consuming the same event, or a durable an operator deleted to force a
+  replay. Such a consumer is never moved to a legacy position.
+- **Rolling upgrade with several replicas:**
+  - **Interest and limits streams:** old replicas keep consuming through their legacy durable
+    while new ones use the new durable. This can cause duplicates, never loss.
+  - **Work-queue streams:** the first new replica deletes the legacy durable the old replicas
+    fetch from. Their fetch loops log errors until they are replaced; the unacknowledged
+    messages stay in the stream for the new durable.
+- **Rolling back** to an older version: it picks up the legacy durables again from their old
+  ack floors, which replays everything processed since the upgrade. On a work-queue stream it
+  fails to start until the new durable is deleted.
 
 ## Related Documentation
 
