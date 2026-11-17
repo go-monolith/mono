@@ -65,20 +65,20 @@ import (
 //	    }
 //
 //	    // Simple store (no revision return)
-//	    err := m.cache.Set("user:123", []byte(`{"name":"Alice"}`), 0)
+//	    err := m.cache.Set("user.123", []byte(`{"name":"Alice"}`), 0)
 //	    if err != nil {
 //	        return err
 //	    }
 //
 //	    // Store with revision return
-//	    revision, err := m.cache.PutWithRevision("user:123", []byte(`{"name":"Bob"}`), 0)
+//	    revision, err := m.cache.PutWithRevision("user.123", []byte(`{"name":"Bob"}`), 0)
 //	    if err != nil {
 //	        return err
 //	    }
 //	    fmt.Printf("New revision: %d\n", revision)
 //
 //	    // Simple retrieve (nil if not found)
-//	    data, err := m.cache.Get("user:123")
+//	    data, err := m.cache.Get("user.123")
 //	    if err != nil {
 //	        return err
 //	    }
@@ -87,7 +87,7 @@ import (
 //	    }
 //
 //	    // Retrieve with revision for update
-//	    entry, err := m.cache.GetEntry("user:123")
+//	    entry, err := m.cache.GetEntry("user.123")
 //	    if err != nil {
 //	        return err
 //	    }

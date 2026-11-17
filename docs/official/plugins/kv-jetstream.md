@@ -334,7 +334,7 @@ var (
 
 ### Missing Keys
 
-Missing keys: `Get` returns `nil, nil`; `GetEntry`, `Update` and `Purge` return an error wrapping `ErrKeyNotFound`; `Delete` of a missing key is not an error.
+Missing keys: `Get` returns `nil, nil`; `GetEntry` returns an error wrapping `ErrKeyNotFound`; `Update` returns an error wrapping `ErrRevisionMismatch` (use `Create` to write a key that may not exist); `Delete` and `Purge` of a missing key are not errors.
 
 ## Usage Examples
 

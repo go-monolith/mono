@@ -78,6 +78,7 @@ The framework logs every error a handler returns, at Error level with an `error`
 - `Event consumer handler error`
 - `Event stream consumer handler error`
 - `Cron handler error`
+- `Handler error` (stream consumer services)
 
 A handler that returns an error does not need to log it as well: add context to the returned error instead.
 
