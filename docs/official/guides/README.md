@@ -1,91 +1,14 @@
 # 📖 Guides
 
-This section contains practical how-to guides for common development tasks with the Monolith Framework.
-
-## Overview
-
-The guides in this section provide step-by-step instructions and best practices for:
+This section contains practical how-to guides for common development tasks with the Monolith Framework. Each guide covers one task; pick the one that matches what you are doing:
 
 - **[Error Handling](error-handling.md)** - Handling errors in service handlers, creating custom error types, and error propagation patterns
-- **[Testing](testing.md)** - Unit testing modules, integration testing with embedded NATS, and mocking dependencies
+- **[Testing](testing.md)** - Domain tests with fakes, `monotest` tests without NATS, and integration testing with embedded NATS
 - **[Module Boundaries](module-boundaries.md)** - Contract packages, ports and adapters, startup validation, the boundary report, strict mode, and the `monotest` conformance and import rule tests
 - **[Clustering and Kubernetes](clustering.md)** - Clustered JetStream: server names, routes, route authentication, replicas, readiness and health, and a Kubernetes StatefulSet setup
 - **[Upgrading from v0.1.x to v0.2.x](upgrading.md)** - What changes, what may need action, and how to roll back
 - **[Logging](logging.md)** - Using the Logger interface, structured logging best practices, and log level selection
 - **[Storage Backends](storage-backends.md)** - Working with the unified storage interface, capability detection, and backend comparison
-
-## Quick Links
-
-### Error Handling Guide
-
-Learn how to properly handle errors in your service handlers:
-
-- Handle errors returned by dependencies
-- Create domain-specific error types
-- Propagate errors through call chains
-- Log errors with proper context
-- Return appropriate error responses to clients
-
-**Start here:** [Error Handling Guide](error-handling.md)
-
-### Testing Guide
-
-Learn how to write comprehensive tests for your modules:
-
-- Write unit tests for service handlers
-- Integration test with embedded NATS
-- Mock dependencies for isolated testing
-- Test concurrent message handling
-- Verify error scenarios
-
-**Start here:** [Testing Guide](testing.md)
-
-### Module Boundaries Guide
-
-Learn the recommended way to connect modules (Ports and Adapters):
-
-- Publish a `contract` package per module
-- Register and call services through typed contracts
-- Declare consumed services with `ConsumeServices()`
-- Read `app.ModuleBoundaries()` and enable strict mode
-- Add a `monotest.CheckModule` test per module and one `monotest.CheckImports` test for the application
-
-**Start here:** [Module Boundaries Guide](module-boundaries.md)
-
-### Clustering and Kubernetes Guide
-
-Learn how to run several instances as one NATS cluster with clustered JetStream:
-
-- Set stable, unique server names and the same route list on every server
-- Authenticate routes and choose a replica count
-- Use `Health().JetStream` in a readiness probe, never in a liveness probe
-- Deploy as a StatefulSet with a headless Service and a PodDisruptionBudget
-
-**Start here:** [Clustering and Kubernetes Guide](clustering.md)
-
-### Logging Guide
-
-Learn how to implement effective structured logging:
-
-- Access the framework Logger
-- Add contextual information to logs
-- Choose appropriate log levels
-- Structured logging with key-value pairs
-- Integration with monitoring systems
-
-**Start here:** [Logging Guide](logging.md)
-
-### Storage Backends Guide
-
-Learn how to work with the unified storage interface:
-
-- Understand the storage interface hierarchy
-- Detect backend capabilities using type assertions
-- Choose between fs-jetstream and kv-jetstream
-- Implement optimistic locking with revisions
-- Handle storage errors properly
-
-**Start here:** [Storage Backends Guide](storage-backends.md)
 
 ## Common Patterns
 
@@ -115,22 +38,7 @@ m.logger.Info("Processing request",
 
 ### Testing Pattern
 
-```go
-// Unit test a handler
-func TestHandleCreateOrder(t *testing.T) {
-    module := &OrderModule{}
-    ctx := context.Background()
-
-    result, err := module.handleCreateOrder(ctx, &CreateOrderRequest{})
-    if err != nil {
-        t.Fatalf("unexpected error: %v", err)
-    }
-
-    if result.ID == "" {
-        t.Error("order ID should not be empty")
-    }
-}
-```
+Give every module a conformance test with `monotest.CheckModule`, which runs the module without NATS and reports every boundary rule it breaks. The test and its options are in the [Module Boundaries Guide](module-boundaries.md#testing-with-monotest); the [Testing Guide](testing.md) shows where it fits among the other tests.
 
 ## Best Practices Summary
 
@@ -184,7 +92,3 @@ func TestHandleCreateOrder(t *testing.T) {
 - [Module Boundaries Guide](module-boundaries.md)
 - [API Reference - Service Container](../api/container.md)
 - [Middleware System](../middleware/README.md)
-
----
-
-For more in-depth information, see the complete guides below.

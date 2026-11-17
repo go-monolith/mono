@@ -171,20 +171,23 @@ Green uses the same NATS cluster name and route credentials, and its route list 
 With the Service flipped to green and all six servers in the meta group, repeat for each blue server, highest ordinal first (`mono-cluster-2`, then `-1`, then `-0`):
 
 ```bash
+# nats commands go through the port-forward to a green pod (see Prerequisites)
+SRV=nats://127.0.0.1:14223
+
 # 1. Take the server offline (the StatefulSet removes the highest ordinal)
 kubectl -n mono-demo scale sts mono-cluster --replicas=2
 kubectl -n mono-demo wait --for=delete pod/mono-cluster-2
 
 # 2. Remove it from every stream; consumers follow their stream. The replacement
 #    can only be an online server that is not yet a member: a green one.
-for s in $(nats stream ls -n); do nats stream cluster peer-remove "$s" mono-cluster-2 -f; done
+for s in $(nats -s "$SRV" stream ls -n); do nats -s "$SRV" stream cluster peer-remove "$s" mono-cluster-2 -f; done
 
 # 3. Wait until every stream and consumer lists only current replicas
-nats stream info GREETER_VISITS
-nats consumer info GREETER_VISITS greeter-visits
+nats -s "$SRV" stream info GREETER_VISITS
+nats -s "$SRV" consumer info GREETER_VISITS greeter-visits
 
 # 4. Remove it from the meta group (system account)
-nats server raft peer-remove mono-cluster-2 -f --user admin --password "$NATS_SYSTEM_PASSWORD"
+nats -s "$SRV" server raft peer-remove mono-cluster-2 -f --user admin --password "$NATS_SYSTEM_PASSWORD"
 ```
 
 After the last blue server, the meta group and every stream consist of green servers only, with their history intact. The test moved three servers in about 35 s with no failed request.

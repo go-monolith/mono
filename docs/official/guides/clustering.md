@@ -2,6 +2,8 @@
 
 This guide shows how to run several instances of a mono application whose embedded NATS servers form one cluster with clustered JetStream, and how to deploy that cluster on Kubernetes. It applies from **v0.2.0**.
 
+Read it before you run more than one instance of an application that uses JetStream (stream consumer, event stream consumer or cron services). The [Checklist](#checklist) at the end sums up the settings.
+
 **What you'll learn:**
 - What clustered JetStream requires: server names, routes, a storage directory
 - Authenticating routes and choosing a replica count
@@ -62,14 +64,14 @@ import (
 func main() {
     // The same list on every server, this one included.
     routes := []string{
-        "nats://orders-0.orders-nats.prod.svc.cluster.local:6222",
-        "nats://orders-1.orders-nats.prod.svc.cluster.local:6222",
-        "nats://orders-2.orders-nats.prod.svc.cluster.local:6222",
+        "nats://mono-cluster-0.mono-cluster-nats.mono-demo.svc.cluster.local:6222",
+        "nats://mono-cluster-1.mono-cluster-nats.mono-demo.svc.cluster.local:6222",
+        "nats://mono-cluster-2.mono-cluster-nats.mono-demo.svc.cluster.local:6222",
     }
 
     app, err := mono.NewMonoApplication(
         mono.WithNATSServerName(os.Getenv("POD_NAME")),
-        mono.WithNATSClustering("orders", "0.0.0.0", 6222, routes),
+        mono.WithNATSClustering("mono-demo", "0.0.0.0", 6222, routes),
         mono.WithNATSClusterAuth("route", os.Getenv("NATS_ROUTE_PASSWORD")),
         mono.WithJetStreamStorageDir("/data/jetstream"),
         mono.WithJetStreamDefaultReplicas(3),
@@ -129,7 +131,12 @@ A replicated stream keeps working while fewer than half of its replicas are down
 
 ## Startup, Readiness and Health
 
-**`Start` waits for JetStream.** Before it starts plugins and modules, `Start` waits until JetStream answers, which in a cluster means a quorum of the servers is routed and the meta group has a leader. It then retries each stream, consumer and schedule setup step while the error can clear by itself (no leader yet, no peers for placement yet, a replica catching up, a timeout). Servers that start together wait for each other instead of failing and restarting. While waiting, the framework logs `Waiting for JetStream` at Info. The wait and each step are bounded by `WithJetStreamReadyTimeout` (default 2 minutes); when the bound is reached, `Start` fails with an error that names the option.
+**`Start` waits for JetStream.** Servers that start together wait for each other instead of failing and restarting:
+
+- Before it starts plugins and modules, `Start` waits until JetStream answers, which in a cluster means a quorum of the servers is routed and the meta group has a leader.
+- It then retries each stream, consumer and schedule setup step while the error can clear by itself (no leader yet, no peers for placement yet, a replica catching up, a timeout).
+- While waiting, the framework logs `Waiting for JetStream` at Info.
+- The wait and each step are bounded by `WithJetStreamReadyTimeout` (default 2 minutes). When the bound is reached, `Start` fails with an error that names the option.
 
 **Health.** `app.Health(ctx).JetStream` reports the JetStream state of this server, read locally:
 
@@ -143,11 +150,13 @@ A replicated stream keeps working while fewer than half of its replicas are down
 
 `JetStream` is not part of `Healthy`, by design. Without quorum JetStream is unavailable on **every** server, so a check that includes it fails on all survivors when one server is lost.
 
-**Probes:**
+### Probes
 
 - **Liveness**: check only that the process works (for example a plain HTTP 200 from the host program). It must never depend on JetStream quorum, or losing one server restarts the others, and the restarts prevent the quorum from coming back.
 - **Readiness**: may include `JetStream.Available` when traffic sent to the instance needs JetStream.
-- `Start` can take up to the JetStream ready timeout. If your probe endpoint is served only after `Start` returns, give the probes an initial delay or a startup probe that covers it.
+- **The `Start` wait**: `Start` can take up to the JetStream ready timeout while it waits for the other servers. Serve the liveness endpoint before calling `Start`, as the example does, so the wait is not mistaken for a hung process. If your probe endpoint is served only after `Start` returns, give the probes an initial delay, or a `startupProbe` whose `periodSeconds × failureThreshold` exceeds the ready timeout.
+
+A readiness endpoint that includes JetStream:
 
 ```go
 http.HandleFunc("/readyz", func(w http.ResponseWriter, r *http.Request) {
@@ -192,9 +201,9 @@ The [Kubernetes cluster example](../../../examples/k8s-cluster/README.md) has co
 
 ### StatefulSet
 
-Use a StatefulSet, not a Deployment: its pod names (`orders-0`, `orders-1`, ...) are unique and stable, so they serve as server names, and each pod keeps its own volume for the JetStream store.
+Use a StatefulSet, not a Deployment: its pod names (`mono-cluster-0`, `mono-cluster-1`, ...) are unique and stable, so they serve as server names, and each pod keeps its own volume for the JetStream store.
 
-- **`podManagementPolicy: Parallel`.** With the default ordered start, `orders-1` is created only after `orders-0` is Ready. `orders-0` alone has no JetStream quorum, so its `Start` waits for JetStream and fails after the ready timeout whatever its probes check, and the cluster never forms. Parallel creates all pods at once, so their servers route to each other and elect leaders while every `Start` waits.
+- **`podManagementPolicy: Parallel`.** With the default ordered start, `mono-cluster-1` is created only after `mono-cluster-0` is Ready. `mono-cluster-0` alone has no JetStream quorum, so its `Start` waits for JetStream and fails after the ready timeout whatever its probes check, and the cluster never forms. Parallel creates all pods at once, so their servers route to each other and elect leaders while every `Start` waits.
 - **An odd number of replicas**, 3 or more for JetStream that survives the loss of a server.
 - **Required `podAntiAffinity` on `kubernetes.io/hostname`**, so that one node failure takes down only one server.
 - **A PodDisruptionBudget** with `minAvailable: 2` (for 3 servers; `maxUnavailable: 1` is equivalent), so that a node drain never takes down a quorum.
@@ -218,13 +227,15 @@ env:
   - name: NATS_ROUTE_PASSWORD
     valueFrom:
       secretKeyRef:
-        name: orders-nats-routes
+        name: mono-cluster-routes
         key: password
 ```
 
 The host program passes them to `WithNATSServerName(os.Getenv("POD_NAME"))` and `WithNATSClusterAuth("route", os.Getenv("NATS_ROUTE_PASSWORD"))`.
 
-### Probes
+### Probe and shutdown settings
+
+The probes follow the rules in [Probes](#probes):
 
 ```yaml
 livenessProbe:          # process only, never JetStream quorum
@@ -232,8 +243,6 @@ livenessProbe:          # process only, never JetStream quorum
 readinessProbe:         # may include JetStream.Available
   httpGet: { path: /readyz, port: 8080 }
 ```
-
-`Start` can wait up to the JetStream ready timeout for the other servers. Serve the liveness endpoint before calling `Start`, as the example does, so the wait is not mistaken for a hung process. If your liveness endpoint only answers once `Start` has returned, add a `startupProbe` whose `periodSeconds × failureThreshold` exceeds the ready timeout.
 
 Set the pod's `terminationGracePeriodSeconds` above `WithShutdownTimeout`, so that module `Stop` runs before the pod is killed (see [Graceful Shutdown](../api/framework.md#withshutdowntimeout)).
 

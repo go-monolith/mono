@@ -2,6 +2,8 @@
 
 This guide shows the recommended way to connect modules since **v0.1.0**, with the checks added in **v0.1.2** (the import rule check, the complete `ConsumeServices()` list and `mono.ServiceLookup`). It makes the hexagonal (Ports and Adapters) pattern checkable: a typed port both sides share, startup validation of what a module consumes, a runtime report of how modules really use their boundaries, and a NATS-free conformance test per module.
 
+Read it when you add a module that calls another one, or when you move existing modules onto contracts. Start with [The Recommended Path](#the-recommended-path); [Migrating Existing Modules](#migrating-existing-modules) lists the steps for an existing application.
+
 **Time to complete:** 25 minutes
 
 **What you'll learn:**
@@ -187,7 +189,9 @@ Asking for a service the dependency does not provide is not a violation in the d
 
 What a module receives is wrapped:
 
-- `SetDependencyServiceContainer` gets a **read-only view** of the provider's container. Every lookup is attributed to the consumer. `Entries()` on the view returns descriptions of the services: copies without the provider's handlers and channels (nil, in both modes). Changing a description does not change the provider. Reading them is not a violation; the first call per dependency is logged once at Warn, because code written against the real entries would find nil handlers.
+- `SetDependencyServiceContainer` gets a **read-only view** of the provider's container. Every lookup is attributed to the consumer.
+  - `Entries()` on the view returns descriptions of the services: copies without the provider's handlers and channels (nil, in both modes). Changing a description does not change the provider.
+  - Reading them is not a violation. The first call per dependency is logged once at Warn, because code written against the real entries would find nil handlers.
 - `SetEventBus` gets a **module-scoped bus**. `events.*` and custom subjects pass untouched. Service subjects are checked: see the table.
 
 | Violation kind | What the module did |
@@ -330,7 +334,13 @@ func TestImportRules(t *testing.T) {
 }
 ```
 
-A test placed elsewhere, such as beside `cmd/app/main.go`, points the check at the root with `monotest.WithImportDir("../..")`. The check **fails** when the patterns match no package, or only `package main` and host packages, and when the application has no module at all (no `contract` package and no `WithModuleRoots`): a wrong directory cannot pass by accident. It also fails when `./...` matches packages but none of a module, as in a `cmd/app` directory with helper packages of its own. `WithImportPatterns` turns that last check off: naming the patterns says those packages are the ones to check.
+A test placed elsewhere, such as beside `cmd/app/main.go`, points the check at the root with `monotest.WithImportDir("../..")`.
+
+The check **fails**, so that a wrong directory cannot pass by accident, when:
+
+- the patterns match no package, or only `package main` and host packages;
+- the application has no module at all (no `contract` package and no `WithModuleRoots`);
+- `./...` matches packages but none of a module, as in a `cmd/app` directory with helper packages of its own. `WithImportPatterns` turns this last check off: naming the patterns says those packages are the ones to check.
 
 | Rule | What it reports |
 |------|-----------------|

@@ -3,7 +3,7 @@
 ## Getting Started
 
 * [👋 Welcome](README.md)
-* [Getting Started](getting-started/README.md)
+* [🧭 Getting Started](getting-started/README.md)
 * [📦 Installation](getting-started/installation.md)
 * [⚡ Quick Start](getting-started/quickstart.md)
 * [📁 Project Structure](getting-started/project-structure.md)
@@ -24,23 +24,23 @@
 * [📦 Modules](api/module.md)
 * [⚙️ Service Container](api/container.md)
 * [📋 EventRegistry](api/eventregistry.md)
-* [🧠 EventBus](api/eventbus.md)
+* [📡 EventBus](api/eventbus.md)
 * [💾 Storage](api/storage.md)
 * [🧩 Plugin API](api/plugins.md)
 
 ## Middleware
 
 * [🧬 Middleware](middleware/README.md)
-* [Access Log](middleware/accesslog.md)
-* [Audit](middleware/audit.md)
-* [Request ID](middleware/requestid.md)
+* [📝 Access Log](middleware/accesslog.md)
+* [🔍 Audit](middleware/audit.md)
+* [🆔 Request ID](middleware/requestid.md)
 
 ## Plugins
 
-* [🧬 Plugins](plugins/README.md)
-* [File Storage (fs-jetstream)](plugins/fs-jetstream.md)
-* [Key-Value Storage (kv-jetstream)](plugins/kv-jetstream.md)
-* [Creating Custom Plugins](plugins/creating-plugins.md)
+* [🧰 Plugins](plugins/README.md)
+* [🗂️ File Storage (fs-jetstream)](plugins/fs-jetstream.md)
+* [🔑 Key-Value Storage (kv-jetstream)](plugins/kv-jetstream.md)
+* [🛠️ Creating Custom Plugins](plugins/creating-plugins.md)
 
 ## Guides
 
@@ -62,11 +62,11 @@
 
 ## Examples
 
-- [Basic](../../examples/basic/README.md)
-- [Multi-Module](../../examples/multi-module/README.md)
-- [Analytics (Channel Services)](../../examples/analytics/README.md)
-- [Event Emitter](../../examples/event-emitter/README.md)
-- [Cron Scheduler](../../examples/cron-scheduler/README.md)
-- [NATS Config File](../../examples/nats-config/README.md)
-- [AutoTLS (ACME / Let's Encrypt)](../../examples/auto-tls/README.md)
-- [Kubernetes Cluster](../../examples/k8s-cluster/README.md)
+* [🌱 Basic](../../examples/basic/README.md)
+* [🏗️ Multi-Module](../../examples/multi-module/README.md)
+* [📈 Analytics (Channel Services)](../../examples/analytics/README.md)
+* [📣 Event Emitter](../../examples/event-emitter/README.md)
+* [⏰ Cron Scheduler](../../examples/cron-scheduler/README.md)
+* [🗒️ NATS Config File](../../examples/nats-config/README.md)
+* [🔒 AutoTLS (ACME / Let's Encrypt)](../../examples/auto-tls/README.md)
+* [🛳️ Kubernetes Cluster](../../examples/k8s-cluster/README.md)
