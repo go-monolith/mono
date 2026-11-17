@@ -1,25 +1,26 @@
 # Kubernetes Cluster Example
 
-Runs a mono application as **2 replicas on Kubernetes, one per node**, whose
+Runs a mono application as **3 replicas on Kubernetes, one per node**, whose
 embedded NATS servers form **one NATS cluster with clustered JetStream**. Every
 instance serves every service, and the services behave as one application:
 
 | Service | Kind | In the cluster |
 |---|---|---|
 | `greeter.hello` | request-reply | every instance subscribes in one queue group; each request is answered by exactly one instance, local or remote |
-| `greeter.visits` | stream consumer | the `GREETER_VISITS` stream is replicated to both servers (`WithJetStreamDefaultReplicas`) and consumed through one shared durable consumer, so each visit is handled by one instance (at least once) |
+| `greeter.visits` | stream consumer | the `GREETER_VISITS` stream is replicated to all three servers (`WithJetStreamDefaultReplicas`) and consumed through one shared durable consumer, so each visit is handled by one instance (at least once) |
 | `greeter.tick` | cron (`@every 15s`) | the schedule lives on the server, in a replicated stream, so each occurrence fires **once for the whole cluster**, not once per instance |
 
 ```
-            k3s-agent-1                          k3s-server
-  ┌────────────────────────────┐      ┌────────────────────────────┐
-  │ pod mono-cluster-0         │      │ pod mono-cluster-1         │
-  │  greeter module            │      │  greeter module            │
-  │  embedded nats-server ─────┼─6222─┼─ embedded nats-server      │
-  │   server_name=mono-cluster-0      │   server_name=mono-cluster-1
-  │   JetStream (PVC /data)    │      │   JetStream (PVC /data)    │
-  │  HTTP :8080                │      │  HTTP :8080                │
-  └────────────────────────────┘      └────────────────────────────┘
+        node A                  node B                  node C
+  ┌───────────────────┐   ┌───────────────────┐   ┌───────────────────┐
+  │ pod mono-cluster-0│   │ pod mono-cluster-1│   │ pod mono-cluster-2│
+  │  greeter module   │   │  greeter module   │   │  greeter module   │
+  │  nats-server ─────┼───┼─ nats-server ─────┼───┼─ nats-server      │
+  │  JetStream (PVC)  │   │  JetStream (PVC)  │   │  JetStream (PVC)  │
+  │  HTTP :8080       │   │  HTTP :8080       │   │  HTTP :8080       │
+  └───────────────────┘   └───────────────────┘   └───────────────────┘
+     embedded NATS servers, routes on 6222 in a full mesh,
+     server_name = pod name
         ▲ Service mono-cluster:8080 (load-balanced HTTP API)
 ```
 
@@ -44,7 +45,7 @@ mono.NewMonoApplication(
     mono.WithNATSClustering("mono-demo", "0.0.0.0", 6222, routes),      // every pod, itself included
     mono.WithNATSClusterAuth("route", routePassword),                   // from a Secret
     mono.WithJetStreamStorageDir("/data/jetstream"),                    // per-pod volume
-    mono.WithJetStreamDefaultReplicas(2),                               // the framework's streams
+    mono.WithJetStreamDefaultReplicas(3),                               // the framework's streams
     mono.WithJetStreamReadyTimeout(10*time.Minute),                     // how long Start waits for the others
     mono.WithNATSHost("127.0.0.1"), mono.WithNATSInProcessConn(),       // client listener on loopback
 )
@@ -52,7 +53,7 @@ mono.NewMonoApplication(
 
 - **Server name.** Clustered JetStream identifies each server by name, so the
   name must be unique within the cluster and stable across restarts. A
-  StatefulSet pod name (`mono-cluster-0`, `mono-cluster-1`) is both;
+  StatefulSet pod name (`mono-cluster-0` .. `mono-cluster-2`) is both;
   `POD_NAME` comes from the downward API.
 - **Routes.** Every pod lists every pod, its own route included (a server
   ignores the route to itself), by fully qualified name through the headless
@@ -67,28 +68,34 @@ mono.NewMonoApplication(
   from the Secret `mono-cluster-routes` (`deploy/create-route-secret.sh`). The
   NATS client listener is bound to `127.0.0.1`, so only the route port (6222)
   is reachable from outside the pod.
-- **Start waits for the cluster.** A two-server JetStream cluster has no
-  quorum until both servers are routed. The framework's `Start` waits for
+- **Start waits for the cluster.** A three-server JetStream cluster has no
+  quorum until two of the servers are routed. The framework's `Start` waits for
   JetStream before it starts the module, and retries creating the streams and
   consumers while the cluster forms or a restarted server catches up (up to
   `WithJetStreamReadyTimeout`). Pods that start together wait for each other
   instead of failing and restarting, and the module needs no code for it.
-- **Replicated streams.** `WithJetStreamDefaultReplicas(2)` replicates the
+- **Replicated streams.** `WithJetStreamDefaultReplicas(3)` replicates the
   streams the framework creates for the visits stream consumer and the cron
   schedule. The visits consumer is durable (`greeter-visits`), so it keeps its
   position across restarts, including a stop of every pod.
 - **StatefulSet settings:**
   - `podManagementPolicy: Parallel`: a pod is Ready only once JetStream has
-    quorum, which needs both pods. With the default ordered start,
-    `mono-cluster-1` would never be created.
+    quorum, which needs two of the three pods. With the default ordered
+    start, `mono-cluster-1` would never be created.
   - `publishNotReadyAddresses: true` on the headless Service, so routes resolve
     before the pods are Ready.
   - Required `podAntiAffinity` on `kubernetes.io/hostname`: one pod per node.
   - The liveness probe (`/healthz`) only checks the process. It never depends
-    on JetStream quorum, or losing one pod would restart the other.
+    on JetStream quorum, or losing pods would restart the others.
   - `/readyz` reports `Health()`, including its `jetstream` section, and is
     ready while the framework and NATS are healthy, not only while JetStream
     has quorum.
+  - A `preStop` sleep of 5 s keeps the pod serving while it is removed from
+    the Service endpoints, so clients don't get connection errors during a
+    rolling update. It uses the `sleep` action, which needs no shell in the
+    image (Kubernetes 1.30+).
+  - A PodDisruptionBudget with `minAvailable: 2`, so node drains evict one
+    pod at a time and JetStream keeps its quorum.
 
 ## Configuration (environment)
 
@@ -99,36 +106,36 @@ mono.NewMonoApplication(
 | `NATS_ROUTE_PASSWORD` | unset | route password (`WithNATSClusterAuth`); unset means routes are not authenticated |
 | `NATS_CLUSTER_NAME` | `mono-demo` | NATS cluster name |
 | `NATS_CLUSTER_PORT` | `6222` | route listener port |
-| `JS_REPLICAS` | `2` | replicas of the framework's streams (at most the number of servers) |
+| `JS_REPLICAS` | `3` | replicas of the framework's streams (at most the number of servers) |
 | `JS_STORE_DIR` | `/data/jetstream` | JetStream store directory |
 | `JS_READY_TIMEOUT` | `10m` | how long `Start` waits for clustered JetStream |
 | `HTTP_ADDR` | `:8080` | HTTP API address |
 | `NATS_DEBUG` | unset | `true` adds the embedded server's own log (routes, RAFT elections) at debug level |
 
-## Build and deploy (k3s on Kiri)
+## Build and deploy
 
-The commands assume the 2-node k3s cluster described in `/workspace/kiri/k3s-cluster.md`
-(containers `k3s-server` and `k3s-agent-1`, kubeconfig `~/.kube/config-kiri-k3s`).
-There is no registry, so the image is imported into each node's containerd.
+Requirements: a Kubernetes cluster (1.30+) with at least **3 schedulable
+nodes**, a default StorageClass for the PersistentVolumeClaims, and a registry
+the nodes can pull from.
 
 ```bash
 # From the repository root
-docker build --load -f examples/k8s-cluster/Dockerfile -t mono-k8s-cluster:0.2.0 .
+IMAGE=registry.example.com/mono-k8s-cluster:0.2.0
+docker build -f examples/k8s-cluster/Dockerfile -t $IMAGE .
+docker push $IMAGE
+```
 
-for node in k3s-server k3s-agent-1; do
-  docker save mono-k8s-cluster:0.2.0 | docker exec -i $node ctr -n k8s.io images import -
-done
+Set `image:` in `deploy/k8s.yaml` to `$IMAGE`, then:
 
-export KUBECONFIG=~/.kube/config-kiri-k3s
+```bash
 examples/k8s-cluster/deploy/create-route-secret.sh   # namespace mono-demo
 kubectl apply -f examples/k8s-cluster/deploy/k8s.yaml
 kubectl -n mono-demo rollout status sts/mono-cluster
 kubectl -n mono-demo get pods -o wide                # one pod per node
 ```
 
-On another cluster, push the image to a registry the nodes can pull from, and
-set `image:` in `deploy/k8s.yaml` to it. When you change the code, use a new
-tag: with `imagePullPolicy: IfNotPresent`, a node keeps the image it already has.
+When you change the code, use a new tag: with `imagePullPolicy: IfNotPresent`,
+a node keeps the image it already has.
 
 ## Try it
 
@@ -142,7 +149,7 @@ curl 'localhost:8080/hello?name=ada'
 
 `http_instance` is the pod that served the HTTP request (port-forward sticks to
 one pod). `greeting.instance` is the pod whose `hello` handler answered. Repeat
-the call and both pods show up: the request crossed the NATS route.
+the call and other pods show up: the request crossed a NATS route.
 
 ```bash
 curl localhost:8080/cluster
@@ -151,10 +158,10 @@ curl localhost:8080/cluster
 `/cluster` shows:
 
 - **`instances`**: every instance that answered one `$SRV.PING` (NATS services
-  protocol, enabled with `WithServiceDiscovery`). Both pods answer, from either
-  pod.
-- **`visits_stream`**: the stream's replication: `replicas: 2`, the `leader`,
-  and the other replica with `"current": true`.
+  protocol, enabled with `WithServiceDiscovery`). All three pods answer, from
+  any pod.
+- **`visits_stream`**: the stream's replication: `replicas: 3`, the `leader`,
+  and the two other replicas with `"current": true`.
 
 Logs:
 
@@ -166,39 +173,42 @@ Each `cron tick` appears on exactly one pod per occurrence (every 15 s). Each
 visit is recorded by whichever pod fetched it. Delivery is at least once: a
 visit in flight while pods shut down can be recorded again after the restart.
 
-## Failure behaviour with two servers
+## Failure behaviour
 
-Two servers give **no fault tolerance** for JetStream: every replicated stream
-and consumer needs a quorum of 2 of 2.
+Three servers with 3 replicas keep a quorum (2 of 3) while one server is down,
+for every replicated stream and consumer and for the JetStream meta group.
 
-- **While one pod is down:**
-  - Request-reply keeps working on the remaining pod, but `/hello` answers
-    `502`, because storing the visit (a JetStream write) times out.
-  - `/readyz` stays `200`. Its `jetstream` section reports
-    `"available": false` ("no meta leader (no quorum)"), so the remaining pod
-    keeps receiving traffic.
-  - The fetch loops log `Fetch error ... no responders` as a warning, at most
-    once every 10 s, and `Fetch error cleared` when the peer is back.
-  - Cron occurrences wait.
-- **When the pod comes back** (with its PVC), it rejoins in about 10 s:
-  - Visits not yet handled are still in the stream.
-  - The consumer resumes where it was acknowledged.
-  - The returning pod's `Start` waits until its replicas have caught up, so it
-    does not restart.
+- **While one pod is down** (a crash, a rolling update, a node drain):
+  - Every endpoint keeps working on the other two pods, including `/hello`,
+    which stores a visit (a JetStream write).
+  - `/readyz` of the remaining pods reports `"available": true`.
+  - Cron keeps firing, once per occurrence.
+  - A stream or consumer whose leader was on the lost pod elects a new one
+    within seconds; the fetch loops may log one `Fetch error` meanwhile.
+- **When the pod comes back** (with its PVC), its `Start` waits until its
+  replicas have caught up, then it serves again. It does not restart.
+- **While two pods are down**, there is no quorum. Request-reply keeps
+  working on the remaining pod, but `/hello` answers `502` because storing the
+  visit times out, `/readyz` reports `"available": false` ("no meta leader (no
+  quorum)"), and cron occurrences wait. Everything resumes once a second pod is
+  back; visits not yet handled are still in the stream.
 
-For a cluster that survives losing a node, run **3 replicas** (3 nodes):
-set `replicas: 3`, add the third pod to `NATS_ROUTES`, set `JS_REPLICAS` to 3,
-and raise the PodDisruptionBudget to `minAvailable: 2`.
+Delivery is at least once: a visit fetched by a pod that shuts down before
+acknowledging it is delivered again after the consumer's ack wait (30 s).
 
-Measured on the 2-node k3s cluster on Kiri:
+Measured with 5 requests per second through the Service, every visit tracked:
 
-| | |
-|---|---|
-| cold start (empty volumes) | 11–51 s until both pods are Ready (usually about 11 s), no restarts |
-| one pod deleted | rejoined in 11–26 s, no restarts (each pod twice) |
-| both pods stopped for 15 s, then started | consumer kept, no visit replayed |
-| one pod down (scaled to 1) | `/hello` 502, `jetstream.available: false`, cron paused; both resume when it returns |
-| memory per pod | ~10 MiB (limit 192 MiB) |
+| | Requests failed | Visits lost / duplicated / replayed |
+|---|---|---|
+| rolling restart (`kubectl rollout restart`) | 0 of 268 | 0 / 0 / 0 |
+| one pod down for about 40 s, then back | 0 of 469 | 0 / 0 / 0 |
+| scaling an existing 2-replica deployment to 3 | 1 of 389 | 0 / 0 / 0 |
+
+Memory per pod: about 10–20 MiB (limit 192 MiB).
+
+To scale further, raise `replicas`, add every pod to `NATS_ROUTES`, and keep an
+odd number of servers. `JS_REPLICAS` stays at 3 (at most 5, and at most the
+number of servers).
 
 ## Clean up
 

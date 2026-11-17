@@ -78,7 +78,7 @@ func loadConfig() (config, error) {
 	if cfg.clusterPort, err = strconv.Atoi(envOr("NATS_CLUSTER_PORT", "6222")); err != nil {
 		return cfg, fmt.Errorf("NATS_CLUSTER_PORT: %w", err)
 	}
-	if cfg.replicas, err = strconv.Atoi(envOr("JS_REPLICAS", "2")); err != nil {
+	if cfg.replicas, err = strconv.Atoi(envOr("JS_REPLICAS", "3")); err != nil {
 		return cfg, fmt.Errorf("JS_REPLICAS: %w", err)
 	}
 	if cfg.readyTimeout, err = time.ParseDuration(envOr("JS_READY_TIMEOUT", "10m")); err != nil {

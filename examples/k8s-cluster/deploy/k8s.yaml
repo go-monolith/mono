@@ -1,12 +1,14 @@
-# Two replicas of the k8s-cluster example, one per node, whose embedded NATS
+# Three replicas of the k8s-cluster example, one per node, whose embedded NATS
 # servers form one cluster with clustered JetStream.
 #
 #   examples/k8s-cluster/deploy/create-route-secret.sh      # route password
 #   kubectl apply -f examples/k8s-cluster/deploy/k8s.yaml
 #
-# To run more replicas, raise `replicas`, add every pod to NATS_ROUTES, and set
-# JS_REPLICAS to at most the number of servers. An odd number of servers, 3 or
-# more, with JS_REPLICAS=3, survives the loss of one; two servers do not.
+# Three servers with JS_REPLICAS=3 keep JetStream available while one pod is
+# down (a restart, a rolling update, a node drain); two servers would not. To
+# run more replicas, raise `replicas`, add every pod to NATS_ROUTES, and keep
+# an odd number of servers; JS_REPLICAS is at most 5 and at most the number of
+# servers.
 #
 # Exposure: the NATS client listener is bound to loopback (the application's
 # own client connects in-process), and routes require the password in the
@@ -55,10 +57,10 @@ metadata:
   namespace: mono-demo
 spec:
   serviceName: mono-cluster-nats
-  replicas: 2
+  replicas: 3
   # Parallel, not OrderedReady: a pod becomes Ready only once JetStream has
-  # quorum, which needs both pods, so ordered start would wait forever for
-  # mono-cluster-0 before creating mono-cluster-1.
+  # quorum, which needs two of the three pods, so ordered start would wait
+  # forever for mono-cluster-0 before creating mono-cluster-1.
   podManagementPolicy: Parallel
   selector:
     matchLabels:
@@ -76,6 +78,8 @@ spec:
                 matchLabels:
                   app: mono-cluster
               topologyKey: kubernetes.io/hostname
+      # Covers the preStop sleep (5s) plus the application's own shutdown
+      # (WithShutdownTimeout 20s, then the NATS server).
       terminationGracePeriodSeconds: 40
       securityContext:
         runAsNonRoot: true
@@ -102,7 +106,8 @@ spec:
             - name: NATS_ROUTES
               value: >-
                 nats://mono-cluster-0.mono-cluster-nats.mono-demo.svc.cluster.local:6222,
-                nats://mono-cluster-1.mono-cluster-nats.mono-demo.svc.cluster.local:6222
+                nats://mono-cluster-1.mono-cluster-nats.mono-demo.svc.cluster.local:6222,
+                nats://mono-cluster-2.mono-cluster-nats.mono-demo.svc.cluster.local:6222
             - name: NATS_ROUTE_PASSWORD
               valueFrom:
                 secretKeyRef:
@@ -110,7 +115,7 @@ spec:
                   key: password
             # Replicas of the framework's streams (visits, cron schedule).
             - name: JS_REPLICAS
-              value: "2"
+              value: "3"
             - name: JS_STORE_DIR
               value: /data/jetstream
             # How long Start waits for the other pods.
@@ -125,9 +130,18 @@ spec:
               containerPort: 8080
             - name: cluster
               containerPort: 6222
+          # Keep serving for a few seconds after the pod starts terminating:
+          # the Service and kube-proxy remove the endpoint asynchronously, so
+          # without this a request can still reach a pod that has already
+          # closed its HTTP listener (a connection error at the client). The
+          # sleep action needs no shell in the image (Kubernetes 1.30+).
+          lifecycle:
+            preStop:
+              sleep:
+                seconds: 5
           # Liveness only checks that the process serves HTTP: it must not
-          # depend on JetStream quorum, or losing one pod would restart the
-          # other.
+          # depend on JetStream quorum, or losing pods would restart the
+          # others.
           livenessProbe:
             httpGet:
               path: /healthz
@@ -155,7 +169,7 @@ spec:
           volumeMounts:
             - name: data
               mountPath: /data
-  # JetStream data on a per-pod volume (k3s local-path provisioner), so a
+  # JetStream data on a per-pod volume (the cluster's default StorageClass), so a
   # restarted pod rejoins with its stream replicas instead of resyncing them.
   volumeClaimTemplates:
     - metadata:
@@ -166,16 +180,15 @@ spec:
           requests:
             storage: 1Gi
 ---
-# Keep at least one pod during voluntary disruptions (node drains, upgrades).
-# A two-server cluster still loses JetStream quorum while either pod is
-# evicted; with three servers and minAvailable: 2 it would not.
+# Keep two of the three pods during voluntary disruptions (node drains,
+# upgrades), so JetStream keeps its quorum: evictions happen one at a time.
 apiVersion: policy/v1
 kind: PodDisruptionBudget
 metadata:
   name: mono-cluster
   namespace: mono-demo
 spec:
-  minAvailable: 1
+  minAvailable: 2
   selector:
     matchLabels:
       app: mono-cluster
