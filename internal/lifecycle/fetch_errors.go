@@ -2,7 +2,10 @@ package lifecycle
 
 import (
 	"context"
+	"errors"
 	"time"
+
+	"github.com/nats-io/nats.go/jetstream"
 
 	"github.com/go-monolith/mono/pkg/types"
 )
@@ -20,8 +23,7 @@ const fetchErrorLogInterval = 10 * time.Second
 // fetchErrorReporter logs the fetch failures of one fetch loop without
 // flooding the log: the first failure at once, then at most one line (failure
 // or recovery) per fetchErrorLogInterval, with the number of failures not
-// logged. A failure that clears by itself (a consumer
-// without a leader while a cluster forms or loses quorum, a timeout) is a
+// logged. A failure that clears by itself (see isTransientFetchError) is a
 // warning; any other is an error. It is used by a single goroutine.
 type fetchErrorReporter struct {
 	logger     types.Logger
@@ -47,7 +49,7 @@ func (r *fetchErrorReporter) failure(err error) {
 		return
 	}
 	fields := append(append([]any{}, r.fields...), "error", err, "failures", r.failures, "suppressed", r.suppressed)
-	if isTransientJetStreamError(err) {
+	if isTransientFetchError(err) {
 		r.logger.Warn(r.msg, fields...)
 	} else {
 		r.logger.Error(r.msg, fields...)
@@ -72,6 +74,20 @@ func (r *fetchErrorReporter) success() {
 	r.lastLog = now
 	r.failures = 0
 	r.suppressed = 0
+}
+
+// isTransientFetchError reports whether a failed fetch clears by itself: an
+// error isTransientJetStreamError accepts (a consumer without a leader while a
+// cluster forms or loses quorum, a timeout), or one of the two statuses the
+// server answers a pull request with while the consumer's leader moves or the
+// server holding it shuts down (a peer's rolling restart, a stream peer
+// removal). Both are followed by a working fetch once a new leader is elected.
+// They are recognized for the fetch loops only: the JetStream setup retries
+// (retryJetStream) never receive them.
+func isTransientFetchError(err error) bool {
+	return isTransientJetStreamError(err) ||
+		errors.Is(err, jetstream.ErrConsumerLeadershipChanged) ||
+		errors.Is(err, jetstream.ErrServerShutdown)
 }
 
 func (r *fetchErrorReporter) canLog(now time.Time) bool {

@@ -265,6 +265,23 @@ func waitForRoutes(m *natsManager, n int, timeout time.Duration) bool {
 	return false
 }
 
+// routeAccepted reports whether accepting registers more than before routes
+// within window. A refused route must be checked on the accepting server: the
+// soliciting server counts its outgoing route for a moment, until the other
+// side rejects its credentials and closes it, so its own count would make the
+// check flaky. The accepting server registers a route only after the route's
+// CONNECT passed authentication.
+func routeAccepted(accepting *natsManager, before int, window time.Duration) bool {
+	deadline := time.Now().Add(window)
+	for time.Now().Before(deadline) {
+		if accepting.server.NumRoutes() > before {
+			return true
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	return false
+}
+
 func TestNATSManager_ClusterAuth(t *testing.T) {
 	seedPort, err := findAvailablePort()
 	if err != nil {
@@ -300,13 +317,13 @@ func TestNATSManager_ClusterAuth(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	bad, err := startClusterNode(t, 0,
+	seedRoutes := seed.server.NumRoutes()
+	if _, err := startClusterNode(t, 0,
 		WithClustering("c", "127.0.0.1", badPort, []string{seedRoute}),
-		WithClusterAuth("route", "wrong"))
-	if err != nil {
+		WithClusterAuth("route", "wrong")); err != nil {
 		t.Fatalf("bad: %v", err)
 	}
-	if waitForRoutes(bad, 1, 1500*time.Millisecond) {
+	if routeAccepted(seed, seedRoutes, 1500*time.Millisecond) {
 		t.Errorf("a route with the wrong password was accepted")
 	}
 }
@@ -337,11 +354,10 @@ func TestNATSManager_ClusteringMergesConfigFile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	noAuth, err := startClusterNode(t, 0, WithClustering("c", "127.0.0.1", noAuthPort, []string{seedRoute}))
-	if err != nil {
+	if _, err := startClusterNode(t, 0, WithClustering("c", "127.0.0.1", noAuthPort, []string{seedRoute})); err != nil {
 		t.Fatalf("no auth: %v", err)
 	}
-	if waitForRoutes(noAuth, 1, 1500*time.Millisecond) {
+	if routeAccepted(seed, 0, 1500*time.Millisecond) {
 		t.Fatal("the file's route authorization was dropped: a route without credentials was accepted")
 	}
 

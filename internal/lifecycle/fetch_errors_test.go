@@ -3,6 +3,7 @@ package lifecycle
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -127,5 +128,45 @@ func TestFetchLoops_BackOffOnEmptyFailedBatch(t *testing.T) {
 				t.Errorf("want one warning for repeated failures, got %d: %v", warnings, logger.entries)
 			}
 		})
+	}
+}
+
+func TestIsTransientFetchError(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"leadership change", jetstream.ErrConsumerLeadershipChanged, true},
+		{"server shutdown", jetstream.ErrServerShutdown, true},
+		{"wrapped leadership change", fmt.Errorf("fetch: %w", jetstream.ErrConsumerLeadershipChanged), true},
+		{"wrapped server shutdown", fmt.Errorf("fetch: %w", jetstream.ErrServerShutdown), true},
+		{"no responders", nats.ErrNoResponders, true},
+		{"timeout", nats.ErrTimeout, true},
+		{"consumer deleted", jetstream.ErrConsumerDeleted, false},
+		{"other", errors.New("boom"), false},
+	}
+	for _, tt := range tests {
+		if got := isTransientFetchError(tt.err); got != tt.want {
+			t.Errorf("%s: isTransientFetchError = %v, want %v", tt.name, got, tt.want)
+		}
+	}
+	// The setup retries keep their own, narrower set.
+	if isTransientJetStreamError(jetstream.ErrConsumerLeadershipChanged) || isTransientJetStreamError(jetstream.ErrServerShutdown) {
+		t.Error("isTransientJetStreamError must not retry the fetch-only statuses")
+	}
+}
+
+// TestFetchErrorReporter_LeaderMoveIsWarning covers the log lines of a
+// rolling restart: the fetch loop of a surviving instance sees the statuses
+// the server sends while the consumer's leader moves.
+func TestFetchErrorReporter_LeaderMoveIsWarning(t *testing.T) {
+	for _, err := range []error{jetstream.ErrConsumerLeadershipChanged, jetstream.ErrServerShutdown} {
+		logger := &mockLogger{}
+		r := newFetchErrorReporter(logger, "Fetch error", "service", "jobs")
+		r.failure(err)
+		if len(logger.entries) != 1 || !strings.HasPrefix(logger.entries[0], "WARN: Fetch error") {
+			t.Errorf("%v: entries = %v, want one warning", err, logger.entries)
+		}
 	}
 }

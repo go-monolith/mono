@@ -23,6 +23,8 @@ This page lists what changes when you upgrade to **v0.1.0**, including the break
 | `WithNATSClustering` together with `WithNATSConfigFile` | "`WithNATSClustering` is merged into the config file" (v0.2.0) |
 | `WithNATSClustering` with JetStream | "Clustered JetStream requires a server name and routes" and "Route URLs are validated" (v0.2.0) |
 | A `MonoApplication` health endpoint | "Health reports JetStream" (v0.2.0) |
+| Alerts on `Fetch error` at Error level | "Leader moves in the fetch loops are logged at Warn" (after v0.2.0) |
+| Code that stores `Publish` or `PublishStreamConsumerService` as a function value | "`Publish` takes options" (after v0.2.0) |
 | Alerts or log parsing on fetch errors | "Fetch errors are rate-limited" (v0.2.0) |
 
 ## Compile-Time Changes
@@ -275,6 +277,22 @@ Rolling back the application to an earlier framework version does not touch data
 
 - **Stream consumer services become non-durable again.** Earlier versions update the consumer without `Durable`. It keeps its position, but from the next server restart the server deletes it once it has not been pulled for 5s. In a cluster the timer starts whenever its leader is elected, so the consumer can be lost then; on a single server with v2.14.4 the timer is not started at restart. When the consumer is recreated, the stream replays from its deliver policy, and on an interest-retention stream messages only it needed are removed. Cron consumers behave the same when rolled back to v0.0.12 or earlier.
 - **Replicated streams are scaled back to one replica.** If you set `WithJetStreamDefaultReplicas` or `CronServiceConfig.Replicas` above 1, an earlier version sends 0 replicas for these streams, and the server scales each stream down to one replica the first time an old instance starts. Scaling down keeps the leader's data, but a stream whose leader is unavailable at that moment may keep a peer that lags behind. Before rolling back, scale those streams down yourself while every server is healthy (`nats stream edit <stream> --replicas 1`), or keep at least one instance on v0.2.0 until the rollback is complete.
+
+## Upgrading from v0.2.0
+
+The release after v0.2.0 adds options and changes one log level. No change is required.
+
+### Leader moves in the fetch loops are logged at Warn
+
+The fetch loops of stream consumer, event stream consumer and cron services logged `nats: leadership change` and `nats: server shutdown` at Error. The server answers a pull request with these while the consumer's leader moves or its server shuts down, which every rolling restart of a peer produces, and fetching works again once a new leader is elected. They are now logged at Warn, like the other errors that clear by themselves. Alerts on `Fetch error` at Error level fire less often.
+
+### `Publish` takes options
+
+`StreamConsumerDefinition[T].Publish` and `helper.PublishStreamConsumerService` take variadic `helper.PublishOption`s. `helper.WithMsgID(id)` sets the JetStream message ID, so a retried publish is stored once (see [Typed Service Contracts](../api/container.md#typed-service-contracts)). Calls compile unchanged. Code that stores either function as a value of a declared function type (for example `var publish func(context.Context, mono.ServiceLookup, T) (mono.MsgPubAck, error) = def.Publish`) needs the variadic parameter added to that type.
+
+### New option: `WithNATSSystemAccount`
+
+`WithNATSSystemAccount(username, password)` adds a system account user for `nats server report jetstream` and `nats server raft peer-remove`. Clients without credentials keep working. Clients that send credentials (a URL with user info, a token) were accepted regardless before and are rejected once the option is on, unless they are the system account user's. See [Operator Access](clustering.md#operator-access-system-account).
 
 ## Recommended Next Steps
 

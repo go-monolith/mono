@@ -102,6 +102,19 @@ func main() {
 - The credentials are only safe on a trusted network unless the routes also use TLS (a `cluster { tls { ... } }` block in a config file).
 - Limit who can reach the route port at all, for example with a NetworkPolicy.
 
+## Operator Access (System Account)
+
+Some cluster operations need the NATS system account: `nats server report jetstream` lists every server of the meta group, and `nats server raft peer-remove <server>` removes a server from it, which retiring servers for good requires (scaling down for good, or a [blue-green cutover](../extra/kubernetes-deployment.md#joined-cluster)). `WithNATSSystemAccount(username, password)` adds a system account user:
+
+```go
+mono.WithNATSSystemAccount("admin", os.Getenv("NATS_SYSTEM_PASSWORD"))
+```
+
+- Clients without credentials, the framework's own included, keep working in the global account, so the application's streams and consumers are unaffected. Enabling it on a running cluster one server at a time is safe. A client that sends credentials (a URL with user info, a token) is now rejected unless they are the system account user's: remove leftover credentials from client URLs first.
+- The user connects to the client listener: keep it private (the example binds it to loopback and operators use a port-forward), and load the password from a secret.
+- **This is not client authentication.** The system account protects only the `$SYS` requests. Clients without credentials still have full access to the global account, every stream and consumer included. Keep the client listener unexposed (loopback, as in the example), or configure real client authorization in a NATS config file and add the system account user there.
+- With a NATS config file, add the user there instead when the file configures accounts or has an `authorization` block: `accounts { "$SYS": { users: [ { user: admin, password: $NATS_SYSTEM_PASSWORD } ] } }` and `system_account: "$SYS"`. With only these two settings, clients without credentials keep working too.
+
 ## Replicas
 
 The streams the framework creates for stream consumer, event stream consumer and cron services have one replica unless their configuration says otherwise. In a cluster, a one-replica stream lives on a single server and is unavailable while that server is down; a cron schedule then stops firing.
@@ -245,6 +258,7 @@ The sleep counts toward `terminationGracePeriodSeconds`, so the grace period mus
 - [ ] `WithJetStreamDefaultReplicas(3)` (and `Replicas` on streams and cron services that set their own)
 - [ ] An odd number of servers, one per node, with a PodDisruptionBudget
 - [ ] A liveness probe that never depends on JetStream; readiness may include `JetStream.Available`
+- [ ] A system account user (`WithNATSSystemAccount`) if operators need `nats server report` or to remove servers for good
 - [ ] A `preStop` sleep, so a terminating pod keeps serving until it has left the Service endpoints
 - [ ] `podManagementPolicy: Parallel` and `publishNotReadyAddresses: true`
 

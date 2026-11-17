@@ -308,14 +308,18 @@ func (d StreamConsumerDefinition[T]) Register(container types.ServiceContainer, 
 // Publish publishes payload to the stream behind the service through the
 // provider's container and returns the JetStream acknowledgement. Errors are
 // wrapped with the contract identity.
-func (d StreamConsumerDefinition[T]) Publish(ctx context.Context, container types.ServiceLookup, payload T) (types.MsgPubAck, error) {
+//
+// opts configure the publish; WithMsgID sets a message ID so that a retried
+// publish is stored once (a publish error does not prove that the message was
+// not stored).
+func (d StreamConsumerDefinition[T]) Publish(ctx context.Context, container types.ServiceLookup, payload T, opts ...PublishOption) (types.MsgPubAck, error) {
 	if err := d.check(); err != nil {
 		return nil, err
 	}
 	if container == nil {
 		return nil, fmt.Errorf("contract %s: container cannot be nil", d.BaseServiceDefinition)
 	}
-	ack, err := PublishStreamConsumerService(ctx, container, d.Name, d.marshal, payload)
+	ack, err := PublishStreamConsumerService(ctx, container, d.Name, d.marshal, payload, opts...)
 	if err != nil {
 		return nil, fmt.Errorf("contract %s: %w", d.BaseServiceDefinition, err)
 	}

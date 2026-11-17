@@ -35,7 +35,11 @@ type NATSConfig struct {
 	// whose URL carries no credentials of its own.
 	ClusterUsername string
 	ClusterPassword string
-	MaxPayload      int32
+	// SystemAccountUsername and SystemAccountPassword add a user of the
+	// system account ($SYS); empty adds none. See applySystemAccount.
+	SystemAccountUsername string
+	SystemAccountPassword string
+	MaxPayload            int32
 	// StartupReadyTimeout is the maximum time to wait for the NATS server to be ready for connections.
 	// Defaults to 10 seconds.
 	StartupReadyTimeout time.Duration
@@ -236,6 +240,19 @@ func WithClusterAuth(username, password string) NATSOption {
 		}
 		cfg.ClusterUsername = username
 		cfg.ClusterPassword = password
+		return nil
+	}
+}
+
+// WithSystemAccount adds a user of the system account ($SYS) with the given
+// credentials. Neither may be empty.
+func WithSystemAccount(username, password string) NATSOption {
+	return func(cfg *NATSConfig) error {
+		if username == "" || password == "" {
+			return fmt.Errorf("system account username and password cannot be empty")
+		}
+		cfg.SystemAccountUsername = username
+		cfg.SystemAccountPassword = password
 		return nil
 	}
 }

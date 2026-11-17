@@ -173,3 +173,25 @@ func freePort(t *testing.T) int {
 	defer func() { _ = ln.Close() }()
 	return ln.Addr().(*net.TCPAddr).Port
 }
+
+func TestWithNATSSystemAccount(t *testing.T) {
+	cfg := mono.DefaultConfig()
+	if err := mono.WithNATSSystemAccount("admin", "pw")(cfg); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.NATSOptions.SystemAccountUsername != "admin" || cfg.NATSOptions.SystemAccountPassword != "pw" {
+		t.Errorf("NATSOptions = %+v", cfg.NATSOptions)
+	}
+	for _, tc := range []struct{ user, pass, want string }{
+		{"", "pw", "username cannot be empty"},
+		{"admin", "", "password cannot be empty"},
+	} {
+		err := mono.WithNATSSystemAccount(tc.user, tc.pass)(mono.DefaultConfig())
+		if err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("(%q, %q): err = %v, want %q", tc.user, tc.pass, err, tc.want)
+		}
+		if err != nil && strings.Contains(err.Error(), "pw") && tc.pass != "" {
+			t.Errorf("error leaks the password: %v", err)
+		}
+	}
+}

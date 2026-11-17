@@ -80,7 +80,7 @@ var CheckStock = helper.RequestReplyService[CheckStockRequest, CheckStockRespons
 |-------------|---------------|---------------|
 | `helper.RequestReplyService[Req, Resp](module, name)` | `def.Register(container, handler, opts...)` | `def.Call(ctx, container, req) (Resp, error)` |
 | `helper.QueueGroupService[T](module, name)` | `def.Register(container, pairs...)` with `types.TypedQGHP[T]` | `def.Send(ctx, container, payload) error` |
-| `helper.StreamConsumerService[T](module, name)` | `def.Register(container, config, handler)` | `def.Publish(ctx, container, payload) (MsgPubAck, error)` |
+| `helper.StreamConsumerService[T](module, name)` | `def.Register(container, config, handler)` | `def.Publish(ctx, container, payload, opts...) (MsgPubAck, error)` |
 
 - JSON by default; `WithMarshaler` / `WithUnmarshaler` return a copy with another codec.
 - `def.ToBase()` returns the non-generic `types.BaseServiceDefinition`.

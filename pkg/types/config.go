@@ -149,10 +149,16 @@ type NATSOptions struct {
 	// must present, and that this server presents on the routes it opens.
 	// Empty means routes are not authenticated (unless the config file says
 	// otherwise).
-	ClusterUsername     string
-	ClusterPassword     string
-	MaxPayload          int32         // Maximum NATS message payload size
-	StartupReadyTimeout time.Duration // Maximum time to wait for NATS server readiness (default: 10s)
+	ClusterUsername string
+	ClusterPassword string
+	// SystemAccountUsername and SystemAccountPassword are a user of the NATS
+	// system account ($SYS) on this server, for operator tooling (nats
+	// server report, nats server raft peer-remove). Empty means no system
+	// account user.
+	SystemAccountUsername string
+	SystemAccountPassword string
+	MaxPayload            int32         // Maximum NATS message payload size
+	StartupReadyTimeout   time.Duration // Maximum time to wait for NATS server readiness (default: 10s)
 	// NATS server logging flags (passed to SetLoggerV2)
 	LogDebug    bool // If true, enables debug-level NATS server logging
 	LogTrace    bool // If true, enables trace-level NATS server logging

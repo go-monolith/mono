@@ -664,6 +664,51 @@ func WithNATSClusterAuth(username, password string) MonoFrameworkOption {
 	}
 }
 
+// WithNATSSystemAccount adds a user of the NATS system account ($SYS) to the
+// embedded server, for operator tooling: `nats server report jetstream`,
+// `nats server raft peer-remove` (removing a server from the JetStream meta
+// group, which retiring servers for good requires, for example at the end of
+// a blue-green cutover) and the other system requests.
+//
+// Clients without credentials keep working as before, in the global account
+// where the application's streams and consumers live: nats-server requires a
+// password only from the system account user as long as no other accounts and
+// no client authorization are configured. A client that sends credentials (a
+// URL with user info, a token, nats.UserInfo in WithNATSClientOptions) used to
+// be accepted regardless; it is now checked and rejected unless they are the
+// system account user's, so remove leftover credentials from client URLs. Enabling the option on a running
+// cluster one server at a time is safe, since every server uses the same
+// default system account. The user can connect wherever the client listener
+// is reachable, so keep that listener private (WithNATSHost("127.0.0.1"), a
+// port-forward for operators) and load the password from a secret, never from
+// code. The password is not logged.
+//
+// Neither value may be empty. A NATS config file that configures accounts,
+// system_account, an authorization block or an operator is rejected when the
+// embedded server starts (NewMonoApplication returns the error): add the
+// system account user to that file instead.
+//
+// Example:
+//
+//	mono.NewMonoApplication(
+//	    mono.WithNATSSystemAccount("admin", os.Getenv("NATS_SYSTEM_PASSWORD")),
+//	)
+func WithNATSSystemAccount(username, password string) MonoFrameworkOption {
+	return func(cfg *types.MonoFrameworkConfig) error {
+		if username == "" {
+			return errors.WrapInvalidConfiguration(0, "WithNATSSystemAccount", username,
+				"system account username cannot be empty")
+		}
+		if password == "" {
+			return errors.WrapInvalidConfiguration(0, "WithNATSSystemAccount", "<redacted>",
+				"system account password cannot be empty")
+		}
+		cfg.NATSOptions.SystemAccountUsername = username
+		cfg.NATSOptions.SystemAccountPassword = password
+		return nil
+	}
+}
+
 // WithNATSMaxPayload sets the maximum payload size for NATS messages.
 // The size must be between 1KB (1024 bytes) and 8MB (8388608 bytes).
 //

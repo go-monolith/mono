@@ -410,16 +410,21 @@ func SendQueueGroupService[T any](ctx context.Context, container types.ServiceLo
 //   - serviceName: Name of the stream consumer service to publish to
 //   - marshalF: Function to marshal the message (e.g., json.Marshal, proto.Marshal)
 //   - msg: Pointer to the message payload to publish
+//   - opts: Optional publish settings, such as WithMsgID for deduplication
 //
 // Returns:
 //   - types.MsgPubAck: JetStream publish acknowledgment with sequence number and stream info
-//   - error: Returns error if marshaling, service lookup, or publishing fails
+//   - error: Returns error if marshaling, service lookup, or publishing fails,
+//     or ErrEmptyMsgID when WithMsgID is given an empty ID
 //
 // Important:
 //   - Messages are persisted in JetStream and delivered to durable consumers
 //   - The publish acknowledgment confirms the message was stored in the stream
 //   - Messages will be redelivered to consumers on failure until acknowledged
 //   - Stream retention policies control how long messages are stored
+//   - A publish error does not prove that the message was not stored (a
+//     timeout while a cluster has no quorum, for example); to retry safely,
+//     publish with WithMsgID so the stream stores the message once
 //
 // Example:
 //
@@ -448,7 +453,12 @@ func SendQueueGroupService[T any](ctx context.Context, container types.ServiceLo
 //	    return fmt.Errorf("failed to publish event: %w", err)
 //	}
 //	fmt.Printf("Event published with sequence: %d\n", ack.Sequence)
-func PublishStreamConsumerService[T any](ctx context.Context, container types.ServiceLookup, serviceName string, marshalF types.Marshaler, event T) (types.MsgPubAck, error) {
+func PublishStreamConsumerService[T any](ctx context.Context, container types.ServiceLookup, serviceName string, marshalF types.Marshaler, event T, opts ...PublishOption) (types.MsgPubAck, error) {
+	options, err := buildPublishOptions(opts)
+	if err != nil {
+		return nil, fmt.Errorf("failed to publish to service '%s': %w", serviceName, err)
+	}
+
 	// Serialize message
 	data, err := marshalF(event)
 	if err != nil {
@@ -461,8 +471,13 @@ func PublishStreamConsumerService[T any](ctx context.Context, container types.Se
 		return nil, fmt.Errorf("failed to get service '%s': %w", serviceName, err)
 	}
 
-	// Publish the message to the stream
-	ack, err := serviceClient.Publish(ctx, data)
+	// Publish the message to the stream, with headers when an option needs them
+	var ack types.MsgPubAck
+	if msg := options.message(data); msg != nil {
+		ack, err = serviceClient.PublishMsg(ctx, msg)
+	} else {
+		ack, err = serviceClient.Publish(ctx, data)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("failed to publish to service '%s': %w", serviceName, err)
 	}

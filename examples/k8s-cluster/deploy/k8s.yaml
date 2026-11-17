@@ -113,6 +113,16 @@ spec:
                 secretKeyRef:
                   name: mono-cluster-routes
                   key: password
+            # The system account user "admin" (WithNATSSystemAccount), for
+            # nats server report jetstream and nats server raft peer-remove
+            # through kubectl port-forward. Optional: without the key the
+            # pods run without a system account user.
+            - name: NATS_SYSTEM_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: mono-cluster-routes
+                  key: system-password
+                  optional: true
             # Replicas of the framework's streams (visits, cron schedule).
             - name: JS_REPLICAS
               value: "3"
