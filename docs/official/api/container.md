@@ -285,6 +285,11 @@ Messages should be acknowledged individually using `Ack()`, `Nak()`, `NakWithDel
 
 The `StreamConsumerConfig` is a composite type combining stream, consumer, and fetch configuration. See [JetStream types](../core-concepts/inter-module-communication.md) for full details.
 
+- **Stream replicas:** a `Stream.Replicas` of 0 takes the framework default ([`WithJetStreamDefaultReplicas`](framework.md#withjetstreamdefaultreplicas), otherwise one replica). The consumer follows the stream unless `Consumer.Replicas` is set.
+- **Durable consumer:** the service is consumed through the durable consumer `<module>-<service>` (with `.` replaced by `-`). The framework sends it as both `Name` and `Durable`, so the server keeps the consumer, and its delivery position, across restarts and idle periods. A `Name` or `Durable` set in `Consumer` is replaced.
+- **Upgrading from v0.1.x or earlier:** those versions sent only a `Name`, which the server treats as non-durable and deletes after about 5s without a pull; the next start then recreated it from its deliver policy and, with the default (all), replayed the stream. An existing consumer of that kind is converted to a durable in place at startup, keeping its position, and `Stream consumer converted to durable` is logged.
+- **Deliver policy and start position** of an existing consumer cannot be changed by an update: a configuration that changes them fails `Start`. Since the consumer is durable it no longer disappears by itself; delete it with `nats consumer rm <stream> <consumer>` to apply the change (the new consumer starts from the configured deliver policy).
+
 **Example:**
 ```go
 func (m *AnalyticsModule) RegisterServices(container mono.ServiceContainer) error {
@@ -298,7 +303,7 @@ func (m *AnalyticsModule) RegisterServices(container mono.ServiceContainer) erro
             Subjects: []string{"events.>"},
         },
         Consumer: mono.ConsumerConfig{
-            Name:          "analytics-durable",
+            // Name and Durable are set by the framework: "<module>-analytics-consumer"
             MaxAckPending: 1000,
         },
         Fetch: mono.FetchConfig{
@@ -349,7 +354,7 @@ Requires JetStream (`WithJetStreamStorageDir(...)`); registering a cron service 
 
 **Parameters:**
 - `name` - Service name. The handler receives ticks on `services.<module>.<name>`.
-- `config` - `CronServiceConfig` (schedule, payload/source, time zone, TTL, deprecation)
+- `config` - `CronServiceConfig` (schedule, payload/source, time zone, TTL, replicas, deprecation)
 - `handler` - Function invoked on each scheduled occurrence
 
 **Handler Signature:**
@@ -368,10 +373,11 @@ Acknowledgement is owned by the framework: return `nil` to Ack the occurrence, o
 | `SourceSubject` | `string` | Deliver the last message seen on this subject instead of a static payload |
 | `TimeZone` | `string` | Optional IANA time zone (cron expressions only; not `@every`) |
 | `TTL` | `time.Duration` | Optional per-occurrence message TTL (≥ 1s) |
+| `Replicas` | `int` | Replicas of the service's stream (schedule and occurrences) and consumer in a cluster. `0` = the framework default (`WithJetStreamDefaultReplicas`, otherwise 1); at most 5. With one replica the schedule lives on one server and stops firing while that server is down; use 3 in a cluster of at least three servers |
 | `Deprecated` | `bool` | When true, purge the schedule on deploy and don't start the consumer (keep the code) |
 
 **Returns:**
-- `error` - Nil on success; non-nil if validation fails (e.g. empty `Schedule`, both `Payload` and `SourceSubject` set, invalid `TimeZone`)
+- `error` - Nil on success; non-nil if validation fails (e.g. empty `Schedule`, both `Payload` and `SourceSubject` set, invalid `TimeZone`, `Replicas` outside 0..5)
 
 **Use Cases:**
 - Periodic work: nightly rollups, cache warmups, heartbeat emits, downsampling

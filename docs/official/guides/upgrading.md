@@ -1,6 +1,6 @@
-# Upgrading to v0.1.0 and v0.1.2
+# Upgrading to v0.1.0, v0.1.2 and v0.2.0
 
-This page lists what changes when you upgrade to **v0.1.0**, including the breaking changes that shipped in v0.0.15 to v0.0.19 without a minor version bump, and what changes in **v0.1.2** (see [Upgrading to v0.1.2](#upgrading-to-v012)).
+This page lists what changes when you upgrade to **v0.1.0**, including the breaking changes that shipped in v0.0.15 to v0.0.19 without a minor version bump, what changes in **v0.1.2** (see [Upgrading to v0.1.2](#upgrading-to-v012)), and what changes in **v0.2.0** (see [Upgrading to v0.2.0](#upgrading-to-v020)).
 
 ## Who Is Affected
 
@@ -17,6 +17,13 @@ This page lists what changes when you upgrade to **v0.1.0**, including the break
 | `WithStrictModuleBoundaries()` together with modules that implement `ConsumeServices()` | "`ConsumeServices()` is a complete list" (v0.1.2) |
 | Module code that reads handlers or channels from a dependency's `Entries()` | "`Entries()` on a dependency container returns descriptions" (v0.1.2) |
 | `monotest.CheckModule` tests | "`monotest.CheckModule` has a rule 9" (v0.1.2) |
+| Every application | "Go 1.26 and nats-server v2.14.10" (v0.2.0) |
+| Stream consumer services | "Stream consumer services use durable consumers" (v0.2.0) |
+| JetStream, in particular clustered | "`Start` waits for JetStream" (v0.2.0) |
+| `WithNATSClustering` together with `WithNATSConfigFile` | "`WithNATSClustering` is merged into the config file" (v0.2.0) |
+| `WithNATSClustering` with JetStream | "Clustered JetStream requires a server name and routes" and "Route URLs are validated" (v0.2.0) |
+| A `MonoApplication` health endpoint | "Health reports JetStream" (v0.2.0) |
+| Alerts or log parsing on fetch errors | "Fetch errors are rate-limited" (v0.2.0) |
 
 ## Compile-Time Changes
 
@@ -183,6 +190,91 @@ Two things to know when you add it:
 - Every directory named `contract` marks its parent as a module. If you have a package with that name that is something else, such as `legal/contract` for customer contracts or a helper `order/internal/contract`, name it with `monotest.WithNonContractPackages`.
 
 See [Checking Imports](module-boundaries.md#checking-imports).
+
+## Upgrading to v0.2.0
+
+v0.2.0 makes JetStream work in a cluster: durable stream consumers, a wait for JetStream at `Start`, options for server names, route authentication and replicas, and JetStream in the health report. For running a cluster, see the [Clustering and Kubernetes guide](clustering.md).
+
+### Go 1.26 and nats-server v2.14.10
+
+The minimum Go version is now **1.26**. The embedded server is **nats-server v2.14.10** (with nats.go v1.55.0).
+
+nats-server v2.14.10 starts a pull consumer's inactivity timer whenever the consumer becomes leader, including when the server starts and recovers its store. A consumer created with a `Name` only (non-durable) is therefore deleted about 5s after the server starts unless something pulls it, which replays its stream when it is recreated and, on an interest-retention stream, removes the messages only it still needed. Earlier framework versions created such consumers for stream consumer services, for cron services (up to v0.0.12) and for event stream consumers (up to v0.0.11). The framework now protects them: right after the embedded server starts (inside `NewMonoApplication`, before any of your code runs) and again when `Start` begins, it raises to 1h the inactivity threshold of every pull consumer that the server could delete for inactivity: a non-durable one still at the server's default threshold, or a durable whose conversion from a non-durable was interrupted. A consumer with any threshold other than the default 5s is left alone (an explicit 5s cannot be told apart from the default). This includes non-durable consumers of your own: they are removed by the server 1h after their last pull instead of 5s after the start. On an interest-retention stream such a leftover consumer keeps its messages for that hour, and on a work-queue stream it can block a new consumer with an overlapping filter ("consumer must be unique") until it expires. If your application creates a fresh non-durable consumer at each start, delete the old one or set `InactiveThreshold` explicitly. The framework logs `Extended the inactivity threshold of non-durable consumers recovered at start` (and `Protected non-durable consumers until they are set up`) when it changed any.
+
+In a cluster the protection can only run once JetStream has a leader. A non-durable consumer whose own leader is elected more than about 5s before the cluster reaches quorum can still be deleted; this was already the case with earlier versions.
+
+Legacy event stream durables (up to v0.0.11) keep the 1h threshold, so the server removes one that is no longer pulled 1h after its last pull. The framework still never deletes them itself.
+
+### Stream consumer services use durable consumers
+
+A stream consumer service is now consumed through the durable consumer `<module>-<service>`, sent with both `Name` and `Durable`. A `Name` or `Durable` set in `StreamConsumerConfig.Consumer` is replaced.
+
+Before, the consumer had a `Name` only. The server deleted it about 5s after the last pull: during a slow shutdown, or while every instance was down. The next start recreated it from its deliver policy, so with the default (all) the stream was delivered again.
+
+An existing consumer from an earlier version is converted to a durable in place at the first start, keeping its position. The framework logs `Stream consumer converted to durable`. No action is needed.
+
+A consumer configuration that changes the deliver policy or start position of an existing consumer still fails `Start`. Since the consumer is durable, it no longer disappears by itself: to apply such a change, delete it with `nats consumer rm <stream> <consumer>`.
+
+### `Start` waits for JetStream
+
+Before it starts plugins and modules, `Start` now waits until JetStream answers. It then retries the JetStream setup steps of stream consumer, cron and event stream consumer services while they fail with an error that can clear by itself (a timeout, no responders, no peers for placement yet, JetStream temporarily unavailable, a stream or consumer offline). Any other error still fails `Start` at once.
+
+- A single server answers at once, so nothing changes there.
+- A `Start` that used to fail fast on a JetStream timeout now retries for up to 2 minutes. Change the bound with [`WithJetStreamReadyTimeout`](../api/framework.md#withjetstreamreadytimeout).
+- New Info log lines while it waits: `Waiting for JetStream` (at most every 10s per step) and `JetStream step succeeded after waiting`.
+- Plugins and modules that use JetStream in their own `Start` now find it answering. Their own JetStream calls are not retried by the framework.
+
+### `WithNATSClustering` is merged into the config file
+
+**Breaking for applications that use `WithNATSClustering` together with `WithNATSConfigFile`.** The option used to replace the file's `cluster{}` block. It is now merged into it: name, host and port come from the option, its routes are added to the file's `cluster.routes` (the server uses both lists), and the file's authorization, TLS, permissions, pool size and compression now apply, where before they were silently dropped.
+
+If your file has a `cluster{}` block with `authorization` or `tls`, check that your routes still authenticate: the routes must now present those credentials (use [`WithNATSClusterAuth`](../api/framework.md#withnatsclusterauth) or credentials in the route URLs) and complete the TLS handshake.
+
+### Clustered JetStream requires a server name and routes
+
+Without a config file, `NewMonoApplication` now returns an error when clustering and JetStream are configured without:
+
+- a server name ([`WithNATSServerName`](../api/framework.md#withnatsservername)), unique within the cluster and stable across restarts;
+- at least one route. List all servers of the cluster on every server, its own included.
+
+With a config file, the same checks run at `Start` on the merged configuration (`server_name`, `cluster.name`, `routes` or leafnode remotes). nats-server requires them too; the framework now reports a missing one in its own terms before the server starts, instead of a server failure that could show up only as a readiness timeout.
+
+### Route URLs are validated
+
+A route must have the form `nats://[user:password@]host:port`. A route with a path, query, fragment or opaque part is now rejected by `WithNATSClustering` (and at `Start`). This also catches an unencoded `/`, `?` or `#` in a password: percent-encode special characters in credentials. Errors name the route by its index and never quote it, and logged routes no longer include passwords.
+
+### New options
+
+| Option | Purpose |
+|--------|---------|
+| [`WithNATSServerName(name)`](../api/framework.md#withnatsservername) | The NATS server name; required for clustered JetStream |
+| [`WithNATSClusterAuth(user, password)`](../api/framework.md#withnatsclusterauth) | Route authentication; adds the credentials to every route URL without its own |
+| [`WithJetStreamReadyTimeout(d)`](../api/framework.md#withjetstreamreadytimeout) | Bounds the wait for JetStream and each retried setup step (default 2 minutes) |
+| [`WithJetStreamDefaultReplicas(n)`](../api/framework.md#withjetstreamdefaultreplicas) | Replicas of framework-created streams that leave `Replicas` at 0 (1..5; above 1 requires clustering) |
+
+`CronServiceConfig` gains `Replicas` (0 = the default above, at most 5). With one replica a cron schedule lives on one server and stops firing while that server is down. Raising the value updates existing streams in place.
+
+### Health reports JetStream
+
+`FrameworkHealth.JetStream` (`*JetStreamHealth`: `Available`, `Clustered`, `MetaLeader`, `ClusterSize`, `Message`) reports the JetStream state of this server. It is nil when JetStream is disabled. It is **not** part of `Healthy`: in a cluster every server loses JetStream while there is no quorum, and counting it would restart the surviving servers. Include `JetStream.Available` in a readiness probe if you need it, never in a liveness probe. The JSON form adds a `jetstream` key. See [Health and Status](../api/framework.md#health-and-status).
+
+### Fetch errors are rate-limited
+
+The fetch loops of stream consumer, event stream consumer and cron services used to log one Error line per failed fetch, and could spin when the server answered at once with an error. They now:
+
+- log at most one line (failure or recovery) per 10s per loop, with `failures` and `suppressed` counts;
+- log at Warn for errors that clear by themselves (for example a consumer without a leader while a cluster forms), at Error otherwise;
+- log `Fetch error cleared` (`Cron fetch error cleared` for cron) at Info when fetching works again;
+- wait 1s after a failed fetch that returned nothing.
+
+The separate `Fetch batch error` and `Cron fetch batch error` messages are gone: batch errors are reported as `Fetch error` and `Cron fetch error`. Update alerts or log queries that match them.
+
+### Rolling back from v0.2.0
+
+Rolling back the application to an earlier framework version does not touch data on disk: v2.14.4 and v2.14.10 use the same store format. Two things change behaviour, though:
+
+- **Stream consumer services become non-durable again.** Earlier versions update the consumer without `Durable`. It keeps its position, but from the next server restart the server deletes it once it has not been pulled for 5s. In a cluster the timer starts whenever its leader is elected, so the consumer can be lost then; on a single server with v2.14.4 the timer is not started at restart. When the consumer is recreated, the stream replays from its deliver policy, and on an interest-retention stream messages only it needed are removed. Cron consumers behave the same when rolled back to v0.0.12 or earlier.
+- **Replicated streams are scaled back to one replica.** If you set `WithJetStreamDefaultReplicas` or `CronServiceConfig.Replicas` above 1, an earlier version sends 0 replicas for these streams, and the server scales each stream down to one replica the first time an old instance starts. Scaling down keeps the leader's data, but a stream whose leader is unavailable at that moment may keep a peer that lags behind. Before rolling back, scale those streams down yourself while every server is healthy (`nats stream edit <stream> --replicas 1`), or keep at least one instance on v0.2.0 until the rollback is complete.
 
 ## Recommended Next Steps
 

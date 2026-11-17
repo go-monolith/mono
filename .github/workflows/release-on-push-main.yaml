@@ -2,7 +2,9 @@ name: release-on-push-main
 
 # Automatic patch release workflow for pushes to main branch.
 # Strategy: Bumps patch version only (vX.Y.Z -> vX.Y.Z+1).
-# For major/minor version bumps, manually create and push the tag.
+# A breaking change ("type!:" in the squash commit subject, or a
+# "BREAKING CHANGE" line) bumps the minor version, anything else the patch.
+# For a major bump, manually create and push the tag.
 # Tests run as a safety check before tagging.
 
 on:
@@ -246,9 +248,18 @@ jobs:
           MINOR=$(echo "$VERSION" | cut -d. -f2)
           PATCH=$(echo "$VERSION" | cut -d. -f3)
 
-          # Bump patch version
-          NEW_PATCH=$((PATCH + 1))
-          NEW_TAG="v${MAJOR}.${MINOR}.${NEW_PATCH}"
+          # A breaking change bumps the minor version (while the major is 0),
+          # anything else the patch. Squash merges carry the PR title as the
+          # subject: "#<issue> type(scope)!: ..." marks a breaking change, as
+          # does a "BREAKING CHANGE" line in the message.
+          SUBJECT=$(git log -1 --format=%s HEAD)
+          BODY=$(git log -1 --format=%b HEAD)
+          if [[ "$SUBJECT" =~ ^(#[0-9]+[[:space:]]+)?[a-z]+(\([^\)]*\))?!: ]] || grep -q '^BREAKING[ -]CHANGE' <<< "$BODY"; then
+            echo "Breaking change: bumping the minor version"
+            NEW_TAG="v${MAJOR}.$((MINOR + 1)).0"
+          else
+            NEW_TAG="v${MAJOR}.${MINOR}.$((PATCH + 1))"
+          fi
 
           echo "New tag: $NEW_TAG"
           echo "new_tag=$NEW_TAG" >> "$GITHUB_OUTPUT"

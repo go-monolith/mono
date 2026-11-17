@@ -48,6 +48,12 @@ type Settings struct {
 	// DeadlineSkewAllowance is the clock skew tolerated when deciding that a
 	// request's deadline has passed (0 = types.DefaultDeadlineSkewAllowance).
 	DeadlineSkewAllowance time.Duration
+	// JetStreamReadyTimeout bounds the JetStream wait and the retried setup
+	// steps during Start (0 = types.DefaultJetStreamReadyTimeout).
+	JetStreamReadyTimeout time.Duration
+	// JetStreamDefaultReplicas is the replica count of framework-created
+	// streams whose configuration leaves it at 0 (0 = 1).
+	JetStreamDefaultReplicas int
 	// StatsLogInterval is the period of the Debug subscription stats log
 	// (0 = off).
 	StatsLogInterval time.Duration
@@ -89,13 +95,16 @@ func NewFrameworkAppInstance(logger types.Logger, settings Settings, natsOptions
 		return nil, fmt.Errorf("failed to start NATS: %w", err)
 	}
 
-	// Step 3: Get NATS connection and create EventBus
+	// Step 3: Get NATS connection and create EventBus. The server is
+	// running from here on: stop it if creation fails.
 	conn, err := fwApp.natsManager.Connection()
 	if err != nil {
+		fwApp.stopNATSAfterFailedCreate()
 		return nil, fmt.Errorf("failed to get NATS connection: %w", err)
 	}
 	fwApp.eventBus, err = eventbus.NewEventBus(conn, fwApp.logger)
 	if err != nil {
+		fwApp.stopNATSAfterFailedCreate()
 		return nil, fmt.Errorf("failed to create EventBus: %w", err)
 	}
 
@@ -120,6 +129,8 @@ func NewFrameworkAppInstance(logger types.Logger, settings Settings, natsOptions
 	fwApp.lifecycleManager.SetDefaultServiceConcurrency(fwApp.settings.DefaultServiceConcurrency)
 	fwApp.lifecycleManager.SetDrainTimeout(fwApp.settings.ShutdownDrainTimeout)
 	fwApp.lifecycleManager.SetDeadlineSkewAllowance(fwApp.settings.DeadlineSkewAllowance)
+	fwApp.lifecycleManager.SetJetStreamReadyTimeout(fwApp.settings.JetStreamReadyTimeout)
+	fwApp.lifecycleManager.SetJetStreamDefaultReplicas(fwApp.settings.JetStreamDefaultReplicas)
 	fwApp.lifecycleManager.SetStatsLogInterval(fwApp.settings.StatsLogInterval)
 	fwApp.lifecycleManager.SetServiceDiscovery(fwApp.settings.ServiceDiscovery)
 	fwApp.lifecycleManager.SetStrictModuleBoundaries(fwApp.settings.StrictModuleBoundaries)
@@ -192,6 +203,10 @@ func (fw *frameworkApplication) Start(ctx context.Context) error {
 
 	fw.logger.Info("Starting application")
 
+	// From here the lifecycle protects and converts consumers itself; a
+	// pass of the manager's early protection must not run concurrently with
+	// the conversion and write back a consumer's old configuration.
+	fw.natsManager.StopConsumerProtection()
 	if err := fw.lifecycleManager.Start(ctx); err != nil {
 		fw.mu.Lock()
 		fw.state = types.StateCreated
@@ -377,6 +392,7 @@ func (fw *frameworkApplication) Health(ctx context.Context) types.FrameworkHealt
 		return health
 	}
 	health.NATSHealthy = true
+	health.JetStream = fw.natsManager.JetStreamHealth()
 
 	// Check module health
 	allModulesHealthy := true
@@ -433,4 +449,15 @@ func (fw *frameworkApplication) Health(ctx context.Context) types.FrameworkHealt
 // Logger returns the framework's internal logger.
 func (fw *frameworkApplication) Logger() types.Logger {
 	return fw.logger
+}
+
+// stopNATSAfterFailedCreate stops the embedded server when creating the
+// application fails after it started, so neither the server nor its
+// background consumer protection outlives the failed call.
+func (fw *frameworkApplication) stopNATSAfterFailedCreate() {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := fw.natsManager.Stop(ctx); err != nil {
+		fw.logger.Warn("Failed to stop NATS after a failed application create", "error", err)
+	}
 }

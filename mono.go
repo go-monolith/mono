@@ -48,6 +48,14 @@ func NewMonoApplication(opts ...MonoFrameworkOption) (MonoApplication, error) {
 			fmt.Sprintf("drain timeout must not exceed the shutdown timeout (%s)", cfg.ShutdownTimeout))
 	}
 
+	if err := validateClusterOptions(cfg.NATSOptions); err != nil {
+		return nil, err
+	}
+	if cfg.JetStreamDefaultReplicas > 1 && cfg.NATSOptions.ClusterName == "" && cfg.NATSOptions.ConfigFile == "" {
+		return nil, errors.WrapInvalidConfiguration(0, "WithJetStreamDefaultReplicas", cfg.JetStreamDefaultReplicas,
+			"more than one replica requires clustering (WithNATSClustering or a cluster{} block in a NATS config file)")
+	}
+
 	// Call internal app directly to create framework.
 	// Both packages share types from pkg/types, so we can pass config structs directly.
 	frameworkAppInstance, err := app.CreateFrameworkAppInstance(cfg.Logger, cfg.LoggerOptions, cfg.NATSOptions, app.Settings{
@@ -56,6 +64,8 @@ func NewMonoApplication(opts ...MonoFrameworkOption) (MonoApplication, error) {
 		ShutdownTimeout:            cfg.ShutdownTimeout,
 		ShutdownDrainTimeout:       cfg.ShutdownDrainTimeout,
 		DeadlineSkewAllowance:      cfg.DeadlineSkewAllowance,
+		JetStreamReadyTimeout:      cfg.JetStreamReadyTimeout,
+		JetStreamDefaultReplicas:   cfg.JetStreamDefaultReplicas,
 		StatsLogInterval:           cfg.SubscriptionStatsLogInterval,
 		ServiceDiscovery:           cfg.ServiceDiscovery,
 		StrictModuleBoundaries:     cfg.StrictModuleBoundaries,
@@ -65,4 +75,28 @@ func NewMonoApplication(opts ...MonoFrameworkOption) (MonoApplication, error) {
 	}
 
 	return frameworkAppInstance, nil
+}
+
+// validateClusterOptions checks the clustering options against each other.
+// A NATS config file may provide what the options leave out (server_name, a
+// cluster{} block), so with one the checks are made at Start instead, on the
+// merged configuration.
+func validateClusterOptions(o types.NATSOptions) error {
+	if o.ConfigFile != "" {
+		return nil
+	}
+	clustered := o.ClusterName != ""
+	if (o.ClusterUsername != "" || o.ClusterPassword != "") && !clustered {
+		return errors.WrapInvalidConfiguration(0, "WithNATSClusterAuth", o.ClusterUsername,
+			"cluster credentials require WithNATSClustering")
+	}
+	if clustered && o.JetStreamEnabled && o.ServerName == "" {
+		return errors.WrapInvalidConfiguration(0, "WithNATSServerName", "",
+			"clustered JetStream requires a server name that is unique within the cluster and stable across restarts")
+	}
+	if clustered && o.JetStreamEnabled && len(o.ClusterRoutes) == 0 {
+		return errors.WrapInvalidConfiguration(0, "WithNATSClustering", o.ClusterName,
+			"clustered JetStream requires at least one route: list the cluster's servers, this one included")
+	}
+	return nil
 }

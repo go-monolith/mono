@@ -4,7 +4,7 @@ This guide is for contributors and developers working on the Mono Framework code
 
 ## Prerequisites
 
-- Go 1.25 or higher
+- Go 1.26 or higher
 - Git
 - Make (recommended)
 

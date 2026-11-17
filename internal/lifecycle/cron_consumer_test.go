@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-monolith/mono/internal/jsprotect"
 	"github.com/go-monolith/mono/pkg/types"
 	"github.com/nats-io/nats.go/jetstream"
 )
@@ -284,9 +285,12 @@ func TestEnsureCronConsumer(t *testing.T) {
 		if got := store.recorded(); !slices.Equal(got, want) {
 			t.Errorf("ops = %v, want %v", got, want)
 		}
-		for _, cfg := range store.configs {
-			if cfg.Durable != cronTestConsumer || cfg.InactiveThreshold != 0 || cfg.OptStartTime == nil || !cfg.OptStartTime.Equal(start) {
-				t.Errorf("update config = %+v, want durable, no threshold, start time kept", cfg)
+		// The first update keeps the new durable for an hour should the second
+		// never land (see protectedConversion); the second clears it.
+		wantThresholds := []time.Duration{jsprotect.Threshold, 0}
+		for i, cfg := range store.configs {
+			if cfg.Durable != cronTestConsumer || cfg.InactiveThreshold != wantThresholds[i] || cfg.OptStartTime == nil || !cfg.OptStartTime.Equal(start) {
+				t.Errorf("update %d config = %+v, want durable, threshold %s, start time kept", i, cfg, wantThresholds[i])
 			}
 		}
 		if got := logs(lm, "Cron consumer converted to durable"); len(got) != 1 {

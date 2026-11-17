@@ -1,0 +1,181 @@
+# Two replicas of the k8s-cluster example, one per node, whose embedded NATS
+# servers form one cluster with clustered JetStream.
+#
+#   examples/k8s-cluster/deploy/create-route-secret.sh      # route password
+#   kubectl apply -f examples/k8s-cluster/deploy/k8s.yaml
+#
+# To run more replicas, raise `replicas`, add every pod to NATS_ROUTES, and set
+# JS_REPLICAS to at most the number of servers. An odd number of servers, 3 or
+# more, with JS_REPLICAS=3, survives the loss of one; two servers do not.
+#
+# Exposure: the NATS client listener is bound to loopback (the application's
+# own client connects in-process), and routes require the password in the
+# Secret. To restrict who may connect to 6222 at all, add a NetworkPolicy that
+# allows it only from app=mono-cluster pods.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: mono-demo
+---
+# Headless Service: gives each pod a stable DNS name for the cluster routes.
+# publishNotReadyAddresses lets the routes resolve before the pods are Ready,
+# which they only become once the cluster has formed.
+apiVersion: v1
+kind: Service
+metadata:
+  name: mono-cluster-nats
+  namespace: mono-demo
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: true
+  selector:
+    app: mono-cluster
+  ports:
+    - name: cluster
+      port: 6222
+---
+# The application's HTTP API, load-balanced over the ready pods.
+apiVersion: v1
+kind: Service
+metadata:
+  name: mono-cluster
+  namespace: mono-demo
+spec:
+  selector:
+    app: mono-cluster
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: mono-cluster
+  namespace: mono-demo
+spec:
+  serviceName: mono-cluster-nats
+  replicas: 2
+  # Parallel, not OrderedReady: a pod becomes Ready only once JetStream has
+  # quorum, which needs both pods, so ordered start would wait forever for
+  # mono-cluster-0 before creating mono-cluster-1.
+  podManagementPolicy: Parallel
+  selector:
+    matchLabels:
+      app: mono-cluster
+  template:
+    metadata:
+      labels:
+        app: mono-cluster
+    spec:
+      # One replica per node.
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchLabels:
+                  app: mono-cluster
+              topologyKey: kubernetes.io/hostname
+      terminationGracePeriodSeconds: 40
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+      containers:
+        - name: app
+          image: mono-k8s-cluster:0.2.0
+          imagePullPolicy: IfNotPresent
+          env:
+            # The server name: unique within the cluster and stable across
+            # restarts, as a StatefulSet pod name is.
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            # Every pod, this one included, by fully qualified name
+            # (<pod>.<service>.<namespace>.svc.cluster.local). Until a pod's
+            # record is published, a short name falls through the search
+            # domains to the upstream resolver, and an upstream that answers
+            # every name (a fake-IP or split-horizon DNS) sends the route to an
+            # unrelated host. The cluster domain is answered by CoreDNS alone.
+            - name: NATS_ROUTES
+              value: >-
+                nats://mono-cluster-0.mono-cluster-nats.mono-demo.svc.cluster.local:6222,
+                nats://mono-cluster-1.mono-cluster-nats.mono-demo.svc.cluster.local:6222
+            - name: NATS_ROUTE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: mono-cluster-routes
+                  key: password
+            # Replicas of the framework's streams (visits, cron schedule).
+            - name: JS_REPLICAS
+              value: "2"
+            - name: JS_STORE_DIR
+              value: /data/jetstream
+            # How long Start waits for the other pods.
+            - name: JS_READY_TIMEOUT
+              value: 10m
+            - name: HTTP_ADDR
+              value: ":8080"
+            - name: GOMEMLIMIT
+              value: 150MiB
+          ports:
+            - name: http
+              containerPort: 8080
+            - name: cluster
+              containerPort: 6222
+          # Liveness only checks that the process serves HTTP: it must not
+          # depend on JetStream quorum, or losing one pod would restart the
+          # other.
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 10
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            periodSeconds: 5
+            failureThreshold: 2
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: "1"
+              memory: 192Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: data
+              mountPath: /data
+  # JetStream data on a per-pod volume (k3s local-path provisioner), so a
+  # restarted pod rejoins with its stream replicas instead of resyncing them.
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 1Gi
+---
+# Keep at least one pod during voluntary disruptions (node drains, upgrades).
+# A two-server cluster still loses JetStream quorum while either pod is
+# evicted; with three servers and minAvailable: 2 it would not.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: mono-cluster
+  namespace: mono-demo
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: mono-cluster

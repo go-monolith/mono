@@ -4,7 +4,7 @@ This guide walks you through installing and setting up the Monolith Framework in
 
 ## Prerequisites
 
-- **Go 1.25 or higher** - [Download Go](https://golang.org/dl/)
+- **Go 1.26 or higher** - [Download Go](https://golang.org/dl/)
 - **A Go project** or a new directory to create one
 
 ## Step 1: Create a New Go Project (Optional)

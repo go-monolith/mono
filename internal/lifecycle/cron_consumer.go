@@ -129,7 +129,12 @@ func (lm *lifecycleManager) updateCronConsumer(ctx context.Context, store cronCo
 		cfg.Metadata = cronStartMetadata(start)
 	}
 
-	consumer, err := store.UpdateConsumer(ctx, stream, cfg)
+	first := cfg
+	if info.Config.Durable == "" {
+		// Converting a non-durable: see protectedConversion.
+		first = protectedConversion(cfg)
+	}
+	consumer, err := store.UpdateConsumer(ctx, stream, first)
 	if err != nil {
 		return nil, fmt.Errorf("failed to update cron consumer %q: %w", cfg.Name, err)
 	}

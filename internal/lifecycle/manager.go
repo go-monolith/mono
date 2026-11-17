@@ -64,6 +64,14 @@ type LifecycleManager interface {
 	// handler decides that the caller's deadline has passed. Values <= 0 select
 	// types.DefaultDeadlineSkewAllowance. Must be called before Start.
 	SetDeadlineSkewAllowance(d time.Duration)
+	// SetJetStreamReadyTimeout bounds the JetStream wait before plugins and
+	// modules start and each retried JetStream setup step. Values <= 0 select
+	// types.DefaultJetStreamReadyTimeout. Must be called before Start.
+	SetJetStreamReadyTimeout(d time.Duration)
+	// SetJetStreamDefaultReplicas sets the replica count of framework-created
+	// streams whose configuration leaves Replicas at 0. Values <= 0 mean 1.
+	// Must be called before Start.
+	SetJetStreamDefaultReplicas(n int)
 	// SetStatsLogInterval sets the period of the Debug log that reports
 	// SubscriptionStats while running; 0 disables it. Must be called before Start.
 	SetStatsLogInterval(d time.Duration)

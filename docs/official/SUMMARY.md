@@ -47,7 +47,8 @@
 * [🐛 Error Handling](guides/error-handling.md)
 * [🧪 Testing](guides/testing.md)
 * [🧱 Module Boundaries](guides/module-boundaries.md)
-* [⬆️ Upgrading to v0.1.0 and v0.1.2](guides/upgrading.md)
+* [🌐 Clustering and Kubernetes](guides/clustering.md)
+* [⬆️ Upgrading to v0.1.0, v0.1.2 and v0.2.0](guides/upgrading.md)
 * [📃 Logging](guides/logging.md)
 * [💾 Storage Backends](guides/storage-backends.md)
 
@@ -66,3 +67,4 @@
 - [Cron Scheduler](../../examples/cron-scheduler/README.md)
 - [NATS Config File](../../examples/nats-config/README.md)
 - [AutoTLS (ACME / Let's Encrypt)](../../examples/auto-tls/README.md)
+- [Kubernetes Cluster](../../examples/k8s-cluster/README.md)

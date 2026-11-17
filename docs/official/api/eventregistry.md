@@ -342,10 +342,13 @@ startups only report leftovers:
   single deploy removes the only module consuming an event on a stream and adds a different
   one, the new module starts at the removed module's position. Split such a swap across two
   deploys, or remove the legacy durable before upgrading.
-- **Legacy durables are not deleted** on non-work-queue streams. A warning on every startup
-  names each one together with a `nats consumer rm <stream> <name>` command. Remove them once
-  the new durable is confirmed to be working: on an interest-retention stream they keep
-  retaining messages until removed.
+- **The framework does not delete legacy durables** on non-work-queue streams. A warning on
+  every startup names each one together with a `nats consumer rm <stream> <name>` command.
+  Remove them once the new durable is confirmed to be working: on an interest-retention stream
+  they keep retaining messages until removed. Since v0.2.0 the framework raises their
+  inactivity threshold to 1h at startup (nats-server v2.14.10 would otherwise delete them about
+  5s after the server starts, before the migration), so the server itself removes a legacy
+  durable that is no longer pulled 1h after its last pull.
 - **Consumers created after the migration** start from their configured deliver policy. This
   covers a new module consuming the same event, or a durable an operator deleted to force a
   replay. Such a consumer is never moved to a legacy position.
@@ -460,9 +463,11 @@ and the step is a no-op after that:
 - **Other streams:** the new durable is positioned just after the legacy durables' ack floor,
   so the stream is not replayed. This requires a deliver policy of all, by-start-sequence or
   by-start-time; for other deliver policies a warning reports what was not carried over. The
-  legacy durables are **not deleted**. A warning on every startup names each one together with
-  a `nats consumer rm <stream> <name>` command. Remove them once the new durable is confirmed
-  to be working: on an interest-retention stream they keep retaining messages until removed.
+  framework does **not delete** the legacy durables. A warning on every startup names each one
+  together with a `nats consumer rm <stream> <name>` command. Remove them once the new durable
+  is confirmed to be working: on an interest-retention stream they keep retaining messages until
+  removed. Since v0.2.0 their inactivity threshold is raised to 1h at startup, so the server
+  removes one that is no longer pulled 1h after its last pull.
 - **Several modules consuming the same event on the same stream:** their legacy durables
   cannot be told apart. Each new durable resumes after the lowest ack floor, which can
   redeliver some messages but loses none.

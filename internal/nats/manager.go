@@ -36,6 +36,17 @@ type NATSManager interface {
 
 	// ServerInfo returns information about the running server
 	ServerInfo() ServerInfo
+
+	// JetStreamHealth reports the JetStream state of the embedded server; nil
+	// when the server is not running or JetStream is not enabled.
+	JetStreamHealth() *types.JetStreamHealth
+
+	// StopConsumerProtection stops the consumer protection the manager runs
+	// after the server starts (see package jsprotect) and waits for it to
+	// end. The application calls it when Start begins: from then on the
+	// lifecycle protects and converts the consumers itself. Safe to call more
+	// than once.
+	StopConsumerProtection()
 }
 
 // ServerInfo contains information about the running NATS server.
@@ -59,6 +70,11 @@ type natsManager struct {
 	// autoTLS is non-nil only while the server is running with AutoTLS
 	// enabled; it owns the ACME challenge listener.
 	autoTLS *autoTLS
+
+	// protectStop stops the background consumer protection (see protect.go)
+	// and protectDone is closed when it has ended; nil without JetStream.
+	protectStop chan struct{}
+	protectDone chan struct{}
 }
 
 // NewNATSManager creates a new NATS manager with the given options.
@@ -201,21 +217,42 @@ func (m *natsManager) Start(ctx context.Context) error {
 		}
 	}
 
-	// Configure clustering if enabled
+	// Configure clustering if enabled. The programmatic values are merged
+	// into a cluster{} block from the config file instead of replacing it, so
+	// settings only the file can express (TLS, pool size, permissions) stay.
 	if m.config.ClusterEnabled {
-		opts.Cluster = server.ClusterOpts{
-			Name: m.config.ClusterName,
-			Host: m.config.ClusterHost,
-			Port: m.config.ClusterPort,
-		}
-		// Parse cluster routes as URLs
-		for _, route := range m.config.ClusterRoutes {
+		opts.Cluster.Name = m.config.ClusterName
+		opts.Cluster.Host = m.config.ClusterHost
+		opts.Cluster.Port = m.config.ClusterPort
+		// Parse cluster routes as URLs. Errors name the route by index and
+		// never quote it: a route URL may carry credentials.
+		for i, route := range m.config.ClusterRoutes {
+			if err := ValidateRouteURL(i, route); err != nil {
+				return err
+			}
 			u, err := url.Parse(route)
 			if err != nil {
-				return fmt.Errorf("invalid cluster route %q: %w", route, err)
+				return fmt.Errorf("invalid cluster route at index %d: not a valid URL", i)
 			}
 			opts.Routes = append(opts.Routes, u)
 		}
+	}
+
+	if m.config.ServerName != "" {
+		// A JetStream server's RAFT identity is derived from its name: a
+		// different name makes it a new peer, and the cluster removes the
+		// local replicas assigned to the old one. Refuse to rename silently.
+		if opts.ServerName != "" && opts.ServerName != m.config.ServerName {
+			return fmt.Errorf("server name %q (WithNATSServerName) differs from server_name %q in the NATS config file; "+
+				"renaming a JetStream server discards its local replicas: use one of them", m.config.ServerName, opts.ServerName)
+		}
+		opts.ServerName = m.config.ServerName
+	}
+	if err := applyClusterAuth(opts, m.config.ClusterUsername, m.config.ClusterPassword); err != nil {
+		return err
+	}
+	if err := validateClusteredJetStream(opts); err != nil {
+		return err
 	}
 
 	// Bring the ACME challenge listener up before anything can trigger
@@ -264,6 +301,7 @@ func (m *natsManager) Start(ctx context.Context) error {
 	}
 
 	logAttrs := []any{
+		"server_name", ns.Name(),
 		"host", m.config.Host,
 		"port", m.config.Port,
 		"jetstream", m.config.JetStreamEnabled,
@@ -273,7 +311,7 @@ func (m *natsManager) Start(ctx context.Context) error {
 			"cluster_name", m.config.ClusterName,
 			"cluster_host", m.config.ClusterHost,
 			"cluster_port", m.config.ClusterPort,
-			"cluster_routes", m.config.ClusterRoutes,
+			"cluster_routes", redactURLs(m.config.ClusterRoutes),
 		)
 	}
 	m.logger.Info("NATS server started", logAttrs...)
@@ -333,6 +371,11 @@ func (m *natsManager) Start(ctx context.Context) error {
 		}
 		m.js = js
 		m.logger.Info("JetStream enabled", "storage_dir", m.config.StorageDir)
+
+		// Before any application code runs: the server has just recovered
+		// its consumers, and since v2.14.10 a non-durable one is deleted
+		// about 5s later unless it is pulled (see protect.go).
+		m.startConsumerProtection(js)
 	}
 
 	startupOK = true
@@ -350,6 +393,8 @@ func (m *natsManager) Stop(ctx context.Context) error {
 	conn := m.conn
 	m.conn = nil
 	m.mu.Unlock()
+
+	m.StopConsumerProtection()
 
 	// Drain the client connection before stopping the server: closing it
 	// outright can drop a message the server has already routed back to this
@@ -587,4 +632,41 @@ func (m *natsManager) ServerInfo() ServerInfo {
 	}
 
 	return info
+}
+
+// JetStreamHealth reports the JetStream state of the embedded server, read
+// locally (server.Jsz without accounts), so it is cheap enough for a probe.
+// It returns nil when the server is not running or JetStream is not enabled.
+func (m *natsManager) JetStreamHealth() *types.JetStreamHealth {
+	m.mu.RLock()
+	ns := m.server
+	m.mu.RUnlock()
+	if ns == nil || !ns.JetStreamEnabled() {
+		return nil
+	}
+	info, err := ns.Jsz(&server.JSzOptions{})
+	if err != nil {
+		return &types.JetStreamHealth{Message: fmt.Sprintf("JetStream status unavailable: %v", err)}
+	}
+	return jetStreamHealthFromJsz(info)
+}
+
+// jetStreamHealthFromJsz derives the health report from a Jsz result.
+func jetStreamHealthFromJsz(info *server.JSInfo) *types.JetStreamHealth {
+	h := &types.JetStreamHealth{}
+	switch {
+	case info.Disabled:
+		h.Message = "JetStream is disabled"
+	case info.Meta == nil:
+		h.Available = true
+	default:
+		h.Clustered = true
+		h.MetaLeader = info.Meta.Leader
+		h.ClusterSize = info.Meta.Size
+		h.Available = info.Meta.Leader != ""
+		if !h.Available {
+			h.Message = "JetStream cluster has no meta leader (no quorum)"
+		}
+	}
+	return h
 }

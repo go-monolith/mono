@@ -1,7 +1,7 @@
 # Mono Framework
 
 [![Go Reference](https://pkg.go.dev/badge/github.com/go-monolith/mono.svg)](https://pkg.go.dev/github.com/go-monolith/mono)
-[![Go Version](https://img.shields.io/badge/go-1.25+-blue.svg)](https://golang.org/dl/)
+[![Go Version](https://img.shields.io/badge/go-1.26+-blue.svg)](https://golang.org/dl/)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 [![codecov](https://codecov.io/gh/go-monolith/mono/graph/badge.svg)](https://codecov.io/gh/go-monolith/mono)
 
@@ -132,6 +132,7 @@ Modules communicate through NATS messaging patterns rather than direct method ca
 | [analytics](examples/analytics/) | Channel services for high-performance in-process communication |
 | [event-emitter](examples/event-emitter/) | Event publishing with EventEmitter and EventConsumer |
 | [auto-tls](examples/auto-tls/) | Automatic Let's Encrypt certificates for client-to-server connections |
+| [k8s-cluster](examples/k8s-cluster/) | Two replicas on Kubernetes forming one NATS cluster with clustered JetStream |
 
 ## Built-in Components
 

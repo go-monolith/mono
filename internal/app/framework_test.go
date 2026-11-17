@@ -971,11 +971,12 @@ func TestNewFrameworkAppInstance_NATSManagerCreationFailure(t *testing.T) {
 
 // mockNATSManager implements nats.NATSManager for testing
 type mockNATSManager struct {
-	startErr    error
-	stopErr     error
-	startCalled bool
-	stopCalled  bool
-	mu          sync.Mutex
+	jetStreamHealth *types.JetStreamHealth
+	startErr        error
+	stopErr         error
+	startCalled     bool
+	stopCalled      bool
+	mu              sync.Mutex
 }
 
 func (m *mockNATSManager) Start(_ context.Context) error {
@@ -1003,6 +1004,12 @@ func (m *mockNATSManager) JetStream() (jetstream.JetStream, error) {
 func (m *mockNATSManager) ServerInfo() nats.ServerInfo {
 	return nats.ServerInfo{}
 }
+
+func (m *mockNATSManager) JetStreamHealth() *types.JetStreamHealth {
+	return m.jetStreamHealth
+}
+
+func (m *mockNATSManager) StopConsumerProtection() {}
 
 // mockLifecycleManager implements lifecycle.LifecycleManager for testing
 type mockLifecycleManager struct {
@@ -1061,6 +1068,8 @@ func (m *mockLifecycleManager) SetDefaultServiceConcurrency(_ int) {}
 func (m *mockLifecycleManager) SetDrainTimeout(_ time.Duration) {}
 
 func (m *mockLifecycleManager) SetDeadlineSkewAllowance(_ time.Duration) {}
+func (m *mockLifecycleManager) SetJetStreamReadyTimeout(_ time.Duration) {}
+func (m *mockLifecycleManager) SetJetStreamDefaultReplicas(_ int)        {}
 func (m *mockLifecycleManager) SetStatsLogInterval(_ time.Duration)      {}
 
 func (m *mockLifecycleManager) SetServiceDiscovery(_ *types.ServiceDiscoveryConfig) {}

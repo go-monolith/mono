@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
+	"github.com/go-monolith/mono/internal/jsprotect"
 	monoerrors "github.com/go-monolith/mono/pkg/errors"
 	"github.com/go-monolith/mono/pkg/types"
 	"github.com/nats-io/nats.go"
@@ -357,4 +359,23 @@ func WrapJetStreamMsg(msg jetstream.Msg) *types.Msg {
 		// Store the underlying jetstream.Msg for acknowledgment support
 		NatsMsg: msg,
 	}
+}
+
+// Ready reports whether JetStream answers for the account: it requests the
+// account info, which succeeds only when JetStream is enabled and, in a
+// cluster, the meta group has a leader. Like ConsumerInfo, it is a concrete
+// method rather than part of the EventStream interface.
+func (j *NatsJetStream) Ready(ctx context.Context) error {
+	if _, err := j.js.AccountInfo(ctx); err != nil {
+		return fmt.Errorf("JetStream account info: %w", err)
+	}
+	return nil
+}
+
+// ProtectConsumers runs one jsprotect pass: every consumer the server may
+// delete for inactivity at start (see jsprotect.NeedsProtection) gets the
+// threshold d. It returns the number changed and whether every stream and
+// consumer could be checked.
+func (j *NatsJetStream) ProtectConsumers(ctx context.Context, d time.Duration) (int, bool) {
+	return jsprotect.Protect(ctx, j.js, d)
 }

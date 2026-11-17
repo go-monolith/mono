@@ -512,6 +512,9 @@ func (lm *lifecycleManager) markLegacyMigrationDone(ctx context.Context, entries
 	}
 	for _, stream := range order {
 		cfg := eventStreamConfig(entries[last[stream]].Config.Stream, true)
+		// The same replicas setupEventStreamConsumer wrote: a 0 here would
+		// scale a stream created with the default replicas back to one.
+		cfg.Replicas = lm.streamReplicas(cfg.Replicas)
 		if _, err := es.CreateOrUpdateStream(ctx, cfg); err != nil {
 			lm.logger.Warn("Could not mark stream as migrated; the legacy durable migration runs again on the next boot",
 				"stream", stream,

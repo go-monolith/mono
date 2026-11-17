@@ -2,7 +2,9 @@ package nats
 
 import (
 	"fmt"
+	"strings"
 	"time"
+	"unicode"
 
 	"github.com/go-monolith/mono/pkg/types"
 	natsgo "github.com/nats-io/nats.go"
@@ -25,7 +27,15 @@ type NATSConfig struct {
 	ClusterHost      string
 	ClusterPort      int
 	ClusterRoutes    []string
-	MaxPayload       int32
+	// ServerName is the server_name of the embedded server; empty leaves it
+	// to the config file or to nats-server.
+	ServerName string
+	// ClusterUsername and ClusterPassword authenticate routes: the server
+	// requires them from every route and sends them on the routes it opens
+	// whose URL carries no credentials of its own.
+	ClusterUsername string
+	ClusterPassword string
+	MaxPayload      int32
 	// StartupReadyTimeout is the maximum time to wait for the NATS server to be ready for connections.
 	// Defaults to 10 seconds.
 	StartupReadyTimeout time.Duration
@@ -174,6 +184,11 @@ func WithClustering(clusterName, clusterHost string, clusterPort int, routes []s
 		if clusterPort < 1024 || clusterPort > 65535 {
 			return fmt.Errorf("cluster port must be between 1024 and 65535")
 		}
+		for i, route := range routes {
+			if err := ValidateRouteURL(i, route); err != nil {
+				return err
+			}
+		}
 		cfg.ClusterEnabled = true
 		cfg.ClusterName = clusterName
 		cfg.ClusterHost = clusterHost
@@ -183,6 +198,44 @@ func WithClustering(clusterName, clusterHost string, clusterPort int, routes []s
 			cfg.ClusterRoutes = make([]string, len(routes))
 			copy(cfg.ClusterRoutes, routes)
 		}
+		return nil
+	}
+}
+
+// WithServerName sets the server_name of the embedded NATS server. It must not
+// be empty or contain whitespace (nats-server itself rejects spaces; the
+// framework also rejects tabs and newlines).
+func WithServerName(name string) NATSOption {
+	return func(cfg *NATSConfig) error {
+		if err := ValidateServerName(name); err != nil {
+			return err
+		}
+		cfg.ServerName = name
+		return nil
+	}
+}
+
+// ValidateServerName reports whether name is usable as a NATS server_name:
+// not empty and without whitespace.
+func ValidateServerName(name string) error {
+	if name == "" {
+		return fmt.Errorf("server name cannot be empty")
+	}
+	if strings.IndexFunc(name, unicode.IsSpace) >= 0 {
+		return fmt.Errorf("server name %q must not contain whitespace", name)
+	}
+	return nil
+}
+
+// WithClusterAuth sets the credentials of the cluster routes. Neither may be
+// empty.
+func WithClusterAuth(username, password string) NATSOption {
+	return func(cfg *NATSConfig) error {
+		if username == "" || password == "" {
+			return fmt.Errorf("cluster username and password cannot be empty")
+		}
+		cfg.ClusterUsername = username
+		cfg.ClusterPassword = password
 		return nil
 	}
 }
