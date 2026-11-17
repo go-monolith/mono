@@ -125,19 +125,21 @@ Direct in-process communication using Go channels.
 
 ```go
 func (m *AnalyticsModule) RegisterServices(container mono.ServiceContainer) error {
-    // Create channel for event processing
-    eventCh := make(chan *Event, 100)
+    // Create the bidirectional channels
+    in := make(chan *mono.Msg, 100)
+    out := make(chan *mono.Msg, 100)
 
     // Start handler goroutine
-    go m.processEvents(eventCh)
+    go m.processEvents(in, out)
 
     // Register the channel service
-    return container.RegisterChannelService("events", eventCh)
+    return container.RegisterChannelService("events", in, out)
 }
 
-func (m *AnalyticsModule) processEvents(ch chan *Event) {
-    for event := range ch {
-        // Process event
+func (m *AnalyticsModule) processEvents(in <-chan *mono.Msg, out chan<- *mono.Msg) {
+    for msg := range in {
+        // Process the message, then reply
+        out <- msg
     }
 }
 ```
@@ -193,13 +195,16 @@ func (m *PaymentModule) RegisterServices(container mono.ServiceContainer) error 
     )
 }
 
-func (m *PaymentModule) handleProcessPayment(ctx context.Context,
-    req *PaymentRequest) (*PaymentResponse, error) {
+func (m *PaymentModule) handleProcessPayment(ctx context.Context, req *mono.Msg) ([]byte, error) {
+    var p PaymentRequest
+    if err := json.Unmarshal(req.Data, &p); err != nil {
+        return nil, err
+    }
     // Process payment
-    if req.Amount <= 0 {
+    if p.Amount <= 0 {
         return nil, fmt.Errorf("invalid amount")
     }
-    return &PaymentResponse{TransactionID: "TXN-001"}, nil
+    return json.Marshal(PaymentResponse{TransactionID: "TXN-001"})
 }
 ```
 
@@ -267,15 +272,17 @@ Load-balanced asynchronous processing.
 func (m *EmailModule) RegisterServices(container mono.ServiceContainer) error {
     return container.RegisterQueueGroupService(
         "send-email",
-        "email-workers",  // Queue group name
-        m.handleSendEmail,
+        mono.QGHP{QueueGroup: "email-workers", Handler: m.handleSendEmail},
     )
 }
 
-func (m *EmailModule) handleSendEmail(ctx context.Context,
-    req *EmailRequest) error {
+func (m *EmailModule) handleSendEmail(ctx context.Context, msg *mono.Msg) error {
+    var req EmailRequest
+    if err := json.Unmarshal(msg.Data, &req); err != nil {
+        return err
+    }
     // Send email (fire-and-forget)
-    return m.sendEmail(ctx, req)
+    return m.sendEmail(ctx, &req)
 }
 ```
 
@@ -283,13 +290,19 @@ func (m *EmailModule) handleSendEmail(ctx context.Context,
 
 ```go
 // Send message to queue group (no response expected)
-err := helper.SendQueueGroupService(ctx, eventBus, "email", "send-email", &EmailRequest{
-    To: "user@example.com",
-    Subject: "Welcome",
-    Body: "Welcome to our app!",
-})
+err := helper.SendQueueGroupService(
+    ctx,
+    m.emailContainer, // ServiceContainer from SetDependencyServiceContainer
+    "send-email",     // service name
+    json.Marshal,
+    EmailRequest{
+        To:      "user@example.com",
+        Subject: "Welcome",
+        Body:    "Welcome to our app!",
+    },
+)
 if err != nil {
-    // Log error (worker already started processing)
+    // Not accepted: no worker online, overloaded, or timed out
     return err
 }
 // Continue immediately (don't wait for email)
@@ -344,24 +357,29 @@ Durable message processing with JetStream.
 func (m *ArchiveModule) RegisterServices(container mono.ServiceContainer) error {
     return container.RegisterStreamConsumerService(
         "archive-order",
-        "archive-orders-stream",
-        &mono.FetchConfig{MaxMessages: 100, IdleTimeout: 10 * time.Second},
-        m.handleArchiveOrder,
+        mono.StreamConsumerConfig{
+            Stream: mono.StreamConfig{Name: "archive-orders"},
+            Fetch:  mono.FetchConfig{BatchSize: 100, Timeout: 10 * time.Second},
+        },
+        m.handleArchiveOrders,
     )
 }
 
-func (m *ArchiveModule) handleArchiveOrder(ctx context.Context,
-    req *ArchiveRequest, msg *mono.Msg) error {
-    // Process message
-    err := m.archive(ctx, req)
-
-    if err != nil {
-        // Negative acknowledgment (retry later)
-        return msg.Nak()
+// The handler receives a batch and acknowledges each message itself.
+func (m *ArchiveModule) handleArchiveOrders(ctx context.Context, msgs []*mono.Msg) error {
+    for _, msg := range msgs {
+        var req ArchiveRequest
+        if err := json.Unmarshal(msg.Data, &req); err != nil {
+            msg.Term() // Malformed: stop redelivery
+            continue
+        }
+        if err := m.archive(ctx, &req); err != nil {
+            msg.Nak() // Negative acknowledgment (retry later)
+            continue
+        }
+        msg.Ack() // Positive acknowledgment (message processed)
     }
-
-    // Positive acknowledgment (message processed)
-    return msg.Ack()
+    return nil
 }
 ```
 
@@ -369,13 +387,18 @@ func (m *ArchiveModule) handleArchiveOrder(ctx context.Context,
 
 ```go
 // Publish to stream (persisted in JetStream)
-err := helper.PublishStreamConsumerService(
+ack, err := helper.PublishStreamConsumerService(
     ctx,
-    eventBus,
-    "archive",
-    "archive-order",
-    &ArchiveRequest{OrderID: "ORD-001"},
+    m.archiveContainer, // ServiceContainer from SetDependencyServiceContainer("archive", ...)
+    "archive-order",    // service name
+    json.Marshal,
+    ArchiveRequest{OrderID: "ORD-001"},
+    helper.WithMsgID("archive-ORD-001"), // optional: makes a retry safe
 )
+if err != nil {
+    return err
+}
+fmt.Printf("Stored in %s at sequence %d\n", ack.Stream(), ack.Sequence())
 ```
 
 #### Characteristics
@@ -693,8 +716,8 @@ func (m *AuditModule) RegisterEventConsumers(registry mono.EventRegistry) error 
             Retention: mono.WorkQueuePolicy,
         },
         Fetch: mono.FetchConfig{
-            BatchSize:   10,
-            IdleTimeout: 5 * time.Second,
+            BatchSize: 10,
+            Timeout:   5 * time.Second,
         },
     }
 
@@ -801,9 +824,9 @@ The framework enforces consistent naming:
 - Example: `services.payment.process-payment`
 - Framework computes automatically (no wildcards)
 
-**Event Subjects**: `events.<domain>.<version>.<event-type>`
-- Example: `events.order.v1.OrderCreated`
-- Supports wildcards for routing
+**Event Subjects**: `events.<module>.<version>.<event-name>` by default (name in kebab-case)
+- Example: `events.order.v1.order-created`
+- A custom subject is allowed if it is kebab-case and contains the version token. Wildcards are not allowed in definitions, only in subscriptions
 
 **Reserved**: `_mono.*` (internal use only)
 
@@ -815,7 +838,7 @@ See the [multi-module example](../../../examples/multi-module/README.md) for a c
 
 ## Next Steps
 
-- Explore [Module Examples](../../../examples/)
+- Explore [Module Examples](../../../examples/multi-module/README.md)
 - Learn about [Framework Architecture](architecture.md)
 - Review [Core Concepts Overview](README.md)
 

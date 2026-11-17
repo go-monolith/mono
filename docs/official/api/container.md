@@ -27,6 +27,8 @@ func GetStreamConsumerService(name string) (StreamConsumerServiceClient, error)
 
 Each module receives a `ServiceContainer` for registering services that other modules can call. Services support five communication patterns: in-process channels, request-reply, queue groups, stream consumers, and cron (server-scheduled) services.
 
+The framework binds the container to the module before calling `RegisterServices`; do not call `BindModule`, `SetEventBus`, `SetMiddlewareChain`, `SetQueueGroupOptimisticWindow` or `StartChannelRouters` yourself.
+
 ## Service Registration Methods
 
 ### RegisterChannelService
@@ -58,11 +60,6 @@ Registers a bidirectional Go channel service for in-process communication.
 **Example:**
 ```go
 func (m *OrderModule) RegisterServices(container mono.ServiceContainer) error {
-    // Bind container to this module first
-    if err := container.BindModule(m); err != nil {
-        return err
-    }
-
     // Create bidirectional channels
     in := make(chan *mono.Msg, 100)
     out := make(chan *mono.Msg, 100)
@@ -112,9 +109,6 @@ type RequestReplyHandler func(ctx context.Context, req *Msg) (response []byte, e
 **Example:**
 ```go
 func (m *PaymentModule) RegisterServices(container mono.ServiceContainer) error {
-    if err := container.BindModule(m); err != nil {
-        return err
-    }
     return container.RegisterRequestReplyService("process", m.handleProcess)
 }
 
@@ -148,11 +142,13 @@ container.RegisterRequestReplyService("apply-ledger-entry", m.handleLedger,
 
 **Typed Handler (helper):**
 
-For type-safe handlers, use the `TypedRequestReplyHandler`:
+For type-safe handlers, use `types.TypedRequestReplyHandler` (package `github.com/go-monolith/mono/pkg/types`):
 
 ```go
 type TypedRequestReplyHandler[Req any, Resp any] func(ctx context.Context, req Req, msg *Msg) (Resp, error)
 ```
+
+Register it with `helper.RegisterTypedRequestReplyService(container, name, unmarshalReq, marshalResp, handler, opts...)`, or through a typed contract's `Register` (see [Typed Service Contracts](#typed-service-contracts)).
 
 ### RegisterQueueGroupService
 
@@ -197,10 +193,6 @@ type QueueGroupHandler func(ctx context.Context, msg *Msg) error
 **Example:**
 ```go
 func (m *AuditModule) RegisterServices(container mono.ServiceContainer) error {
-    if err := container.BindModule(m); err != nil {
-        return err
-    }
-
     return container.RegisterQueueGroupService("audit-log",
         mono.QGHP{
             QueueGroup: "audit-writers",
@@ -242,11 +234,13 @@ container.RegisterQueueGroupService("send-notification",
 
 **Typed Handler (helper):**
 
-For type-safe handlers, use the `TypedQueueGroupHandler`:
+For type-safe handlers, use `types.TypedQueueGroupHandler` in a `types.TypedQGHP[T]` pair (same fields as `QGHP`):
 
 ```go
 type TypedQueueGroupHandler[T any] func(ctx context.Context, payload T, msg *Msg) error
 ```
+
+Register it with `helper.RegisterTypedQueueGroupService(container, name, unmarshalF, pairs...)`, or through a typed contract's `Register`.
 
 ### RegisterStreamConsumerService
 
@@ -283,20 +277,20 @@ Messages should be acknowledged individually using `Ack()`, `Nak()`, `NakWithDel
 
 **Configuration:**
 
-The `StreamConsumerConfig` is a composite type combining stream, consumer, and fetch configuration. See [JetStream types](../core-concepts/inter-module-communication.md) for full details.
+The `StreamConsumerConfig` is a composite type combining stream, consumer, and fetch configuration:
+
+- `Stream` (`mono.StreamConfig`): `Name` is required. `Subjects` default to `services.<module>.<service>` and `services.<module>.<service>.>`; `Retention` defaults to limits and `Storage` to file.
+- `Consumer` (`mono.ConsumerConfig`): `AckPolicy` defaults to explicit, `AckWait` to 30s and `MaxDeliver` to 3.
+- `Fetch` (`mono.FetchConfig{BatchSize, Timeout}`): defaults 10 messages and 5s.
 
 - **Stream replicas:** a `Stream.Replicas` of 0 takes the framework default ([`WithJetStreamDefaultReplicas`](framework.md#withjetstreamdefaultreplicas), otherwise one replica). The consumer follows the stream unless `Consumer.Replicas` is set.
-- **Durable consumer:** the service is consumed through the durable consumer `<module>-<service>` (with `.` replaced by `-`). The framework sends it as both `Name` and `Durable`, so the server keeps the consumer, and its delivery position, across restarts and idle periods. A `Name` or `Durable` set in `Consumer` is replaced.
+- **Durable consumer:** the service is consumed through the durable consumer `<module>-<service>` (sanitized: spaces and `.` become `-`, other characters outside `[a-zA-Z0-9_-]` are removed). The framework sends it as both `Name` and `Durable`, so the server keeps the consumer, and its delivery position, across restarts and idle periods. A `Name` or `Durable` set in `Consumer` is replaced.
 - **Upgrading from v0.1.x or earlier:** those versions sent only a `Name`, which the server treats as non-durable and deletes after about 5s without a pull; the next start then recreated it from its deliver policy and, with the default (all), replayed the stream. An existing consumer of that kind is converted to a durable in place at startup, keeping its position, and `Stream consumer converted to durable` is logged.
 - **Deliver policy and start position** of an existing consumer cannot be changed by an update: a configuration that changes them fails `Start`. Since the consumer is durable it no longer disappears by itself; delete it with `nats consumer rm <stream> <consumer>` to apply the change (the new consumer starts from the configured deliver policy).
 
 **Example:**
 ```go
 func (m *AnalyticsModule) RegisterServices(container mono.ServiceContainer) error {
-    if err := container.BindModule(m); err != nil {
-        return err
-    }
-
     config := mono.StreamConsumerConfig{
         Stream: mono.StreamConfig{
             Name:     "events",
@@ -307,7 +301,7 @@ func (m *AnalyticsModule) RegisterServices(container mono.ServiceContainer) erro
             MaxAckPending: 1000,
         },
         Fetch: mono.FetchConfig{
-            MaxMessages: 100,
+            BatchSize: 100,
         },
     }
 
@@ -330,11 +324,13 @@ func (m *AnalyticsModule) handleEventBatch(ctx context.Context, msgs []*mono.Msg
 
 **Typed Handler (helper):**
 
-For type-safe handlers, use the `TypedStreamConsumerHandler`:
+For type-safe handlers, use `types.TypedStreamConsumerHandler`:
 
 ```go
 type TypedStreamConsumerHandler[T any] func(ctx context.Context, payloads []T, msgs []*Msg) error
 ```
+
+Register it with `helper.RegisterTypedStreamConsumerService(container, name, config, unmarshalF, handler)`, or through a typed contract's `Register`.
 
 ### RegisterCronService
 
@@ -377,7 +373,7 @@ Acknowledgement is owned by the framework: return `nil` to Ack the occurrence, o
 | `Deprecated` | `bool` | When true, purge the schedule on deploy and don't start the consumer (keep the code) |
 
 **Returns:**
-- `error` - Nil on success; non-nil if validation fails (e.g. empty `Schedule`, both `Payload` and `SourceSubject` set, invalid `TimeZone`, `Replicas` outside 0..5)
+- `error` - Nil on success; non-nil if validation fails (e.g. empty `Schedule`, both `Payload` and `SourceSubject` set, invalid `TimeZone`, `Replicas` outside 0..5, nil handler, `TTL` set below 1s, `SourceSubject` equal to `services.<module>.<name>`)
 
 **Use Cases:**
 - Periodic work: nightly rollups, cache warmups, heartbeat emits, downsampling
@@ -603,10 +599,14 @@ type ServiceEntry struct {
     ConsumerChannels      map[string]chan *Msg  // Per-consumer output channels
     ConsumerMu            sync.RWMutex
     RequestHandler        RequestReplyHandler
+    Options               ServiceOptions // worker pool bounds (request-reply)
     QueueGroup            string
     QueueHandlers         []QGHP
     StreamConsumerConfig  *StreamConsumerConfig
     StreamConsumerHandler StreamConsumerHandler
+    CronConfig            *CronServiceConfig
+    CronHandler           CronHandler
+    ScheduleSubject       string // cron: internal schedule subject
     Contract              *BaseServiceDefinition // set when registered through a typed contract
     ModuleName            string
     Subject               string
@@ -668,13 +668,25 @@ func StreamConsumerService[T any](moduleName, serviceName string) StreamConsumer
 
 All three have `WithMarshaler`, `WithUnmarshaler` (JSON by default), `ToBase()` and `Subject()`. The constructors panic on a module or service name that is not kebab-case.
 
-**Message IDs.** `Publish` (and `helper.PublishStreamConsumerService`) accept `helper.WithMsgID(id)`, which sends the JetStream message ID header (`Nats-Msg-Id`). The stream stores an ID once within its duplicate window (`StreamConfig.Duplicates`, 2 minutes when zero) and acknowledges a repeat with `Duplicate() == true` and the sequence of the stored message. Use it to retry a failed publish: a publish error, for example a timeout while a cluster has no quorum, does not prove that the message was not stored. Derive the ID from the message's identity (an order ID, an idempotency key), not from the attempt. An empty ID fails with `helper.ErrEmptyMsgID`.
+**Message IDs.** `Publish` (and `helper.PublishStreamConsumerService`) accept `helper.WithMsgID(id)`, which sends the JetStream message ID header (`Nats-Msg-Id`). The stream stores an ID once within its duplicate window (`StreamConfig.Duplicates`, 2 minutes when zero) and acknowledges a repeat with `Duplicate() == true` and the sequence of the stored message. Use it to retry a failed publish: a publish error, for example a timeout while a cluster has no quorum, does not prove that the message was not stored. Derive the ID from the message's identity (an order ID, an idempotency key), not from the attempt. An empty ID fails with `helper.ErrEmptyMsgID`. The header name is available as `helper.MsgIDHeader` (`"Nats-Msg-Id"`), for example to set it yourself on a `PublishMsg`.
 
 ```go
 ack, err := contract.OrderPlaced.Publish(ctx, services, event, helper.WithMsgID("order-"+event.OrderID))
 ```
 
 `Register` records the contract in `ServiceEntry.Contract`. It returns `ErrServiceContractMismatch` when the container belongs to a different module than the contract names.
+
+### String-based typed helpers
+
+The contracts are built on lower-level helpers that take the service name as a string. They register typed handlers without declaring a contract (nothing is recorded in `ServiceEntry.Contract`):
+
+```go
+func RegisterTypedRequestReplyService[Req, Resp any](container ServiceContainer, name string, unmarshalReq Unmarshaler, marshalResp Marshaler, handler TypedRequestReplyHandler[Req, Resp], opts ...ServiceOption) error
+func RegisterTypedQueueGroupService[T any](container ServiceContainer, name string, unmarshalF Unmarshaler, pairs ...TypedQGHP[T]) error
+func RegisterTypedStreamConsumerService[T any](container ServiceContainer, name string, config StreamConsumerConfig, unmarshalF Unmarshaler, handler TypedStreamConsumerHandler[T]) error
+```
+
+The consumer-side counterparts are `helper.CallRequestReplyService`, `helper.SendQueueGroupService` and `helper.PublishStreamConsumerService`.
 
 {% hint style="info" %}
 **Dependency containers are read-only views.** The container a module receives in `SetDependencyServiceContainer` allows lookups only. Mutating calls are recorded as boundary violations, and fail with `ErrModuleBoundaryViolation` under `WithStrictModuleBoundaries`. Since v0.1.2, so is a lookup of a service missing from the module's `ConsumeServices()`, when the module implements it (by default only when the service exists: a lookup of a service the dependency does not provide fails with `ErrServiceNotFound`), and `Entries()` on the view returns descriptions of the services: copies without the provider's handlers and channels, in both modes, with one warning logged for the first call per dependency. Changing one, including its stream or consumer configuration, has no effect on the provider. See the [Module Boundaries Guide](../guides/module-boundaries.md).
@@ -715,6 +727,8 @@ The framework therefore runs these handlers on a **bounded worker pool per subsc
 type ServiceOptions struct {
     MaxConcurrency int // handlers running at once on this instance; 0 = default, 1 = serial, in order
     MaxPending     int // messages waiting for a free worker; 0 = default
+    PendingMsgs    int // NATS client buffer behind the pool; 0 = default, -1 = unlimited
+    PendingBytes   int // same, in bytes
 }
 ```
 
@@ -743,23 +757,25 @@ Workers are started on demand and exit when idle, so an idle service holds no go
 
 ## Configuration Table
 
-| Property | Type | Description | Example |
-|----------|------|-------------|---------|
-| Service Name | `string` | Unique service identifier | `"place-order"` |
-| Request Timeout | `time.Duration` | Max wait for response | `5 * time.Second` |
-| Message Size | `int` | Max message payload | `1048576` (1MB) |
-| Batch Size | `int` | Messages per batch | `100` |
-| Max Concurrency | `int` | Handlers running at once per subscription | `32` |
-| Max Pending | `int` | Messages waiting for a worker per subscription | `256` |
+| Property | Where it is set | Example |
+|----------|-----------------|---------|
+| Service name | `name` argument of `Register*` (kebab-case) | `"place-order"` |
+| Call timeout | the caller's `context` deadline | `context.WithTimeout(ctx, 5*time.Second)` |
+| Max message size | `mono.WithNATSMaxPayload(bytes)` | `2 * 1024 * 1024` |
+| Stream consumer batch size | `FetchConfig.BatchSize` | `100` |
+| Max concurrency | `mono.WithMaxConcurrency(n)` / `ServiceOptions.MaxConcurrency` | `32` |
+| Max pending | `mono.WithMaxPending(n)` / `ServiceOptions.MaxPending` | `256` |
 
 ## Default Configuration
 
 | Setting | Default |
 |---------|---------|
-| Request Timeout | 30 seconds |
-| Max Message Size | 1 MB |
-| Queue Group Batch Size | 10 |
-| Stream Consumer Batch | 100 |
+| Request-reply call timeout (no context deadline) | 30 seconds |
+| Queue group `Send` ACK timeout (no context deadline) | 5 seconds |
+| Max message size | 1 MB |
+| Stream consumer batch (`FetchConfig.BatchSize`) | 10 |
+| Stream consumer fetch timeout (`FetchConfig.Timeout`) | 5 seconds |
+| Stream consumer `AckWait` / `MaxDeliver` | 30 seconds / 3 |
 | Max Concurrency (request-reply) | `runtime.GOMAXPROCS(0) * 4` |
 | Max Concurrency (queue group, event consumer) | `1` |
 | Max Pending | `16 × MaxConcurrency` (minimum 256) |
@@ -777,11 +793,6 @@ type PaymentModule struct {
 func (m *PaymentModule) Name() string { return "payment" }
 
 func (m *PaymentModule) RegisterServices(container mono.ServiceContainer) error {
-    // Bind container to this module first
-    if err := container.BindModule(m); err != nil {
-        return err
-    }
-
     // Request-reply service for synchronous calls
     if err := container.RegisterRequestReplyService(
         "process",

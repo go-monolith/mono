@@ -65,16 +65,18 @@ Each module receives its own `ServiceContainer` for two purposes:
 ### ServiceContainer Interface
 
 ```go
+// Abridged; see the ServiceContainer API for every method.
 type ServiceContainer interface {
     // Register services (provider side)
     RegisterChannelService(name string, in chan *Msg, out chan *Msg) error
-    RegisterRequestReplyService(name string, handler RequestReplyHandler) error
+    RegisterRequestReplyService(name string, handler RequestReplyHandler, opts ...ServiceOption) error
     RegisterQueueGroupService(name string, pairs ...QGHP) error
     RegisterStreamConsumerService(name string, config StreamConsumerConfig, handler StreamConsumerHandler) error
     RegisterCronService(name string, config CronServiceConfig, handler CronHandler) error
 
     // Get services (consumer side)
     GetChannelService(serviceName string, consumerModule string) (in chan *Msg, out chan *Msg, err error)
+    MustGetChannelService(serviceName string, consumerModule string) (in chan *Msg, out chan *Msg)
     GetRequestReplyService(name string) (RequestReplyServiceClient, error)
     GetQueueGroupService(name string) (QueueGroupServiceClient, error)
     GetStreamConsumerService(name string) (StreamConsumerServiceClient, error)
@@ -83,6 +85,7 @@ type ServiceContainer interface {
     // Query
     Has(name string) bool
     Entries() []*ServiceEntry
+    Unregister(name string) error
 }
 ```
 
@@ -293,7 +296,9 @@ The framework detects and rejects circular dependencies at startup:
 // OrderModule depends on PaymentModule
 // PaymentModule depends on OrderModule (circular!)
 
-// Error: circular dependency detected: order -> payment -> order
+// Error: failed to resolve dependencies: ... circular dependency detected (chain: order -> payment -> order)
+// errors.Is(err, monoerrors.ErrCircularDependency) reports true
+// (monoerrors = "github.com/go-monolith/mono/pkg/errors")
 ```
 
 ## Subject Naming Convention

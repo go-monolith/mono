@@ -28,7 +28,7 @@ type ServiceConsumerModule interface { ConsumeServices() []BaseServiceDefinition
 
 ## Overview
 
-All modules must implement the `Module` interface. Beyond that, modules can optionally implement additional interfaces to declare capabilities like logging, event bus access, service provision, health checking, and more.
+All modules must implement the `Module` interface. Beyond that, modules can optionally implement additional interfaces to declare capabilities like event bus access, service provision, health checking, and more.
 
 ## Module Interface (Required)
 
@@ -37,7 +37,7 @@ Every module must implement these three methods:
 **Example:**
 ```go
 type MyModule struct {
-    logger types.Logger
+    logger mono.Logger
 }
 
 func (m *MyModule) Name() string {
@@ -81,6 +81,8 @@ func (m *MyModule) SetEventBus(eventBus mono.EventBus) {
 
 **Example:**
 ```go
+var OrderCreatedV1 = helper.EventDefinition[OrderCreatedEvent]("order", "OrderCreated", "v1")
+
 type OrderModule struct {
     eventBus mono.EventBus
 }
@@ -90,9 +92,7 @@ func (m *OrderModule) SetEventBus(eventBus mono.EventBus) {
 }
 
 func (m *OrderModule) publishOrderCreated(ctx context.Context, orderID string) error {
-    return m.eventBus.PublishWithContext(ctx, "events.order.created", &OrderCreatedEvent{
-        OrderID: orderID,
-    })
+    return OrderCreatedV1.Publish(m.eventBus, OrderCreatedEvent{OrderID: orderID}, nil)
 }
 ```
 
@@ -113,7 +113,7 @@ type DependentModule interface {
 ```
 
 {% hint style="warning" %}
-**Circular dependencies are rejected.** The framework validates the dependency graph during registration and returns an error if cycles are detected.
+**Circular dependencies are rejected.** The framework validates the dependency graph during `Start` and returns an error if cycles are detected.
 {% endhint %}
 
 **When to implement:** When your module requires other modules to be initialized first and needs access to their services.
@@ -137,7 +137,7 @@ func (m *OrderModule) SetDependencyServiceContainer(dep string, container mono.S
 **Framework guarantees:**
 - Dependencies are started before this module
 - `SetDependencyServiceContainer` is called for each dependency before `RegisterServices` and `Start`
-- Circular dependencies are detected and rejected during registration
+- Circular dependencies are detected and rejected when the application starts
 
 **Example:**
 ```go
@@ -195,9 +195,13 @@ func (m *PaymentModule) RegisterServices(container mono.ServiceContainer) error 
     )
 }
 
-func (m *PaymentModule) handleProcessPayment(ctx context.Context, req *PaymentRequest) (*PaymentResponse, error) {
+func (m *PaymentModule) handleProcessPayment(ctx context.Context, req *mono.Msg) ([]byte, error) {
+    var payment PaymentRequest
+    if err := json.Unmarshal(req.Data, &payment); err != nil {
+        return nil, fmt.Errorf("invalid request: %w", err)
+    }
     // Process payment...
-    return &PaymentResponse{}, nil
+    return json.Marshal(&PaymentResponse{})
 }
 ```
 
@@ -211,18 +215,29 @@ func (m *PaymentModule) RegisterServices(container mono.ServiceContainer) error 
     if err := container.RegisterRequestReplyService("process", m.handleProcess); err != nil {
         return err
     }
-    if err := container.RegisterQueueGroupService("audit", m.handleAudit); err != nil {
+    if err := container.RegisterQueueGroupService("audit",
+        mono.QGHP{QueueGroup: "audit-workers", Handler: m.handleAudit},
+    ); err != nil {
         return err
     }
     return nil
 }
 
-func (m *PaymentModule) handleProcess(ctx context.Context, req *PaymentRequest) (*PaymentResponse, error) {
-    return m.processor.Process(ctx, req)
+func (m *PaymentModule) handleProcess(ctx context.Context, req *mono.Msg) ([]byte, error) {
+    var payment PaymentRequest
+    if err := json.Unmarshal(req.Data, &payment); err != nil {
+        return nil, fmt.Errorf("invalid request: %w", err)
+    }
+    resp, err := m.processor.Process(ctx, &payment)
+    if err != nil {
+        return nil, err
+    }
+    return json.Marshal(resp)
 }
 
-func (m *PaymentModule) handleAudit(ctx context.Context, msg mono.Msg) {
+func (m *PaymentModule) handleAudit(ctx context.Context, msg *mono.Msg) error {
     // Audit logging
+    return nil
 }
 ```
 
@@ -311,10 +326,15 @@ type EventEmitterModule interface {
 
 **Signature:**
 ```go
+var (
+    OrderCreatedV1   = helper.EventDefinition[OrderCreatedEvent]("order", "OrderCreated", "v1")
+    OrderCancelledV1 = helper.EventDefinition[OrderCancelledEvent]("order", "OrderCancelled", "v1")
+)
+
 func (m *OrderModule) EmitEvents() []mono.BaseEventDefinition {
     return []mono.BaseEventDefinition{
-        mono.DefineEvent("events.order.created"),
-        mono.DefineEvent("events.order.cancelled"),
+        OrderCreatedV1.ToBase(),
+        OrderCancelledV1.ToBase(),
     }
 }
 ```
@@ -327,22 +347,25 @@ type OrderCreatedEvent struct {
     Time    time.Time `json:"time"`
 }
 
+// Subject: events.order.v1.order-created
+var OrderCreatedV1 = helper.EventDefinition[OrderCreatedEvent]("order", "OrderCreated", "v1")
+
 type OrderModule struct {
     eventBus mono.EventBus
 }
 
 func (m *OrderModule) EmitEvents() []mono.BaseEventDefinition {
     return []mono.BaseEventDefinition{
-        mono.DefineEvent("events.order.created"),
+        OrderCreatedV1.ToBase(),
     }
 }
 
 func (m *OrderModule) publishOrderCreated(ctx context.Context, orderID string, total float64) error {
-    return m.eventBus.PublishWithContext(ctx, "events.order.created", &OrderCreatedEvent{
+    return OrderCreatedV1.Publish(m.eventBus, OrderCreatedEvent{
         OrderID: orderID,
         Total:   total,
         Time:    time.Now(),
-    })
+    }, nil)
 }
 ```
 
@@ -359,6 +382,8 @@ type EventConsumerModule interface {
 ```
 
 **When to implement:** When your module subscribes to events published by other modules.
+
+**Note:** This interface extends only `Module`, not `EventBusAwareModule`. The `EventRegistry` provides event discovery and registration without requiring direct EventBus access.
 
 ### ServiceConsumerModule
 
@@ -383,8 +408,6 @@ func (m *OrderModule) ConsumeServices() []types.BaseServiceDefinition {
 
 The framework calls `ConsumeServices()` once when the module starts, after its dependency containers are set (the list may be built from what the module was wired with), and validates it: each contract must name a module in `Dependencies()` (or a plugin), that module must have registered the service, and the registered service type must match. A mismatch fails the start (`ErrModuleStartFailed` wrapping `ErrMissingDependency`, `ErrServiceNotFound` or `ErrServiceContractMismatch`) instead of surfacing on the first call. Since v0.1.2 the list is complete: a lookup of a request-reply, queue group or stream consumer service of a dependency that is not in it, or a publish or request to that service's subject on the module's event bus, is an `undeclared-service-use` boundary violation (recorded by default, rejected under `WithStrictModuleBoundaries`). By default a lookup of a service the dependency does not provide fails with `ErrServiceNotFound` and is not a violation. The list is also part of the module's `ModuleBoundaryReport`, with the contracts not used so far. See the [Module Boundaries Guide](../guides/module-boundaries.md).
 
-**Note:** This interface extends only `Module`, not `EventBusAwareModule`. The `EventRegistry` provides event discovery and registration without requiring direct EventBus access.
-
 **Signature:**
 ```go
 func (m *NotificationModule) RegisterEventConsumers(registry mono.EventRegistry) error {
@@ -398,12 +421,13 @@ func (m *NotificationModule) RegisterEventConsumers(registry mono.EventRegistry)
     return registry.RegisterEventConsumer(eventDef, m.handleOrderCreated, m)
 }
 
-func (m *NotificationModule) handleOrderCreated(ctx context.Context, msg *mono.Msg) {
+func (m *NotificationModule) handleOrderCreated(ctx context.Context, msg *mono.Msg) error {
     var event OrderCreatedEvent
     if err := json.Unmarshal(msg.Data, &event); err != nil {
-        return
+        return err
     }
     // Send notification...
+    return nil
 }
 ```
 
@@ -416,10 +440,15 @@ type EventRegistry interface {
     GetAllEvents() []BaseEventDefinition
 
     // Consumer registration
-    RegisterEventConsumer(eventDef BaseEventDefinition, handler EventConsumerHandler, module Module) error
+    RegisterEventConsumer(eventDef BaseEventDefinition, handler EventConsumerHandler, module Module, queueGroup ...string) error
+    RegisterEventConsumerWithOptions(eventDef BaseEventDefinition, handler EventConsumerHandler, module Module, opts EventConsumerOptions) error
     RegisterEventStreamConsumer(eventDef BaseEventDefinition, config StreamConsumerConfig, handler EventStreamConsumerHandler, module Module) error
+
+    // ... plus RegisterEvent, Entries, StreamConsumerEntries and SetMiddlewareChain
 }
 ```
+
+See the [EventRegistry API](eventregistry.md) for the full interface.
 
 **Example:**
 ```go
@@ -438,12 +467,13 @@ func (m *AuditModule) RegisterEventConsumers(registry mono.EventRegistry) error 
     return registry.RegisterEventConsumer(eventDef, m.handleOrderCreated, m)
 }
 
-func (m *AuditModule) handleOrderCreated(ctx context.Context, msg *mono.Msg) {
+func (m *AuditModule) handleOrderCreated(ctx context.Context, msg *mono.Msg) error {
     var event OrderCreatedEvent
     if err := json.Unmarshal(msg.Data, &event); err != nil {
-        return
+        return err
     }
     fmt.Printf("Audit: Order %s created\n", event.OrderID)
+    return nil
 }
 ```
 
@@ -453,8 +483,13 @@ func (m *AuditModule) handleOrderCreated(ctx context.Context, msg *mono.Msg) {
 type MiddlewareModule interface {
     Module
 
-    // RegisterHooks registers middleware hooks with the framework.
-    RegisterHooks(runner MiddlewareChainRunner) error
+    // Each hook returns the (possibly modified) value for the next middleware.
+    OnModuleLifecycle(ctx context.Context, event ModuleLifecycleEvent) ModuleLifecycleEvent
+    OnServiceRegistration(ctx context.Context, reg ServiceRegistration) ServiceRegistration
+    OnConfigurationChange(ctx context.Context, event ConfigurationEvent) ConfigurationEvent
+    OnOutgoingMessage(octx OutgoingMessageContext) OutgoingMessageContext
+    OnEventConsumerRegistration(ctx context.Context, entry EventConsumerEntry) EventConsumerEntry
+    OnEventStreamConsumerRegistration(ctx context.Context, entry EventStreamConsumerEntry) EventStreamConsumerEntry
 }
 ```
 
@@ -533,15 +568,18 @@ func (m *DocumentModule) Start(ctx context.Context) error {
 
 ### Startup Order (per module)
 
-1. `SetContainer()` - Plugin modules only
+Before any regular module starts, the framework collects `EmitEvents()` from every module implementing EventEmitterModule. Then, for each module in dependency order:
+
+1. ServiceContainer created and bound to the module
 2. `SetPlugin()` - For modules implementing UsePluginModule
 3. `SetDependencyServiceContainer()` - Provide dependency containers
-4. `SetEventBus()` - Provide event bus
-5. `RegisterServices()` - Register this module's services
-6. `EmitEvents()` - Declare emitted events
+4. `ConsumeServices()` - Validated, for modules implementing ServiceConsumerModule
+5. `SetEventBus()` - Provide event bus
+6. `RegisterServices()` - Register this module's services
 7. `RegisterEventConsumers()` - Register event handlers
 8. `Start()` - Initialize module
-9. NATS subscriptions created
+
+After all modules have started, channel service routers are started and the NATS subscriptions are created. `SetContainer()` is called on plugin modules when the plugins start. Middleware modules only get `Start()`.
 
 ### Overall Startup Order
 
@@ -604,6 +642,9 @@ func (m *MyModule) Stop(ctx context.Context) error {
 ### Complete Module Example
 
 ```go
+// Subject: events.order.v1.order-created
+var OrderCreatedV1 = helper.EventDefinition[OrderCreatedEvent]("order", "OrderCreated", "v1")
+
 type OrderModule struct {
     eventBus          mono.EventBus
     paymentContainer  mono.ServiceContainer
@@ -647,16 +688,13 @@ func (m *OrderModule) SetDependencyServiceContainer(dep string, container mono.S
 
 // ServiceProviderModule interface
 func (m *OrderModule) RegisterServices(container mono.ServiceContainer) error {
-    if err := container.BindModule(m); err != nil {
-        return err
-    }
     return container.RegisterRequestReplyService("create-order", m.handleCreateOrder)
 }
 
 // EventEmitterModule interface
 func (m *OrderModule) EmitEvents() []mono.BaseEventDefinition {
     return []mono.BaseEventDefinition{
-        helper.EventDefinition[OrderCreatedEvent]("order", "OrderCreated", "v1").ToBase(),
+        OrderCreatedV1.ToBase(),
     }
 }
 
@@ -678,8 +716,9 @@ func (m *OrderModule) handleCreateOrder(ctx context.Context, req *mono.Msg) ([]b
     order := &Order{ID: "ORD-001"}
 
     // Publish event
-    eventData, _ := json.Marshal(&OrderCreatedEvent{OrderID: order.ID})
-    m.eventBus.Publish("events.order.created.v1", eventData)
+    if err := OrderCreatedV1.Publish(m.eventBus, OrderCreatedEvent{OrderID: order.ID}, nil); err != nil {
+        return nil, err
+    }
 
     return json.Marshal(&CreateOrderResponse{Order: order})
 }

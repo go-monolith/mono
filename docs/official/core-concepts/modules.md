@@ -31,15 +31,23 @@ The framework manages a strict lifecycle for each module:
 ```
 1. Application Start
    │
+   ├─→ Start plugins, then middleware modules
+   │
    ├─→ Resolve dependencies (topological sort)
    │
+   ├─→ Collect EmitEvents() from every emitter module
+   │
    ├─→ For each module in dependency order:
-   │   ├─ Create ServiceContainer
+   │   ├─ Create and bind ServiceContainer
+   │   ├─ Call SetPlugin()
    │   ├─ Call SetDependencyServiceContainer()
+   │   ├─ Validate ConsumeServices()
    │   ├─ Call SetEventBus()
    │   ├─ Call RegisterServices()
-   │   ├─ Call Start()
-   │   └─ Set up NATS subscriptions
+   │   ├─ Call RegisterEventConsumers()
+   │   └─ Call Start()
+   │
+   ├─→ Set up NATS subscriptions for all modules
    │
    └─ Application Ready
 
@@ -51,9 +59,13 @@ The framework manages a strict lifecycle for each module:
 
 3. Application Stop
    │
-   ├─→ For each module in REVERSE dependency order:
-   │   ├─ Drain subscriptions
-   │   └─ Call Stop()
+   ├─→ Drain all subscriptions and wait for in-flight handlers
+   │   (module by module, in REVERSE dependency order)
+   │
+   ├─→ Cancel the runtime context
+   │
+   ├─→ Call Stop() on each module in REVERSE dependency order,
+   │   then on middleware modules, then on plugins
    │
    └─ Shutdown Complete
 ```
@@ -108,7 +120,8 @@ func (m *MyModule) SetDependencyServiceContainer(
     module string,
     container mono.ServiceContainer) {
     if module == "payment" {
-        m.paymentService = container.RequestReplyServiceClient(...)
+        // Look services up later, e.g. container.GetRequestReplyService("process-payment")
+        m.paymentContainer = container
     }
 }
 ```
@@ -172,10 +185,10 @@ func (m *MyModule) RegisterEventConsumers(registry mono.EventRegistry) error {
 Report custom health status:
 
 ```go
-func (m *MyModule) Health(ctx context.Context) mono.ModuleHealth {
-    return mono.ModuleHealth{
+func (m *MyModule) Health(ctx context.Context) mono.HealthStatus {
+    return mono.HealthStatus{
         Healthy: m.isHealthy(),
-        Status: "Running",
+        Message: "running",
     }
 }
 ```
@@ -187,11 +200,17 @@ func (m *MyModule) Health(ctx context.Context) mono.ModuleHealth {
 A special module that starts first and stops last:
 
 ```go
-type MyPlugin struct {}
+type MyPlugin struct {
+    container mono.ServiceContainer
+}
 
 func (p *MyPlugin) Name() string { return "my-plugin" }
 func (p *MyPlugin) Start(context.Context) error { return nil }
 func (p *MyPlugin) Stop(context.Context) error  { return nil }
+
+// PluginModule: the framework hands the plugin its own container
+func (p *MyPlugin) SetContainer(c mono.ServiceContainer) { p.container = c }
+func (p *MyPlugin) Container() mono.ServiceContainer     { return p.container }
 ```
 
 Register with `app.RegisterPlugin(plugin, "alias")`.
@@ -221,17 +240,18 @@ package orderservice
 
 import (
     "context"
+    "encoding/json"
     "log/slog"
 
     "github.com/go-monolith/mono"
-    "my-app/modules/payment"
+    paymentcontract "my-app/modules/payment/contract" // only the provider's contract package
 )
 
 // Order module with dependencies, services, and events
 type OrderModule struct {
-    eventBus       mono.EventBus
-    paymentService payment.ServiceClient
-    storage        StoragePlugin
+    eventBus mono.EventBus
+    payment  mono.ServiceLookup // payment's container, used through its contract
+    storage  StoragePlugin
 }
 
 // Required: Module interface
@@ -262,8 +282,13 @@ func (m *OrderModule) SetDependencyServiceContainer(
     module string,
     container mono.ServiceContainer) {
     if module == "payment" {
-        m.paymentService = payment.NewServiceClient(container)
+        m.payment = container
     }
+}
+
+// Calls payment through its typed contract
+func (m *OrderModule) charge(ctx context.Context, amount float64) (paymentcontract.PaymentResponse, error) {
+    return paymentcontract.Process.Call(ctx, m.payment, paymentcontract.PaymentRequest{Amount: amount})
 }
 
 // Optional: ServiceProviderModule (provide order service)
@@ -272,11 +297,14 @@ func (m *OrderModule) RegisterServices(container mono.ServiceContainer) error {
         m.handleCreateOrder)
 }
 
-func (m *OrderModule) handleCreateOrder(ctx context.Context,
-    req *CreateOrderRequest) (*Order, error) {
+func (m *OrderModule) handleCreateOrder(ctx context.Context, req *mono.Msg) ([]byte, error) {
+    var createReq CreateOrderRequest
+    if err := json.Unmarshal(req.Data, &createReq); err != nil {
+        return nil, err
+    }
     order := &Order{ID: "ORD-001"}
     slog.Info("Creating order", "id", order.ID)
-    return order, nil
+    return json.Marshal(order)
 }
 
 // Optional: EventEmitterModule (emit OrderCreated events)
@@ -287,10 +315,10 @@ func (m *OrderModule) EmitEvents() []mono.BaseEventDefinition {
 }
 
 // Optional: HealthCheckableModule
-func (m *OrderModule) Health(ctx context.Context) mono.ModuleHealth {
-    return mono.ModuleHealth{
+func (m *OrderModule) Health(ctx context.Context) mono.HealthStatus {
+    return mono.HealthStatus{
         Healthy: true,
-        Status: "Ready",
+        Message: "ready",
     }
 }
 
@@ -374,10 +402,17 @@ func (m *MyModule) RegisterServices(container mono.ServiceContainer) error {
         m.handleGetUser)
 }
 
-func (m *MyModule) handleGetUser(ctx context.Context,
-    req *GetUserRequest) (*User, error) {
+func (m *MyModule) handleGetUser(ctx context.Context, req *mono.Msg) ([]byte, error) {
+    var getReq GetUserRequest
+    if err := json.Unmarshal(req.Data, &getReq); err != nil {
+        return nil, err
+    }
     // Fetch from database
-    return m.db.GetUser(ctx, req.UserID)
+    user, err := m.db.GetUser(ctx, getReq.UserID)
+    if err != nil {
+        return nil, err
+    }
+    return json.Marshal(user)
 }
 ```
 
@@ -385,14 +420,12 @@ func (m *MyModule) handleGetUser(ctx context.Context,
 
 ```go
 func (m *MyModule) RegisterEventConsumers(registry mono.EventRegistry) error {
-    return registry.RegisterEventConsumer(
-        orderCreatedDef,
-        m.handleOrderCreated,
-        m)
+    // Typed registration: the event is unmarshaled for the handler
+    return helper.RegisterTypedEventConsumer(registry, OrderCreatedV1, m.handleOrderCreated, m)
 }
 
 func (m *MyModule) handleOrderCreated(ctx context.Context,
-    event *OrderCreatedEvent,
+    event OrderCreatedEvent,
     msg *mono.Msg) error {
     // Process order
     return nil
@@ -431,7 +464,7 @@ func TestOrderModule(t *testing.T) {
 ## Next Steps
 
 - Learn about [Inter-Module Communication](inter-module-communication.md) patterns
-- Explore [Module Examples](../../../examples/)
+- Explore [Module Examples](../../../examples/multi-module/README.md)
 - Review the [Event Emitter Example](../../../examples/event-emitter/README.md)
 
 ---
