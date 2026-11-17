@@ -107,7 +107,7 @@ kubectl drain <node> --ignore-daemonsets --delete-emptydir-data
 kubectl uncordon <node>
 ```
 
-The PodDisruptionBudget (`minAvailable: 2`) lets a drain evict one application pod. The evicted pod usually cannot run elsewhere: anti-affinity allows one pod per node, and on storage bound to a node its volume can't move. It stays Pending until the node is uncordoned. A second drain on another node meanwhile cannot evict its pod (in the test it gave up after its 30 s timeout), so the cluster keeps its quorum. Drain one node at a time, and uncordon it before the next.
+The PodDisruptionBudget (`minAvailable: 2`) lets a drain evict one application pod. The evicted pod usually cannot run elsewhere: anti-affinity allows one pod per node, and on storage bound to a node its volume can't move. It stays Pending until the node is uncordoned. A second drain on another node meanwhile cannot evict its pod: `kubectl drain` keeps retrying the eviction until the budget allows it, which is once the first pod is back, so the cluster keeps its quorum. Pass `--timeout` to make it give up instead (the test used `--timeout=30s`). Drain one node at a time, and uncordon it before the next.
 
 ## Losing Pods
 
