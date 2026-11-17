@@ -10,7 +10,7 @@ The guides in this section provide step-by-step instructions and best practices 
 - **[Testing](testing.md)** - Unit testing modules, integration testing with embedded NATS, and mocking dependencies
 - **[Module Boundaries](module-boundaries.md)** - Contract packages, ports and adapters, startup validation, the boundary report, strict mode, and the `monotest` conformance and import rule tests
 - **[Clustering and Kubernetes](clustering.md)** - Clustered JetStream: server names, routes, route authentication, replicas, readiness and health, and a Kubernetes StatefulSet setup
-- **[Upgrading to v0.1.0, v0.1.2 and v0.2.0](upgrading.md)** - Breaking and behaviour changes since v0.0.14
+- **[Upgrading from v0.1.x to v0.2](upgrading.md)** - What changes, what may need action, and how to roll back
 - **[Logging](logging.md)** - Using the Logger interface, structured logging best practices, and log level selection
 - **[Storage Backends](storage-backends.md)** - Working with the unified storage interface, capability detection, and backend comparison
 

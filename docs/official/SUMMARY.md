@@ -48,7 +48,7 @@
 * [🧪 Testing](guides/testing.md)
 * [🧱 Module Boundaries](guides/module-boundaries.md)
 * [🌐 Clustering and Kubernetes](guides/clustering.md)
-* [⬆️ Upgrading to v0.1.0, v0.1.2 and v0.2.0](guides/upgrading.md)
+* [⬆️ Upgrading from v0.1.x to v0.2](guides/upgrading.md)
 * [📃 Logging](guides/logging.md)
 * [💾 Storage Backends](guides/storage-backends.md)
 
