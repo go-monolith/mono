@@ -2,7 +2,7 @@
 
 Understanding these core concepts will help you effectively design and implement applications using the Monolith Framework.
 
-## The Five Key Concepts
+## The Key Concepts
 
 ### 1. [Modules](modules.md)
 
@@ -26,7 +26,15 @@ How modules interact with each other.
 
 - **What**: Service patterns and Event patterns for different use cases
 - **Why**: Loose coupling, performance, durability based on your needs
-- **Learn**: Service Communication (4 patterns) and Event Communication (2 patterns)
+- **Learn**: Service Communication (5 patterns, including Cron) and Event Communication (2 patterns)
+
+### [Event Consumers](consumers.md)
+
+How modules react to events from other modules.
+
+- **What**: EventConsumer (NATS Core) and EventStreamConsumer (JetStream)
+- **Why**: Loose coupling: consumers do not depend on emitters
+- **Learn**: EventRegistry, event discovery, acknowledgment
 
 ### 4. [Architecture](architecture.md)
 
@@ -36,7 +44,7 @@ How the framework components fit together.
 - **Why**: Scalability, observability, operational simplicity
 - **Learn**: Framework components and their responsibilities
 
-### 5. Embedded NATS
+### 5. Embedded NATS ([Architecture](architecture.md))
 
 The framework's heart.
 
@@ -75,7 +83,11 @@ Start here:
    - Understand Service vs Event communication
    - See examples of each pattern
 
-4. **[Architecture](architecture.md)** (10 min)
+4. **[Event Consumers](consumers.md)**
+   - Consume events without depending on the emitter
+   - Choose between EventConsumer and EventStreamConsumer
+
+5. **[Architecture](architecture.md)** (10 min)
    - Understand how the framework is organized
    - Learn about the layered architecture
    - Understand subject naming conventions
@@ -146,6 +158,8 @@ A: Yes, but avoid it for loose coupling. Use NATS patterns instead:
 - Queue Groups for async work
 - Events for broadcasting
 
+The framework records boundary crossings (`app.ModuleBoundaries()`), and `WithStrictModuleBoundaries()` rejects them; `monotest.CheckImports` enforces the contract-package import rule.
+
 **Q: How do I handle dependencies between modules?**
 
 A: Use the DependentModule interface to declare them:
@@ -165,7 +179,7 @@ A:
 
 **Q: Can I use external message brokers?**
 
-A: Yes! The embedded NATS is optional. The framework provides interfaces you can implement with any broker.
+A: No. The embedded NATS server is always started, and all service and event communication goes through it. You can connect external NATS clients, cluster several instances (`WithNATSClustering`), or supply a NATS config file (`WithNATSConfigFile`).
 
 ## Next Steps
 
@@ -175,12 +189,12 @@ Ready to dive deeper?
 2. **[Services](services.md)** - Learn how modules expose public APIs and establish dependencies
 3. **[Inter-Module Communication](inter-module-communication.md)** - Choose the right pattern for your use case
 4. **[Framework Architecture](architecture.md)** - See how the pieces fit together
-5. **[Examples](../../../examples/)** - Learn from working code
+5. **[Examples](../../../examples/basic/README.md)** - Learn from working code
 
 ## Resources
 
 - **API Reference**: https://pkg.go.dev/github.com/go-monolith/mono
-- **Examples**: ../../../examples/ directory
+- **Examples**: [examples](../../../examples/basic/README.md)
 - **GitHub**: https://github.com/go-monolith/mono
 
 ---

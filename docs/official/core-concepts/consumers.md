@@ -66,7 +66,10 @@ With **events**:
 // It simply registers to consume events from any emitter
 func (m *NotificationModule) RegisterEventConsumers(registry mono.EventRegistry) error {
     // Discover event (no dependency on OrderModule)
-    event, _ := registry.GetEventByName("OrderCreated", "v1", "order")
+    event, ok := registry.GetEventByName("OrderCreated", "v1", "order")
+    if !ok {
+        return fmt.Errorf("event not found: OrderCreated.v1 from order")
+    }
     return registry.RegisterEventConsumer(event, m.handleOrderCreated, m)
 }
 ```
@@ -169,13 +172,17 @@ func (m *NotificationModule) handleOrderCreated(ctx context.Context, msg *mono.M
 For type-safe event consumption with automatic unmarshaling:
 
 ```go
-import "github.com/go-monolith/mono/pkg/helper"
+import (
+    "github.com/go-monolith/mono/pkg/helper"
+
+    "myapp/modules/order/contract" // the emitter's contract package
+)
 
 func (m *NotificationModule) RegisterEventConsumers(registry mono.EventRegistry) error {
     // Type-safe registration with automatic unmarshaling
     return helper.RegisterTypedEventConsumer(
         registry,
-        order.OrderCreatedV1,  // Import the event definition
+        contract.OrderCreatedV1,  // Import the event definition
         m.handleOrderCreated,
         m,
     )
@@ -184,7 +191,7 @@ func (m *NotificationModule) RegisterEventConsumers(registry mono.EventRegistry)
 // Handler receives pre-deserialized event
 func (m *NotificationModule) handleOrderCreated(
     ctx context.Context,
-    event order.OrderCreatedEvent,  // Already unmarshaled!
+    event contract.OrderCreatedEvent,  // Already unmarshaled!
     msg *mono.Msg,
 ) error {
     // event is ready to use
@@ -205,6 +212,19 @@ return registry.RegisterEventConsumer(
     "notification-workers",  // Queue group name
 )
 ```
+
+#### Concurrency and Ordering
+
+Event consumers are serial by default: each instance handles one event at a time, in arrival order. To handle events concurrently, register with options:
+
+```go
+return registry.RegisterEventConsumerWithOptions(eventDef, m.handleOrderCreated, m, mono.EventConsumerOptions{
+    QueueGroup:     "notification-workers",
+    ServiceOptions: mono.ServiceOptions{MaxConcurrency: 16},
+})
+```
+
+`helper.RegisterTypedEventConsumerWithOptions` does the same for typed handlers. A full pool holds events back; it does not drop them. Two registrations of one event in one module share the default queue group (the module name), so each event reaches only one of them: give each its own queue group.
 
 #### Characteristics
 
@@ -281,7 +301,7 @@ func (m *AuditModule) RegisterEventConsumers(registry mono.EventRegistry) error 
         },
         Fetch: mono.FetchConfig{
             BatchSize:   10,
-            IdleTimeout: 5 * time.Second,
+            Timeout:   5 * time.Second,
         },
     }
 
@@ -297,7 +317,7 @@ func (m *AuditModule) handleOrderEvents(ctx context.Context, msgs []*mono.Msg) e
     for _, msg := range msgs {
         var event OrderCreatedEvent
         if err := json.Unmarshal(msg.Data, &event); err != nil {
-            msg.Nak()  // Retry later
+            msg.Term()  // Malformed: retrying cannot help
             continue
         }
 
@@ -317,7 +337,11 @@ func (m *AuditModule) handleOrderEvents(ctx context.Context, msgs []*mono.Msg) e
 For type-safe batch event consumption:
 
 ```go
-import "github.com/go-monolith/mono/pkg/helper"
+import (
+    "github.com/go-monolith/mono/pkg/helper"
+
+    "myapp/modules/order/contract" // the emitter's contract package
+)
 
 func (m *AuditModule) RegisterEventConsumers(registry mono.EventRegistry) error {
     config := mono.StreamConsumerConfig{
@@ -330,7 +354,7 @@ func (m *AuditModule) RegisterEventConsumers(registry mono.EventRegistry) error 
 
     return helper.RegisterTypedEventStreamConsumer(
         registry,
-        order.OrderCreatedV1,
+        contract.OrderCreatedV1,
         config,
         m.handleOrderEvents,
         m,
@@ -340,7 +364,7 @@ func (m *AuditModule) RegisterEventConsumers(registry mono.EventRegistry) error 
 // Handler receives pre-deserialized events
 func (m *AuditModule) handleOrderEvents(
     ctx context.Context,
-    events []order.OrderCreatedEvent,  // Already unmarshaled!
+    events []contract.OrderCreatedEvent,  // Already unmarshaled!
     msgs []*mono.Msg,
 ) error {
     for i, event := range events {
@@ -360,7 +384,7 @@ JetStream consumers must explicitly acknowledge messages:
 
 | Method | Effect |
 |--------|--------|
-| `msg.Ack()` | Message processed successfully, remove from queue |
+| `msg.Ack()` | Message processed successfully; not redelivered (removed from the stream only under work-queue or interest retention) |
 | `msg.Nak()` | Processing failed, retry immediately |
 | `msg.NakWithDelay(d)` | Processing failed, retry after delay |
 | `msg.Term()` | Terminate redelivery (poison message) |
@@ -439,13 +463,13 @@ Two patterns for event discovery:
 **Pattern A: Direct Import (Type-Safe)**
 ```go
 import "github.com/go-monolith/mono/pkg/helper"
-import "myapp/modules/order"  // Import emitter module's events
+import "myapp/modules/order/contract"  // Import the emitter's contract package
 
 func (m *NotificationModule) RegisterEventConsumers(registry mono.EventRegistry) error {
     // Type-safe registration with compile-time checks
     return helper.RegisterTypedEventConsumer(
         registry,
-        order.OrderCreatedV1,  // Direct reference
+        contract.OrderCreatedV1,  // Direct reference
         m.handleOrderCreated,
         m,
     )
@@ -541,12 +565,16 @@ func (m *OrderModule) EmitEvents() []mono.BaseEventDefinition {
 func (m *OrderModule) createOrder(ctx context.Context, order *Order) error {
     // Business logic...
 
-    // Option 1: Fire-and-forget (NATS Core)
-    err := OrderCreatedV1.Publish(m.eventBus, OrderCreatedEvent{
+    event := OrderCreatedEvent{
         OrderID:    order.ID,
         CustomerID: order.CustomerID,
         Amount:     order.Total,
-    }, nil)
+    }
+
+    // Option 1: Fire-and-forget (NATS Core)
+    if err := OrderCreatedV1.Publish(m.eventBus, event, nil); err != nil {
+        return err
+    }
 
     // Option 2: Durable publish (JetStream)
     ack, err := OrderCreatedV1.EventStreamPublish(ctx, m.eventBus, event, nil)
@@ -555,7 +583,7 @@ func (m *OrderModule) createOrder(ctx context.Context, order *Order) error {
     }
     log.Printf("Published with sequence: %d", ack.Sequence())
 
-    return err
+    return nil
 }
 ```
 
@@ -563,7 +591,7 @@ func (m *OrderModule) createOrder(ctx context.Context, order *Order) error {
 
 ## EventRegistry Interface
 
-The `EventRegistry` provides event discovery and consumer registration:
+The `EventRegistry` provides event discovery and consumer registration (excerpt; see the [EventRegistry API](../api/eventregistry.md) for the full interface):
 
 ```go
 type EventRegistry interface {
@@ -574,6 +602,7 @@ type EventRegistry interface {
 
     // Consumer Registration
     RegisterEventConsumer(eventDef, handler, module, queueGroup...) error
+    RegisterEventConsumerWithOptions(eventDef, handler, module, opts) error
     RegisterEventStreamConsumer(eventDef, config, handler, module) error
 }
 ```
@@ -606,7 +635,7 @@ allEvents := registry.GetAllEvents()
 ### Don't
 
 - **Don't create circular imports**: Use runtime discovery if needed
-- **Don't rely on event ordering**: Events may arrive out of order
+- **Don't rely on ordering across instances or with `MaxConcurrency` > 1**: one instance handles a serial consumer's events in arrival order, but the instances of a queue group share them, and JetStream redelivery reorders them
 - **Don't store EventRegistry**: Use it only in `RegisterEventConsumers`
 - **Don't forget to acknowledge**: EventStreamConsumer requires explicit Ack/Nak
 - **Don't assume single delivery**: Design for at-least-once semantics

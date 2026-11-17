@@ -12,13 +12,20 @@ func PublishMsg(msg *Msg) error
 // Request-Reply
 func Request(subject string, data []byte, timeout time.Duration) (*Msg, error)
 func RequestWithContext(ctx context.Context, subject string, data []byte) (*Msg, error)
+func RequestMsgWithContext(ctx context.Context, msg *Msg) (*Msg, error)
 
 // Subscriptions
 func Subscribe(subject string, handler MsgHandler) (Subscription, error)
+func SubscribeSync(subject string) (Subscription, error)
 func QueueSubscribe(subject, queue string, handler MsgHandler) (Subscription, error)
+func QueueSubscribeSync(subject, queue string) (Subscription, error)
+func ChanSubscribe(subject string, ch chan *Msg) (Subscription, error)
 
 // JetStream
 func EventStream() (EventStream, error)
+
+// Called by the framework; modules do not call it
+func SetRuntimeContext(ctx context.Context)
 ```
 
 {% hint style="info" %}
@@ -29,6 +36,8 @@ func EventStream() (EventStream, error)
 
 The `EventBus` enables loosely-coupled inter-module communication through event publishing and subscription. Events are published to subjects and consumed by registered handlers without direct module-to-module dependencies.
 
+The bus a module receives through `SetEventBus` is scoped to that module. A publish or request to `services.<module>.<service>` of a module that is not the module itself, a declared dependency or a plugin is a boundary violation (`undeclared-service-subject`). So is subscribing to another module's service subject (`foreign-service-subscription`). When the module implements `ServiceConsumerModule`, a request to a dependency's service must be in `ConsumeServices()`. By default a violation is logged and the call goes through. With `WithStrictModuleBoundaries()` the call returns `ErrModuleBoundaryViolation`. `events.*` and other subjects are not checked, and neither is `EventStream()`.
+
 ## Handler Types
 
 ### MsgHandler
@@ -38,6 +47,8 @@ type MsgHandler func(ctx context.Context, msg *Msg)
 ```
 
 Callback function for processing messages asynchronously.
+
+nats.go calls the handler for one subscription at a time, on a single goroutine, so a handler that blocks delays every later message on that subscription. A panic in the handler is recovered and logged at Error (`Panic in subscription handler`, with subject, queue group and stack), and the subscription keeps running. The message is lost. `ctx` is the framework's runtime context, which is cancelled only after the shutdown drain.
 
 ## Publishing Methods
 
@@ -125,11 +136,6 @@ Creates an asynchronous subscription with a message handler.
 - `events.order.*` - Single-level wildcard (matches `events.order.created`, `events.order.updated`)
 - `events.>` - Multi-level wildcard (matches all subjects starting with `events.`)
 {% endhint %}
-
-**Subject Patterns:**
-- `events.order.created` - Exact match
-- `events.order.*` - Single-level wildcard (all order events)
-- `events.>` - Multi-level wildcard (all events)
 
 **Example:**
 ```go
@@ -249,7 +255,7 @@ type TypedEventConsumerHandler[T any] func(ctx context.Context, event T, msg *Ms
 
 Generic event handler with automatic unmarshaling and type safety. The handler receives both the unmarshaled payload and the original message (for headers/metadata).
 
-**Note:** When using the raw EventBus directly, you'll work with `MsgHandler` and `*Msg`. The typed handlers are used with the `EventRegistry` system.
+**Note:** When using the raw EventBus directly, you'll work with `MsgHandler` and `*Msg`. `EventRegistry` methods take only the raw handlers. Register a typed handler with `helper.RegisterTypedEventConsumer`, `helper.RegisterTypedEventConsumerWithOptions` or `helper.RegisterTypedEventStreamConsumer`, which unmarshal through the `EventDefinition[T]` codec.
 
 ### TypedEventStreamConsumerHandler
 
@@ -262,10 +268,10 @@ Generic JetStream batch handler with automatic unmarshaling. Receives both the u
 ### EventConsumerHandler (Raw)
 
 ```go
-type EventConsumerHandler func(ctx context.Context, msg *Msg)
+type EventConsumerHandler func(ctx context.Context, msg *Msg) error
 ```
 
-Raw event consumer handler for use with `EventRegistry.RegisterEventConsumer()`.
+Raw event consumer handler for use with `EventRegistry.RegisterEventConsumer()`. A non-nil error is logged (`Event consumer handler error`). Core NATS events are not redelivered.
 
 ### EventStreamConsumerHandler (Raw)
 
@@ -282,7 +288,7 @@ The framework uses a few `Mono-*` headers on the NATS wire. Clients in other lan
 | Header | Direction | Value |
 |--------|-----------|-------|
 | `Mono-Deadline` | request → handler | The caller's absolute deadline, Unix time in **milliseconds**. The handler runs with this deadline, and the request is dropped unanswered if it passed by more than the clock-skew allowance (250ms by default) when a worker picks it up. Values more than 24h from arrival (wrong unit) are ignored. |
-| `Mono-Timeout` | request → handler | The time the caller had left when it sent the request, in **milliseconds** (`0` = none). Applied relative to the message's arrival, so it does not depend on either clock. Used when `Mono-Deadline` is absent, invalid, or disagrees with it by more than the allowance (clock skew; logged). Clamped to 24h. |
+| `Mono-Timeout` | request → handler | The time the caller had left when it sent the request, in **milliseconds** (`0` = no time left: the request is already at its deadline). Applied relative to the message's arrival, so it does not depend on either clock. Used when `Mono-Deadline` is absent, invalid, or disagrees with it by more than the allowance (clock skew; logged). Clamped to 24h. |
 | `Mono-Error` | reply → caller | `"true"` when the reply is an error instead of a response payload. |
 | `Mono-Error-Message` | reply → caller | Human-readable error message. |
 | `Mono-Error-Type` | reply → caller | Error classification. Framework values: `overloaded` (pool and queue full, retry elsewhere), `handler-panic` (handler crashed on this request), `shutting-down` (instance stopping). Other values are the handler error's type name, lower-cased with the `Error` suffix removed. |
@@ -290,6 +296,8 @@ The framework uses a few `Mono-*` headers on the NATS wire. Clients in other lan
 Header names are matched case-sensitively as NATS delivers them; send them exactly as spelled here. A request without `Mono-Deadline`/`Mono-Timeout` is handled with no deadline, as older clients did. Queue group sends carry the deadline headers too, but a queue group handler is never skipped because of them: the ACK promised processing.
 
 ## Request-Reply Methods
+
+Calling another module's service subject through a module's bus is checked against its boundaries (see [Overview](#overview)). Prefer the service client from the dependency container (`GetRequestReplyService`) or a typed contract (`helper.RequestReplyService[...]`). These clients also set the `Mono-Deadline`/`Mono-Timeout` headers, which raw `Request*` calls do not.
 
 ### Request
 
@@ -383,7 +391,7 @@ type Msg struct {
 | `Reply` | `string` | Reply-to subject (for request-reply patterns) |
 | `Data` | `[]byte` | Message payload (typically JSON) |
 | `Header` | `Header` | Custom headers (map[string][]string) |
-| `Sub` | `*Subscription` | Subscription that received this message |
+| `Sub` | `*Subscription` | Always nil on messages delivered by the framework's EventBus (reserved) |
 
 **Acknowledgment Methods (JetStream only):**
 
@@ -404,19 +412,22 @@ func (m *Msg) Term() error
 func (m *Msg) InProgress() error
 ```
 
-**Example:**
+On core NATS messages (`Subscribe`, `QueueSubscribe`, event consumers) these methods do nothing.
+
+**Example (event stream consumer handler):**
 ```go
-handler := func(ctx context.Context, msg *mono.Msg) {
-    fmt.Printf("Received message on %s\n", msg.Subject)
+handler := func(ctx context.Context, msgs []*mono.Msg) error {
+    for _, msg := range msgs {
+        var event MyEvent
+        if err := json.Unmarshal(msg.Data, &event); err != nil {
+            msg.Term() // Malformed: do not redeliver
+            continue
+        }
 
-    var event MyEvent
-    if err := json.Unmarshal(msg.Data, &event); err != nil {
-        msg.Nak() // Negative acknowledgment (retry)
-        return
+        // Process event...
+        msg.Ack() // Positive acknowledgment
     }
-
-    // Process event...
-    msg.Ack() // Positive acknowledgment
+    return nil
 }
 ```
 
@@ -430,17 +441,13 @@ Custom key-value pairs attached to messages. Values are slices to support multip
 
 **Usage:**
 ```go
-// Get a header value (first value)
-requestID := ""
-if vals := msg.Header["x-request-id"]; len(vals) > 0 {
-    requestID = vals[0]
-}
+// Get a header value (first value): "" when absent, safe on a nil Header
+requestID := msg.Header.Get("x-request-id")
 
-// Set headers when publishing
-header := mono.Header{
-    "x-request-id": []string{uuid.New().String()},
-    "x-source":     []string{"order-module"},
-}
+// Set headers when publishing (Set panics on a nil Header)
+header := mono.Header{}
+header.Set("x-request-id", requestID)
+header.Set("x-source", "order-module")
 ```
 
 ### Subscription
@@ -471,7 +478,7 @@ func (eb EventBus) EventStream() (EventStream, error)
 
 **Returns:**
 - `EventStream` - JetStream operations interface
-- `error` - Error if JetStream is not enabled
+- `error` - Only if the JetStream context cannot be created. When JetStream is disabled, `EventStream()` still succeeds and the first call on the stream (for example `Publish`) fails.
 
 **EventStream Interface:**
 
@@ -512,7 +519,7 @@ type MsgPubAck interface {
 ```go
 stream, err := eventBus.EventStream()
 if err != nil {
-    return fmt.Errorf("JetStream not available: %w", err)
+    return fmt.Errorf("failed to get EventStream: %w", err)
 }
 
 // Publish with persistence
@@ -526,42 +533,7 @@ fmt.Printf("Published to stream %s, seq %d\n", ack.Stream(), ack.Sequence())
 
 ## Event Registry
 
-### EventRegistry
-
-```go
-type EventRegistry interface {
-    // Register event definition
-    DefineEvent(subject string) BaseEventDefinition
-
-    // Register event consumer with type safety
-    RegisterConsumer(subject string, handler TypedEventConsumerHandler[T]) error
-
-    // Register JetStream consumer with type safety
-    RegisterStreamConsumer(subject string, config StreamConsumerConfig,
-        handler TypedEventStreamConsumerHandler[T]) error
-}
-```
-
-Used in `EventConsumerModule.RegisterEventConsumers()`.
-
-**Example:**
-```go
-func (m *AuditModule) RegisterEventConsumers(registry mono.EventRegistry) error {
-    // Fire-and-forget consumer
-    if err := registry.RegisterConsumer("events.order.>",
-        m.handleOrderEvent); err != nil {
-        return err
-    }
-
-    // Persistent consumer
-    if err := registry.RegisterStreamConsumer("events.payment.>",
-        streamConfig, m.handlePaymentBatch); err != nil {
-        return err
-    }
-
-    return nil
-}
-```
+Event consumers are registered through `EventRegistry` in `EventConsumerModule.RegisterEventConsumers`, not through the EventBus. See the [EventRegistry API](eventregistry.md) for `RegisterEventConsumer`, `RegisterEventConsumerWithOptions` and `RegisterEventStreamConsumer`.
 
 ## Subject Naming Conventions
 
@@ -588,43 +560,41 @@ events.user.registered
 
 | Setting | Type | Default | Description |
 |---------|------|---------|-------------|
-| Event Subject | `string` | - | Subject pattern for publishing/subscribing |
-| Handler Type | Func | - | Consumer handler function |
-| Context | `context.Context` | background | Context for operations |
-| Persistent | `bool` | `false` | Use JetStream for persistence |
-| Batch Size | `int` | 100 | Messages per batch (stream consumers) |
-| Max Ack Pending | `int` | 1000 | Unacked message limit |
+| `Fetch.BatchSize` | `int` | `10` | Messages per fetch (event stream consumers) |
+| `Fetch.Timeout` | `time.Duration` | `5s` | Wait per fetch |
+| `Consumer.MaxAckPending` | `int` | server default (1000) | Unacked message limit |
 
 ## Examples
 
 ### Publishing Events
 
 ```go
+// Subject: events.order.v1.order-created
+var OrderCreatedV1 = helper.EventDefinition[OrderCreatedEvent]("order", "OrderCreated", "v1")
+
+// Subject: events.order.v1.order-cancelled
+var OrderCancelledV1 = helper.EventDefinition[OrderCancelledEvent]("order", "OrderCancelled", "v1")
+
 type OrderModule struct {
     eventBus mono.EventBus
 }
 
 func (m *OrderModule) EmitEvents() []mono.BaseEventDefinition {
     return []mono.BaseEventDefinition{
-        helper.EventDefinition[OrderCreatedEvent]("order", "OrderCreated", "v1").ToBase(),
-        helper.EventDefinition[OrderCancelledEvent]("order", "OrderCancelled", "v1").ToBase(),
+        OrderCreatedV1.ToBase(),
+        OrderCancelledV1.ToBase(),
     }
 }
 
 func (m *OrderModule) createOrder(ctx context.Context, order *Order) error {
     // Create order in database...
 
-    // Publish event (serialize first)
-    eventData, err := json.Marshal(&OrderCreatedEvent{
+    // Publish event (serialized by the definition's codec, JSON by default)
+    return OrderCreatedV1.Publish(m.eventBus, OrderCreatedEvent{
         OrderID:   order.ID,
         Total:     order.Total,
         Timestamp: time.Now(),
-    })
-    if err != nil {
-        return fmt.Errorf("failed to serialize event: %w", err)
-    }
-
-    return m.eventBus.Publish("events.order.created.v1", eventData)
+    }, nil)
 }
 ```
 
@@ -662,12 +632,13 @@ func (m *NotificationModule) RegisterEventConsumers(registry mono.EventRegistry)
     return registry.RegisterEventConsumer(eventDef, m.handleOrderCreated, m)
 }
 
-func (m *NotificationModule) handleOrderCreated(ctx context.Context, msg *mono.Msg) {
+func (m *NotificationModule) handleOrderCreated(ctx context.Context, msg *mono.Msg) error {
     var event OrderCreatedEvent
     if err := json.Unmarshal(msg.Data, &event); err != nil {
-        return
+        return err
     }
     // Send notification...
+    return nil
 }
 ```
 
@@ -677,7 +648,7 @@ func (m *NotificationModule) handleOrderCreated(ctx context.Context, msg *mono.M
 func (m *AnalyticsModule) Start(ctx context.Context) error {
     stream, err := m.eventBus.EventStream()
     if err != nil {
-        return fmt.Errorf("JetStream not available: %w", err)
+        return fmt.Errorf("failed to get EventStream: %w", err)
     }
 
     // Publish with persistence
@@ -709,16 +680,16 @@ eventBus.Subscribe("events.payment.>", handler)
 
 ✓ **Do**
 - Use hierarchical subjects (e.g., `events.domain.type`)
-- Return errors from handlers for failed processing
-- Use `PublishWithContext` to respect deadlines
-- Ack messages in queue group handlers
+- Return errors from `EventRegistry` consumer handlers; handle errors inside raw `MsgHandler` callbacks
+- Use `RequestWithContext` / `RequestMsgWithContext` so a request respects the caller's deadline
+- Ack, Nak or Term every message in stream consumer and event stream consumer handlers
 - Use JetStream for critical events needing persistence
 
 ✗ **Don't**
-- Publish to `_*` subjects (reserved for framework)
-- Ignore errors returned by handlers
+- Publish to `_mono.*` subjects (reserved for the framework)
+- Ignore errors returned by `Publish`, `Request*` and `EventStream().Publish`
 - Block indefinitely in event handlers
-- Forget to acknowledge queue group messages
+- Forget to acknowledge JetStream messages in stream handlers
 - Mix fire-and-forget and persistent consumers for same events
 
 ## Related Documentation
@@ -731,4 +702,4 @@ eventBus.Subscribe("events.payment.>", handler)
 
 ---
 
-For more information, see [Foundation Specification](../../spec/foundation.md) and [Core Concepts](../core-concepts/README.md).
+For more information, see [Foundation Specification](https://github.com/go-monolith/mono/blob/main/docs/spec/foundation.md) and [Core Concepts](../core-concepts/README.md).

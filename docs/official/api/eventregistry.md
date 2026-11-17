@@ -39,7 +39,7 @@ Unlike `ServiceContainer` which creates explicit module dependencies, EventRegis
 ## Initialization Sequence
 
 The registry is used during framework initialization in this order:
-1. `EventEmitterModule`s register their event definitions via `RegisterEvent()`
+1. The framework registers each `EventEmitterModule`'s `EmitEvents()` via `RegisterEvent()`
 2. `EventConsumerModule`s receive the registry via `RegisterEventConsumers(registry)`
 3. Consumer modules discover events via `GetEventByName()` during `RegisterEventConsumers()`
 4. Consumers register handlers via `RegisterEventConsumer()` or `RegisterEventStreamConsumer()`
@@ -53,7 +53,7 @@ The registry is used during framework initialization in this order:
 func (registry EventRegistry) RegisterEvent(def BaseEventDefinition) error
 ```
 
-Registers an event definition that this module will emit. Called by modules implementing `EventEmitterModule`.
+Registers an event definition. The framework calls it for each definition returned by `EventEmitterModule.EmitEvents()`, for all modules, before any module starts. Modules normally do not call it.
 
 **Parameters:**
 - `def` - The event definition containing name, version, module name, and subject
@@ -63,17 +63,19 @@ Registers an event definition that this module will emit. Called by modules impl
 
 **Example:**
 ```go
+import "github.com/go-monolith/mono/pkg/helper"
+
 // In your event emitter module
 func (m *OrderModule) EmitEvents() []mono.BaseEventDefinition {
     return []mono.BaseEventDefinition{
-        mono.MustNewEventDefinition[OrderCreatedEvent]("OrderCreated", "v1", m).ToBase(),
-        mono.MustNewEventDefinition[OrderCancelledEvent]("OrderCancelled", "v1", m).ToBase(),
+        helper.EventDefinition[OrderCreatedEvent]("order", "OrderCreated", "v1").ToBase(),
+        helper.EventDefinition[OrderCancelledEvent]("order", "OrderCancelled", "v1").ToBase(),
     }
 }
 ```
 
 {% hint style="warning" %}
-**Event Subject Format:** Events follow the subject pattern `events.<module>.<version>.<event-name-kebab>`. For example, `events.order.v1.order-created`.
+**Event Subject Format:** Events follow the subject pattern `events.<module>.<version>.<event-name-kebab>`. For example, `events.order.v1.order-created`. This is the subject `helper.EventDefinition` computes when none is given. A custom subject may be passed as the 4th argument. It must be kebab-case, contain the version token, have no wildcards and not start with `_mono.`, or `helper.EventDefinition` panics.
 {% endhint %}
 
 ## Event Discovery Methods
@@ -216,12 +218,21 @@ func (m *NotificationModule) handleOrderCreated(ctx context.Context, msg *mono.M
 registry.RegisterEventConsumer(eventDef, m.handler, m, "notification-workers")
 ```
 
+Two registrations of the same event in the same module share the default queue group (the module name), so each event reaches only one of the two handlers. Give them different queue groups to have both run.
+
 **Typed Handler (helper):**
 
 For type-safe handlers with automatic unmarshaling, use `TypedEventConsumerHandler`:
 
 ```go
 type TypedEventConsumerHandler[T any] func(ctx context.Context, event T, msg *Msg) error
+```
+
+Register it with `helper.RegisterTypedEventConsumer` (optional trailing queue group). An unmarshal error is returned as the handler error and logged:
+
+```go
+// contract is the order module's contract package (myapp/modules/order/contract)
+err := helper.RegisterTypedEventConsumer(registry, contract.OrderCreatedV1, m.handleOrderCreated, m)
 ```
 
 ### RegisterEventConsumerWithOptions
@@ -240,7 +251,7 @@ func (registry EventRegistry) RegisterEventConsumerWithOptions(
 ```go
 type EventConsumerOptions struct {
     QueueGroup string // "" = module name
-    ServiceOptions    // MaxConcurrency, MaxPending (zero = framework defaults)
+    ServiceOptions    // MaxConcurrency (0 = 1, serial), MaxPending, PendingMsgs, PendingBytes
 }
 ```
 
@@ -297,7 +308,7 @@ Messages should be acknowledged individually using `Ack()`, `Nak()`, `NakWithDel
 
 The framework names the durable JetStream consumer
 `<consumer-module>-<event-module>-<event>-<version>`, for example
-`analytics-billing-PaymentProcessed-v1`. `types.EventStreamConsumerName` returns it. Any
+`analytics-billing-PaymentProcessed-v1`. `types.EventStreamConsumerName` (package `github.com/go-monolith/mono/pkg/types`) returns it. Any
 `Consumer.Name` or `Consumer.Durable` you set is overridden.
 
 - The name depends only on which module consumes which event, so it is the same on every
@@ -363,119 +374,6 @@ startups only report leftovers:
   fails to start until the new durable is deleted.
 
 **Use Cases:**
-- Real-time notifications where occasional loss is acceptable
-- High-throughput event processing
-- Low-latency requirements (~1ms)
-
-**Example:**
-```go
-func (m *NotificationModule) RegisterEventConsumers(registry mono.EventRegistry) error {
-    eventDef, found := registry.GetEventByName("OrderCreated", "v1", "order")
-    if !found {
-        return fmt.Errorf("event not found")
-    }
-
-    return registry.RegisterEventConsumer(eventDef, m.handleOrderCreated, m)
-}
-
-func (m *NotificationModule) handleOrderCreated(ctx context.Context, msg *mono.Msg) error {
-    var event OrderCreatedEvent
-    if err := json.Unmarshal(msg.Data, &event); err != nil {
-        return err
-    }
-
-    // Send notification
-    return m.sendEmail(event.CustomerEmail, "Order confirmed: "+event.OrderID)
-}
-```
-
-**Queue Groups Example:**
-```go
-// Multiple instances with same queue group share the load
-registry.RegisterEventConsumer(eventDef, m.handler, m, "notification-workers")
-```
-
-**Typed Handler (helper):**
-
-For type-safe handlers with automatic unmarshaling, use `TypedEventConsumerHandler`:
-
-```go
-type TypedEventConsumerHandler[T any] func(ctx context.Context, event T, msg *Msg) error
-```
-
-### RegisterEventStreamConsumer
-
-```go
-func (registry EventRegistry) RegisterEventStreamConsumer(
-    eventDef BaseEventDefinition,
-    config StreamConsumerConfig,
-    handler EventStreamConsumerHandler,
-    module Module,
-) error
-```
-
-Registers a JetStream durable consumer for an event with at-least-once delivery guarantees.
-
-**Parameters:**
-- `eventDef` - The event definition to consume
-- `config` - JetStream stream and consumer configuration
-- `handler` - Batch handler function for processing event batches
-- `module` - The consuming module instance
-
-**Handler Signature:**
-```go
-type EventStreamConsumerHandler func(ctx context.Context, msgs []*Msg) error
-```
-
-Messages should be acknowledged individually using `Ack()`, `Nak()`, `NakWithDelay()`, `Term()`, or `InProgress()`.
-
-**Returns:**
-- `error` - Nil on success
-
-**Durable Consumer Name:**
-
-The framework names the durable JetStream consumer
-`<consumer-module>-<event-module>-<event>-<version>`, for example
-`analytics-billing-PaymentProcessed-v1`. `types.EventStreamConsumerName` returns it. Any
-`Consumer.Name` or `Consumer.Durable` you set is overridden.
-
-- The name depends only on which module consumes which event, so it is the same on every
-  restart and does not change when modules are added or removed.
-- The consumer is a true JetStream durable: the server keeps it however long it goes without
-  pull requests, unless you set `Consumer.InactiveThreshold`.
-- If the same module registers the same event on the same stream more than once, the second
-  and later registrations get a `-2`, `-3`, ... suffix, in the order that module registers them.
-
-**Upgrading from v0.0.11 or earlier:**
-
-Earlier versions named the consumer `<event-module>-<event>-<version>-<N>`. `N` was a counter
-that followed module start order, which was not deterministic, so the name could change
-between restarts. Those consumers were also created without a durable name, so the server
-treated them as non-durable. When a legacy durable is found on the same stream, startup handles it once,
-and the step is a no-op after that:
-
-- **Work-queue streams:** the legacy durable is deleted before the new one is created. A
-  work-queue stream accepts only one unfiltered consumer, so this is the only way to start.
-  Messages it had not acknowledged stay in the stream and are delivered to the new durable.
-  If the consumer configuration is one the server rejects on a work-queue stream (a deliver
-  policy other than all, or acknowledgement other than explicit), startup fails before
-  anything is deleted.
-- **Other streams:** the new durable is positioned just after the legacy durables' ack floor,
-  so the stream is not replayed. This requires a deliver policy of all, by-start-sequence or
-  by-start-time; for other deliver policies a warning reports what was not carried over. The
-  framework does **not delete** the legacy durables. A warning on every startup names each one
-  together with a `nats consumer rm <stream> <name>` command. Remove them once the new durable
-  is confirmed to be working: on an interest-retention stream they keep retaining messages until
-  removed. Since v0.2.0 their inactivity threshold is raised to 1h at startup, so the server
-  removes one that is no longer pulled 1h after its last pull.
-- **Several modules consuming the same event on the same stream:** their legacy durables
-  cannot be told apart. Each new durable resumes after the lowest ack floor, which can
-  redeliver some messages but loses none.
-- **Rolling back** to an older version: it picks up the legacy durables again from their old
-  ack floors, which replays everything processed since the upgrade. On a work-queue stream it
-  fails to start until the new durable is deleted.
-
-**Use Cases:**
 - Payment processing
 - Audit logs
 - Compliance events
@@ -534,6 +432,13 @@ For type-safe batch handlers, use `TypedEventStreamConsumerHandler`:
 type TypedEventStreamConsumerHandler[T any] func(ctx context.Context, events []T, msgs []*Msg) error
 ```
 
+Register it with `helper.RegisterTypedEventStreamConsumer`. If any message in a batch fails to unmarshal, the handler is not called and the batch is returned as an error, unacknowledged, so it is redelivered after `AckWait` until `MaxDeliver`:
+
+```go
+// contract is the order module's contract package (myapp/modules/order/contract)
+err := helper.RegisterTypedEventStreamConsumer(registry, contract.OrderCreatedV1, config, m.handleOrderBatch, m)
+```
+
 ## Consumer Inspection Methods
 
 ### Entries
@@ -551,6 +456,7 @@ type EventConsumerEntry struct {
     Handler    EventConsumerHandler   // The handler function
     Module     Module                 // The consuming module
     QueueGroup string                 // NATS queue group name
+    Options    ServiceOptions         // Worker pool bounds (zero = defaults; serial)
 }
 ```
 
@@ -609,9 +515,12 @@ for _, entry := range registry.StreamConsumerEntries() {
 | Setting | Default |
 |---------|---------|
 | Queue Group | Module name |
-| Stream Retention | WorkQueuePolicy |
-| Max Ack Pending | 1000 |
+| Stream Retention | LimitsPolicy |
+| Stream Storage | FileStorage |
+| Ack Policy | AckExplicitPolicy |
+| Max Ack Pending | server default (1000) |
 | Batch Size | 10 |
+| Fetch Timeout | 5s |
 
 ## Examples
 
@@ -619,6 +528,8 @@ for _, entry := range registry.StreamConsumerEntries() {
 
 ```go
 // events.go
+import "github.com/go-monolith/mono/pkg/helper"
+
 type OrderCreatedEvent struct {
     OrderID     string    `json:"order_id"`
     CustomerID  string    `json:"customer_id"`
@@ -626,7 +537,7 @@ type OrderCreatedEvent struct {
     CreatedAt   time.Time `json:"created_at"`
 }
 
-var OrderCreatedV1 = mono.MustNewEventDefinition[OrderCreatedEvent]("OrderCreated", "v1", nil)
+var OrderCreatedV1 = helper.EventDefinition[OrderCreatedEvent]("order", "OrderCreated", "v1")
 
 // module.go
 type OrderModule struct {
@@ -641,7 +552,7 @@ func (m *OrderModule) SetEventBus(bus mono.EventBus) {
 
 func (m *OrderModule) EmitEvents() []mono.BaseEventDefinition {
     return []mono.BaseEventDefinition{
-        OrderCreatedV1.WithModule(m).ToBase(),
+        OrderCreatedV1.ToBase(),
     }
 }
 
@@ -656,7 +567,7 @@ func (m *OrderModule) createOrder(ctx context.Context, order *Order) error {
         CreatedAt:   time.Now(),
     }
 
-    return m.eventBus.Publish(ctx, OrderCreatedV1.WithModule(m).ToBase(), event)
+    return OrderCreatedV1.Publish(m.eventBus, event, nil)
 }
 ```
 
@@ -743,4 +654,4 @@ func (m *AnalyticsModule) RegisterEventConsumers(registry mono.EventRegistry) er
 
 ---
 
-For more information, see [Foundation Specification](../../spec/foundation.md) and [Core Concepts](../core-concepts/README.md).
+For more information, see [Foundation Specification](https://github.com/go-monolith/mono/blob/main/docs/spec/foundation.md) and [Core Concepts](../core-concepts/README.md).

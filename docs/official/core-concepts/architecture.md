@@ -82,13 +82,11 @@ Each module gets a ServiceContainer for registering and accessing services:
 ```go
 func (m *MyModule) RegisterServices(container mono.ServiceContainer) error {
     // Register my service
-    container.RegisterRequestReplyService("my-service", m.handleRequest)
-
-    // Access other services
-    otherService := container.RequestReplyServiceClient(...)
-    return nil
+    return container.RegisterRequestReplyService("my-service", m.handleRequest)
 }
 ```
+
+Services of other modules are reached through the containers passed to `SetDependencyServiceContainer(name, container)`, e.g. `client, err := m.payment.GetRequestReplyService("process-payment")`.
 
 **Provides**:
 - Service registration
@@ -102,11 +100,20 @@ Abstracts NATS operations for services and events:
 
 ```go
 func (m *MyModule) SetEventBus(bus mono.EventBus) {
+    m.bus = bus
+}
+
+func (m *MyModule) Start(ctx context.Context) error {
     // Publish to a subject
-    bus.Publish("events.order.created", eventData)
+    if err := m.bus.Publish("events.order.v1.order-created", eventData); err != nil {
+        return err
+    }
 
     // Subscribe to events
-    sub, _ := bus.Subscribe("events.>")
+    _, err := m.bus.Subscribe("events.>", func(ctx context.Context, msg *mono.Msg) {
+        // ...
+    })
+    return err
 }
 ```
 
@@ -125,7 +132,8 @@ Your Application
 ├─ Framework
 │  ├─ MonoApplication
 │  ├─ Module Registry
-│  └─ EventBus
+│  ├─ EventBus
+│  └─ Plugins
 │
 └─ NATS Server
    ├─ Message Broker
@@ -134,11 +142,10 @@ Your Application
    │  ├─ Streams
    │  ├─ Consumers
    │  └─ KV Stores
-   └─ Plugins
 ```
 
 **Features**:
-- Listens on localhost:4222 (default)
+- Listens on 127.0.0.1:4222 (default)
 - Supports clustering
 - JetStream for persistence (optional)
 - Built-in KV store and object store
@@ -158,42 +165,36 @@ moduleLogger.Info("processing order", "orderID", "ORD-001")
 **Features**:
 - Structured (JSON or text format)
 - Module context
-- Sensitive data redaction
+- Redaction of sensitive configuration values in the audit middleware
 - Configurable log level
 
 ## Module Startup Sequence
 
-When `app.Start()` is called, the framework executes this sequence for each module (in dependency order):
+When `app.Start()` is called, the framework first runs these steps once, before any module:
 
 ```
-1. Create ServiceContainer
-   ├─ Register framework services (Logger, EventBus, NATSManager)
-   └─ Prepare for module-specific services
-
-2. Call SetDependencyServiceContainer()
-   └─ Modules access dependency services from other modules
-
-3. Call SetEventBus()
-   └─ Modules receive EventBus for publishing
-
-4. Call RegisterServices()
-   ├─ Module registers its services
-   └─ Framework registers with NATS subjects (services.module.service)
-
-5. Collect EmitEvents()
-   └─ Framework discovers events this module publishes
-
-6. Call Start()
-   ├─ Module performs initialization (open files, start goroutines)
-   └─ Return error to abort startup
-
-7. Register Subscriptions
-   ├─ Create NATS subscriptions for services
-   └─ Create event subscriptions for consumers
-
-8. Set Module Ready
-   └─ Module is now ready to receive requests/events
+a. Wait until JetStream answers (bounded by WithJetStreamReadyTimeout)
+b. Start plugins
+c. Start middleware
+d. Resolve the dependency order
+e. Collect EmitEvents() from every EventEmitterModule into the EventRegistry
 ```
+
+Then, for each module in dependency order:
+
+```
+1. Create and bind its ServiceContainer
+2. Inject plugins (UsePluginModule.SetPlugin)
+3. Call SetDependencyServiceContainer() with read-only dependency views
+4. Validate ConsumeServices() (ServiceConsumerModule)
+5. Call SetEventBus() with the module-scoped bus
+6. Call RegisterServices()
+7. Call RegisterEventConsumers(registry)
+8. Call Start()
+   └─ An error rolls back the modules already started
+```
+
+After all modules have started, the framework starts the channel routers, then creates the NATS subscriptions, worker pools and JetStream consumers for every registered service and event consumer.
 
 ## Subject Naming Conventions
 
@@ -215,12 +216,12 @@ Examples:
 
 ### Event Subjects (Pub/Sub)
 
-Pattern: `events.<domain>.<event-type>`
+Pattern: `events.<module>.<version>.<event-name-kebab>` (default computed by `helper.EventDefinition`)
 
 Examples:
-- `events.order.OrderCreated`
-- `events.order.OrderShipped`
-- `events.payment.PaymentProcessed`
+- `events.order.v1.order-created`
+- `events.order.v1.order-shipped`
+- `events.payment.v1.payment-processed`
 
 **Properties**:
 - Wildcards supported: `events.order.>` (all order events)
@@ -231,9 +232,7 @@ Examples:
 
 Pattern: `_mono.<component>.<operation>`
 
-Examples:
-- `_mono.health.check`
-- `_mono.config.reload`
+Reserved prefix `_mono.`; event definitions and service subjects using it are rejected.
 
 **Properties**:
 - Reserved for framework use
@@ -294,12 +293,12 @@ When `app.Stop()` is called:
 
 2. Stop Accepting New Work
    ├─ Fetch loops (stream, event stream, cron) stop fetching
-   └─ Every subscription is drained (no new deliveries)
+   └─ Subscriptions are drained module by module in reverse dependency order (no new deliveries)
 
 3. Wait for In-Flight Handlers
    ├─ Buffered messages still reach the worker pools
    ├─ Running handlers finish with a LIVE context
-   ├─ Bounded by WithShutdownDrainTimeout (30s default)
+   ├─ Bounded by WithShutdownDrainTimeout (default 30s, capped at the shutdown timeout, minus a reserve for module Stop)
    └─ What has not finished is counted and logged
 
 4. Cancel Runtime Context
@@ -309,6 +308,7 @@ When `app.Stop()` is called:
    ├─ For each module in REVERSE dependency order:
    │  └─ Call Stop()
    │
+   ├─ Then middleware modules (reverse registration order), then plugins last
    └─ Cleanup resources (close files, release locks)
 
 6. Stop NATS
@@ -319,7 +319,7 @@ When `app.Stop()` is called:
    └─ Application fully stopped
 ```
 
-`WithShutdownTimeout` (30s default) bounds the whole sequence when the context given to `Stop` has no deadline. Keep the drain timeout below the shutdown timeout, and both below your orchestrator's termination grace period, so module `Stop` always gets to run.
+`WithShutdownTimeout` (30s default) bounds steps 2-5 when the context given to `Stop` has no deadline; step 6 (NATS) runs outside it and takes at most about 5s for the connection drain plus the server shutdown. Keep the drain timeout below the shutdown timeout, and both below your orchestrator's termination grace period, so module `Stop` always gets to run.
 
 ## Key Design Decisions
 
@@ -330,11 +330,11 @@ NATS is embedded, not external:
 ✓ **Advantages**:
 - No external infrastructure needed
 - Simple deployment (single binary)
-- Zero-copy message passing (same process)
+- No network hop: modules talk to the embedded server over loopback (or in-process with `WithNATSInProcessConn`)
 - Easy testing
 
 ✗ **Trade-offs**:
-- Can't scale horizontally (single process)
+- Scaling out means running several instances as a NATS cluster (`WithNATSClustering`), which adds cluster operations
 - Not suitable for extreme performance (use HTTP/gRPC instead)
 
 ### 2. **Modules Before Services**
@@ -403,9 +403,9 @@ The framework provides configuration for common scenarios:
 |--------|---------|---------|
 | `WithLogLevel()` | `LogLevelDebug` | `LogLevelInfo` |
 | `WithLogFormat()` | `LogFormatJSON` | `LogFormatText` |
+| `WithNATSHost()` | `0.0.0.0` | `127.0.0.1` |
 | `WithNATSPort()` | `4222` | `4222` |
-| `WithJetStreamEnabled()` | `true` | `false` |
-| `WithJetStreamStorageDir()` | `/tmp/js` | `""` |
+| `WithJetStreamStorageDir()` | `/tmp/js` | unset (JetStream disabled); setting it enables JetStream |
 | `WithShutdownTimeout()` | `10*time.Second` | `30*time.Second` |
 
 ## Extension Points
@@ -414,13 +414,15 @@ The framework is extensible:
 
 ### Custom Middleware
 
-Intercept module lifecycle events:
+Intercept service and event consumer registrations, outgoing messages and lifecycle events:
 
 ```go
-type MyMiddleware struct {}
+type MyMiddleware struct{}
 
-func (m *MyMiddleware) RegisterServices(...) { ... }
-func (m *MyMiddleware) Start(...) { ... }
+func (m *MyMiddleware) OnServiceRegistration(ctx context.Context, reg mono.ServiceRegistration) mono.ServiceRegistration {
+    return reg
+}
+// ... plus Name/Start/Stop and the other MiddlewareModule hooks
 ```
 
 ### Plugins
@@ -436,7 +438,7 @@ app.RegisterPlugin(&StoragePlugin{}, "storage")
 Implement your own logger:
 
 ```go
-app.WithLogger(myCustomLogger)
+app, err := mono.NewMonoApplication(mono.WithLogger(myCustomLogger))
 ```
 
 ## Performance Characteristics
@@ -493,8 +495,8 @@ The framework is designed for monolith deployment:
 
 - Review [modules guide](modules.md) for detailed module information
 - Study [service communication](inter-module-communication.md) patterns
-- Explore [examples](../../../examples/) for practical implementations
+- Explore [examples](../../../examples/basic/README.md) for practical implementations
 
 ---
 
-You now understand how the Monolith Framework is organized! Continue with the [examples](../../../examples/) to see it in action.
+You now understand how the Monolith Framework is organized! Continue with the [examples](../../../examples/basic/README.md) to see it in action.
