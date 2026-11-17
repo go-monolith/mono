@@ -1,6 +1,8 @@
 # File Storage Plugin (fs-jetstream)
 
-The File Storage Plugin provides persistent file and object storage using NATS JetStream ObjectStore. It's ideal for storing documents, media files, and large binary objects with support for TTL-based expiration and compression.
+This page shows how to store files and binary objects with the `fs-jetstream` plugin: setting it up, configuring buckets, and the operations a module can call. Read it when your modules need documents, media files or other large binary objects. For small values, change notifications or optimistic locking, use [kv-jetstream](kv-jetstream.md) instead; [Storage Backends](../guides/storage-backends.md#backend-comparison) compares the two.
+
+The plugin stores objects in NATS JetStream ObjectStore, with support for TTL-based expiration and compression.
 
 ## Overview
 
@@ -14,135 +16,11 @@ The `fs-jetstream` plugin implements bucket-based file storage capabilities usin
 - **Metadata Headers**: Attach custom metadata to stored objects
 - **Object Information**: Query file sizes, modification times, and hashes
 
-## Architecture
-
-The plugin uses a hexagonal (ports & adapters) architecture with clean separation:
-
-```
-Consumer Module
-     │
-     │ uses
-     ▼
-FileStoragePort (interface)     ← Consumer-facing interface
-     │
-     │ implemented by
-     ▼
-FileStorageAdapter (struct)     ← Wraps backend, can add logging
-     │
-     │ wraps
-     ▼
-storage.Storage (+ StorageWith*) ← Backend contract from pkg/storage
-     │
-     │ implemented by
-     ▼
-JetStreamBackend (struct)       ← JetStream ObjectStore implementation
-```
-
-This design allows for future alternative backends (S3, Azure, etc.) without changing consumer code.
-
-## Interface Hierarchy
-
-The `FileStoragePort` interface embeds multiple interfaces from the `pkg/storage` package, providing a unified storage abstraction:
-
-```
-FileStoragePort
-     │
-     ├── storage.Storage (base)
-     │   └── Get, Set, Delete, Reset, Close (+ context variants)
-     │
-     ├── storage.StorageWithBucket
-     │   └── BucketName()
-     │
-     ├── storage.StorageWithList
-     │   └── List, ListWithContext
-     │
-     ├── storage.StorageWithStat
-     │   └── Stat, StatWithContext
-     │
-     ├── storage.StorageWithReader
-     │   └── GetReader, PutReader (+ context variants)
-     │
-     └── Put (FileStoragePort-specific, returns ObjectInfo)
-```
-
-### Embedded Interfaces
-
-| Interface | Methods | Purpose |
-|-----------|---------|---------|
-| `storage.Storage` | Get, Set, Delete, Reset, Close | Base key-value operations |
-| `storage.StorageWithBucket` | BucketName | Bucket identification |
-| `storage.StorageWithList` | List, ListWithContext | Object enumeration with filtering |
-| `storage.StorageWithStat` | Stat, StatWithContext | Object metadata retrieval |
-| `storage.StorageWithReader` | GetReader, PutReader (+ context) | Streaming for large files |
-
-### Type Aliases
-
-The plugin re-exports types from `pkg/storage` for convenience:
-
-| Plugin Type | Source | Description |
-|-------------|--------|-------------|
-| `ObjectInfo` | `storage.ObjectInfo` | Object metadata (size, hash, modtime) |
-| `ListOption` | `storage.ListOption` | List filtering options |
-| `ListOptions` | `storage.ListOptions` | List options struct |
-| `PutOption` | `storage.PutOption` | Put configuration options |
-| `PutOptions` | `storage.PutOptions` | Put options struct |
-
-### Context Variants Pattern
-
-Most methods have two variants:
-- **Non-context**: `Get(key)` - Uses `context.Background()` internally
-- **Context-aware**: `GetWithContext(ctx, key)` - Accepts explicit context
-
-Use context-aware variants when you need:
-- Timeout control
-- Cancellation support
-- Request tracing/logging
-
-```go
-// Simple usage (uses context.Background() internally)
-data, err := bucket.Get("file.txt")
-
-// Context-aware usage (explicit timeout/cancellation)
-ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-defer cancel()
-data, err := bucket.GetWithContext(ctx, "large-file.zip")
-```
-
-{% hint style="info" %}
-**Note**: The `Put()` method always requires a context parameter because it returns `ObjectInfo` metadata. Use `Set()` for simple storage without metadata return.
-{% endhint %}
-
-## Installation
-
-Import the plugin:
-
-```go
-import "github.com/go-monolith/mono/plugin/fs-jetstream"
-```
-
-## Signatures
-
-### New
-
-```go
-func New(config Config, opts ...Option) (*PluginModule, error)
-```
-
-Creates a new file storage plugin with the given bucket configurations.
-
-### Bucket Methods
-
-```go
-func (p *PluginModule) Bucket(name string) FileStoragePort
-func (p *PluginModule) Buckets() []string
-func (p *PluginModule) HasBucket(name string) bool
-```
-
-Access configured storage buckets.
-
 ## Quick Start
 
 ### 1. Create and Register the Plugin
+
+Import the plugin as `fsjetstream "github.com/go-monolith/mono/plugin/fs-jetstream"`. The application must enable JetStream:
 
 ```go
 package main
@@ -254,19 +132,31 @@ func (m *DocumentModule) Stop(ctx context.Context) error {
 }
 ```
 
+The plugin creates or updates every configured bucket in JetStream when it starts, before middleware and modules start. For the full start and stop order, see [Lifecycle Order](../api/plugins.md#lifecycle-order).
+
 ## Configuration
 
 ### BucketConfig
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `Name` | `string` | Bucket name (required, must be unique) |
-| `Description` | `string` | Optional bucket description |
-| `MaxBytes` | `int64` | Maximum total size of all objects (0 = unlimited) |
-| `TTL` | `time.Duration` | Time-to-live for objects (0 = no expiry). This is the only expiry: the `exp` argument of `Set`/`PutReader` is ignored, because JetStream ObjectStore has no per-object TTL |
-| `Replicas` | `int` | Number of replicas for replication (1-5; 0 means 1). The framework's `WithJetStreamDefaultReplicas` does not apply to plugin buckets; values above 1 need a clustered JetStream |
-| `Storage` | `StorageType` | `FileStorage` (default) or `MemoryStorage` |
-| `Compression` | `bool` | Enable S2 compression |
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `Name` | `string` | (required) | Bucket name (required, must be unique) |
+| `Description` | `string` | `""` | Optional bucket description |
+| `MaxBytes` | `int64` | `0` (unlimited) | Maximum total size of all objects (0 = unlimited) |
+| `TTL` | `time.Duration` | `0` (no expiry) | Time-to-live for objects (0 = no expiry). This is the only expiry: the `exp` argument of `Set`/`PutReader` is ignored, because JetStream ObjectStore has no per-object TTL |
+| `Replicas` | `int` | `0` (means 1) | Number of replicas for replication (1-5; 0 means 1). The framework's `WithJetStreamDefaultReplicas` does not apply to plugin buckets; values above 1 need a clustered JetStream |
+| `Storage` | `StorageType` | `FileStorage` | `FileStorage` (default) or `MemoryStorage` |
+| `Compression` | `bool` | `false` | Enable S2 compression |
+
+The minimal configuration is a single bucket with a name:
+
+```go
+storage, _ := fsjetstream.New(fsjetstream.Config{
+    Buckets: []fsjetstream.BucketConfig{
+        {Name: "documents"},
+    },
+})
+```
 
 ### StorageType
 
@@ -286,34 +176,30 @@ storage, err := fsjetstream.New(config, fsjetstream.WithLogger(myLogger))
 
 Without `WithLogger` the plugin logs to `slog.Default()`, not to the framework logger.
 
-## Default Config
-
-```go
-// Minimal configuration (single bucket)
-storage, _ := fsjetstream.New(fsjetstream.Config{
-    Buckets: []fsjetstream.BucketConfig{
-        {
-            Name:     "documents",
-            Storage:  fsjetstream.FileStorage,  // Persistent by default
-            Replicas: 1,
-        },
-    },
-})
-```
-
 ## API Reference
 
-### Module Methods
+### Plugin Methods
 
 | Method | Description |
 |--------|-------------|
+| `New(config Config, opts ...Option) (*PluginModule, error)` | Create the plugin with the given bucket configurations |
 | `Bucket(name string) FileStoragePort` | Get a bucket by name (returns nil if not found) |
 | `Buckets() []string` | List all bucket names |
 | `HasBucket(name string) bool` | Check if a bucket exists |
 
 ### FileStoragePort Interface
 
-Consumer-facing interface for storage operations. The interface embeds `storage.Storage` for basic operations and additional interfaces for file-specific capabilities:
+Consumer-facing interface for storage operations. It embeds interfaces from `pkg/storage` and adds `Put`:
+
+| Embedded interface | Methods | Purpose |
+|--------------------|---------|---------|
+| `storage.Storage` | Get, Set, Delete, Reset, Close | Base key-value operations |
+| `storage.StorageWithBucket` | BucketName | Bucket identification |
+| `storage.StorageWithList` | List, ListWithContext | Object enumeration with filtering |
+| `storage.StorageWithStat` | Stat, StatWithContext | Object metadata retrieval |
+| `storage.StorageWithReader` | GetReader, PutReader (+ context) | Streaming for large files |
+
+Most methods come in a plain and a `...WithContext` variant; see [Context Variants Pattern](../api/storage.md#context-variants-pattern).
 
 ```go
 type FileStoragePort interface {
@@ -351,8 +237,20 @@ type FileStoragePort interface {
 ```
 
 {% hint style="info" %}
-**Put vs Set**: Use `Put()` when you need the returned `ObjectInfo` metadata. Use `Set()` for simple storage without metadata return. Both store the data identically.
+**Put vs Set**: Use `Put()` when you need the returned `ObjectInfo` metadata; it always takes a context. Use `Set()` for simple storage without metadata return. Both store the data identically.
 {% endhint %}
+
+### Type Aliases
+
+The plugin re-exports types from `pkg/storage` for convenience:
+
+| Plugin Type | Source | Description |
+|-------------|--------|-------------|
+| `ObjectInfo` | `storage.ObjectInfo` | Object metadata (size, hash, modtime) |
+| `ListOption` | `storage.ListOption` | List filtering options |
+| `ListOptions` | `storage.ListOptions` | List options struct |
+| `PutOption` | `storage.PutOption` | Put configuration options |
+| `PutOptions` | `storage.PutOptions` | Put options struct |
 
 ### ObjectInfo
 
@@ -373,7 +271,7 @@ type ObjectInfo struct {
 }
 ```
 
-### Put Options
+### Put and List Options
 
 ```go
 // Set object description
@@ -384,14 +282,14 @@ fsjetstream.WithHeaders(map[string]string{
     "Content-Type": "application/pdf",
     "Author":       "John Doe",
 })
-```
 
-### List Options
-
-```go
-// Filter by prefix
+// Filter a listing by prefix
 fsjetstream.WithPrefix("reports/2024/")
 ```
+
+### Missing Objects
+
+`Get` returns `nil, nil` for a missing object; `Stat` and `GetReader` return an error wrapping `storage.ErrKeyNotFound` (check with `errors.Is`). `Delete` of a missing object is not an error.
 
 ## Usage Examples
 
@@ -467,8 +365,6 @@ for _, obj := range objects {
 
 ### Check Object Metadata
 
-`Get` returns `nil, nil` for a missing object; `Stat` and `GetReader` return an error wrapping `storage.ErrKeyNotFound` (check with `errors.Is`). `Delete` of a missing object is not an error.
-
 ```go
 info, err := bucket.Stat("file.txt")
 if err != nil {
@@ -513,13 +409,6 @@ func (m *MediaModule) Start(ctx context.Context) error {
 }
 ```
 
-## Plugin Lifecycle
-
-1. **Startup**: Plugin starts FIRST (before middleware and regular modules)
-2. **Bucket Creation**: All configured buckets are created/updated in JetStream
-3. **Consumer Access**: Consumer modules receive plugin via `SetPlugin()`
-4. **Shutdown**: Plugin stops LAST (after all modules and middleware)
-
 ## Best Practices
 
 ✓ **Do**
@@ -537,26 +426,37 @@ func (m *MediaModule) Start(ctx context.Context) error {
 - Leave temporary uploads without TTL expiration
 - Store sensitive data without encryption (use NATS TLS)
 
-## Comparison with Other Storage Options
+## How It Works
 
-| Aspect | fs-jetstream | kv-jetstream | Regular Files |
-|--------|------------|------------|---------------|
-| Data Model | Objects (binary) | Key-value | Raw files |
-| Max Size | Unlimited | ~1MB | Unlimited |
-| Persistence | Yes (configurable) | Yes | Yes |
-| Replication | Yes (1-5) | Yes (1-5) | No |
-| Distributed | Yes | Yes | No |
-| Watch/Notify | No | Yes | No |
-| Use Case | Documents, media | Config, sessions | Local storage |
+The plugin uses a hexagonal (ports & adapters) architecture:
+
+```
+Consumer Module
+     │
+     │ uses
+     ▼
+FileStoragePort (interface)     ← Consumer-facing interface
+     │
+     │ implemented by
+     ▼
+FileStorageAdapter (struct)     ← Wraps backend, can add logging
+     │
+     │ wraps
+     ▼
+storage.Storage (+ StorageWith*) ← Backend contract from pkg/storage
+     │
+     │ implemented by
+     ▼
+JetStreamBackend (struct)       ← JetStream ObjectStore implementation
+```
+
+This design allows for future alternative backends (S3, Azure, etc.) without changing consumer code.
 
 ## Related Documentation
 
 - [Storage API](../api/storage.md) - Unified storage interface documentation
+- [Storage Backends](../guides/storage-backends.md) - Choosing between fs-jetstream and kv-jetstream
 - [Plugin System Overview](README.md)
 - [Key-Value Storage Plugin (kv-jetstream)](kv-jetstream.md)
 - [Creating Custom Plugins](creating-plugins.md)
 - [Core Concepts - Modules](../core-concepts/modules.md)
-
----
-
-For key-value storage needs, see [kv-jetstream](kv-jetstream.md). For creating your own plugins, see [Creating Plugins](creating-plugins.md).

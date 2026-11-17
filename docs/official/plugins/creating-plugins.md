@@ -1,22 +1,6 @@
 # Creating Custom Plugins
 
-This guide walks you through creating your own plugins for the Monolith Framework. Plugins are the way to extend the framework with custom infrastructure services, external integrations, or specialized capabilities.
-
-## When to Create a Plugin
-
-Create a plugin for:
-
-- **External Services**: Database connections, message queues, cache servers
-- **Resource Managers**: Connection pools, thread pools, memory managers
-- **Integration Points**: Cloud APIs, payment processors, third-party services
-- **Infrastructure Concerns**: Monitoring, logging, health checking
-- **Stateful Services**: Anything that needs special lifecycle management
-
-Don't create a plugin for:
-
-- **Business Logic**: Use regular modules instead
-- **Simple Configuration**: Use framework options or environment variables
-- **Service Handlers**: Register them in modules using ServiceContainer
+This guide builds one plugin from start to finish: a `customplugin` package that wraps a connection to an external service, exposes it to modules through a small interface (a port), and is registered, used and tested in an application. Read it when no built-in plugin fits and you need your own shared infrastructure component. For whether a plugin is the right tool, see [When to Use Plugins](README.md#when-to-use-plugins); for the interfaces and the lifecycle order the framework applies, see the [Plugin Module API](../api/plugins.md).
 
 ## Plugin Architecture
 
@@ -29,36 +13,11 @@ PluginModule (implements PluginModule interface)
                     └── External Resources (NATS, databases, etc.)
 ```
 
-## Core Plugin Interfaces
+In the example, `MyPlugin` is the plugin module, `DataPort` is the public API, `adapter` is the internal implementation, and `Connection` stands for the client of your external resource.
 
-### PluginModule Interface
+## Step 1: Define Configuration and Constructor
 
-```go
-type PluginModule interface {
-    Module  // Implements Name(), Start(), Stop()
-
-    // SetContainer receives the plugin's dedicated ServiceContainer
-    SetContainer(container ServiceContainer)
-
-    // Container returns the plugin's ServiceContainer
-    Container() ServiceContainer
-}
-```
-
-### UsePluginModule Interface
-
-```go
-type UsePluginModule interface {
-    Module
-
-    // SetPlugin receives each registered plugin instance
-    SetPlugin(alias string, plugin PluginModule)
-}
-```
-
-## Step 1: Define Your Plugin Structure
-
-Start with a concrete struct that implements `PluginModule`:
+Validate configuration early, in `New()`, so a bad configuration fails before the application starts. The framework does not inject a logger into plugins: accept one through an option, as the built-in plugins do with `WithLogger(*slog.Logger)`, and default to `slog.Default()`.
 
 ```go
 package customplugin
@@ -66,154 +25,72 @@ package customplugin
 import (
     "context"
     "fmt"
-
-    mono "github.com/go-monolith/mono"
-)
-
-type PluginModule struct {
-    name      string
-    container mono.ServiceContainer
-    // Add your resource fields here
-    resource  *YourResource
-}
-
-// Config holds plugin configuration
-type Config struct {
-    // Add configuration fields
-    Hostname string
-    Port     int
-}
-
-// New creates and initializes the plugin
-func New(config Config) (*PluginModule, error) {
-    return &PluginModule{
-        name: "customplugin",
-        // Initialize your resource
-    }, nil
-}
-```
-
-## Step 2: Implement the Module Interface
-
-Implement the required methods from `Module`:
-
-```go
-func (p *PluginModule) Name() string {
-    return p.name
-}
-
-func (p *PluginModule) Start(ctx context.Context) error {
-    // Initialize your resource
-    // Example:
-    resource, err := ConnectToExternalService(ctx)
-    if err != nil {
-        return fmt.Errorf("failed to initialize: %w", err)
-    }
-    p.resource = resource
-    return nil
-}
-
-func (p *PluginModule) Stop(ctx context.Context) error {
-    // Clean up your resource
-    if p.resource != nil {
-        return p.resource.Close(ctx)
-    }
-    return nil
-}
-```
-
-## Step 3: Implement the PluginModule Interface
-
-Implement the plugin-specific methods:
-
-```go
-func (p *PluginModule) SetContainer(container mono.ServiceContainer) {
-    p.container = container
-}
-
-func (p *PluginModule) Container() mono.ServiceContainer {
-    return p.container
-}
-```
-
-## Step 4: Define Your Public API
-
-Create consumer-facing interfaces that abstract your implementation:
-
-```go
-// PublicPort defines the interface consumers will use
-type PublicPort interface {
-    // Operation 1
-    Operation1(ctx context.Context, arg string) (string, error)
-
-    // Operation 2
-    Operation2(ctx context.Context, arg string) error
-}
-
-// Implement the port
-func (p *PluginModule) Port() PublicPort {
-    return &adapter{resource: p.resource}
-}
-
-type adapter struct {
-    resource *YourResource
-}
-
-func (a *adapter) Operation1(ctx context.Context, arg string) (string, error) {
-    return a.resource.Do(ctx, arg)
-}
-
-func (a *adapter) Operation2(ctx context.Context, arg string) error {
-    return a.resource.Perform(ctx, arg)
-}
-```
-
-## Step 5: Create a Complete Example
-
-```go
-package customplugin
-
-import (
-    "context"
-    "fmt"
+    "log/slog"
     "time"
 
     mono "github.com/go-monolith/mono"
 )
 
-// Plugin configuration
+// Config holds plugin configuration
 type Config struct {
     ConnectionString string
     MaxConnections   int
     Timeout          time.Duration
 }
 
-// Plugin implementation
+// MyPlugin is the plugin module
 type MyPlugin struct {
     name      string
     config    Config
     container mono.ServiceContainer
     conn      *Connection
+    logger    *slog.Logger
+}
+
+// Option configures the plugin
+type Option func(*MyPlugin)
+
+// WithLogger sets the plugin's logger
+func WithLogger(logger *slog.Logger) Option {
+    return func(p *MyPlugin) { p.logger = logger }
 }
 
 // New creates the plugin
-func New(config Config) (*MyPlugin, error) {
+func New(config Config, opts ...Option) (*MyPlugin, error) {
+    // Validate required fields
     if config.ConnectionString == "" {
         return nil, fmt.Errorf("connection string required")
     }
 
-    return &MyPlugin{
+    // Validate ranges
+    if config.MaxConnections < 1 || config.MaxConnections > 1000 {
+        return nil, fmt.Errorf("max connections must be 1-1000, got %d", config.MaxConnections)
+    }
+
+    p := &MyPlugin{
         name:   "my-plugin",
         config: config,
-    }, nil
+        logger: slog.Default(),
+    }
+    for _, opt := range opts {
+        opt(p)
+    }
+    return p, nil
 }
+```
 
-// Module interface
+## Step 2: Implement the Module Interface
+
+`Start()` acquires the resource and `Stop()` releases it. Wrap errors with context, and bound the cleanup in `Stop()` with a timeout:
+
+```go
 func (p *MyPlugin) Name() string {
     return p.name
 }
 
 func (p *MyPlugin) Start(ctx context.Context) error {
+    p.logger.Info("Initializing plugin", "name", p.Name())
+
     // Initialize connection
     conn, err := NewConnection(ctx, &ConnectionConfig{
         URL:      p.config.ConnectionString,
@@ -231,17 +108,32 @@ func (p *MyPlugin) Start(ctx context.Context) error {
         return fmt.Errorf("failed to ping: %w", err)
     }
 
+    p.logger.Info("Plugin initialized successfully")
     return nil
 }
 
 func (p *MyPlugin) Stop(ctx context.Context) error {
     if p.conn != nil {
-        return p.conn.Close(ctx)
+        // Use timeout for cleanup
+        shutdownCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+        defer cancel()
+
+        if err := p.conn.Close(shutdownCtx); err != nil {
+            return fmt.Errorf("failed to close connection: %w", err)
+        }
     }
     return nil
 }
+```
 
-// PluginModule interface
+## Step 3: Implement the PluginModule Interface
+
+Store the container the framework injects and return it from `Container()`. A compile-time check catches a missing method:
+
+```go
+// Compile-time interface check
+var _ mono.PluginModule = (*MyPlugin)(nil)
+
 func (p *MyPlugin) SetContainer(container mono.ServiceContainer) {
     p.container = container
 }
@@ -249,14 +141,21 @@ func (p *MyPlugin) SetContainer(container mono.ServiceContainer) {
 func (p *MyPlugin) Container() mono.ServiceContainer {
     return p.container
 }
+```
 
-// Public API
+## Step 4: Define Your Public API
+
+Give consumers an interface (a port) that hides the implementation, and return it from a method on the plugin:
+
+```go
+// DataPort defines the interface consumers will use
 type DataPort interface {
     Get(ctx context.Context, key string) ([]byte, error)
     Set(ctx context.Context, key string, value []byte) error
     Delete(ctx context.Context, key string) error
 }
 
+// Port returns the public API
 func (p *MyPlugin) Port() DataPort {
     return &adapter{conn: p.conn}
 }
@@ -278,7 +177,9 @@ func (a *adapter) Delete(ctx context.Context, key string) error {
 }
 ```
 
-## Step 6: Use Your Plugin in a Module
+## Step 5: Use Your Plugin in a Module
+
+The module implements `UsePluginModule`, keeps the plugin registered under its alias, and checks in `Start()` that it was injected:
 
 ```go
 type MyModule struct {
@@ -326,7 +227,7 @@ func (m *MyModule) Stop(ctx context.Context) error {
 }
 ```
 
-## Step 7: Register and Use
+## Step 6: Register and Run
 
 ```go
 func main() {
@@ -353,7 +254,7 @@ func main() {
     }
 
     // Register modules that use the plugin
-    if err := app.Register(&MyModule{}); err != nil {
+    if err := app.Register(&customplugin.MyModule{}); err != nil {
         panic(err)
     }
 
@@ -371,104 +272,9 @@ func main() {
 }
 ```
 
-## Best Practices
+## Step 7: Test Your Plugin
 
-### Error Handling
-
-Always wrap errors with context:
-
-```go
-func (p *MyPlugin) Start(ctx context.Context) error {
-    conn, err := NewConnection(ctx)
-    if err != nil {
-        return fmt.Errorf("failed to create connection: %w", err)
-    }
-    p.conn = conn
-    return nil
-}
-```
-
-### Graceful Shutdown
-
-Implement proper cleanup in Stop():
-
-```go
-func (p *MyPlugin) Stop(ctx context.Context) error {
-    if p.conn != nil {
-        // Use timeout for cleanup
-        shutdownCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-        defer cancel()
-
-        if err := p.conn.Close(shutdownCtx); err != nil {
-            return fmt.Errorf("failed to close connection: %w", err)
-        }
-    }
-    return nil
-}
-```
-
-### Configuration Validation
-
-Validate configuration early in New():
-
-```go
-func New(config Config) (*MyPlugin, error) {
-    // Validate required fields
-    if config.ConnectionString == "" {
-        return nil, fmt.Errorf("connection string required")
-    }
-
-    // Validate ranges
-    if config.MaxConnections < 1 || config.MaxConnections > 1000 {
-        return nil, fmt.Errorf("max connections must be 1-1000, got %d", config.MaxConnections)
-    }
-
-    return &MyPlugin{...}, nil
-}
-```
-
-### Nil Checks in Consumers
-
-Always check if plugin was injected:
-
-```go
-func (m *MyModule) Start(ctx context.Context) error {
-    if m.plugin == nil {
-        return fmt.Errorf("required plugin not registered")
-    }
-
-    // Use plugin...
-    return nil
-}
-```
-
-### Logging
-
-The framework does not inject a logger into plugins. Accept one through an option, as the built-in plugins do with `WithLogger(*slog.Logger)`, and default to `slog.Default()`:
-
-```go
-// MyPlugin holds a field `logger *slog.Logger`, set to slog.Default() in New
-// and replaced by WithLogger.
-type Option func(*MyPlugin)
-
-func WithLogger(logger *slog.Logger) Option {
-    return func(p *MyPlugin) { p.logger = logger }
-}
-
-func (p *MyPlugin) Start(ctx context.Context) error {
-    p.logger.Info("Initializing plugin", "name", p.Name())
-
-    if err := p.initialize(ctx); err != nil {
-        p.logger.Error("Initialization failed", "error", err)
-        return err
-    }
-
-    p.logger.Info("Plugin initialized successfully")
-    return nil
-}
-```
-
-## Testing Your Plugin
+Give the plugin an in-memory container from package `monotest` and exercise its port:
 
 ```go
 func TestPluginStart(t *testing.T) {
@@ -477,6 +283,7 @@ func TestPluginStart(t *testing.T) {
     // Create plugin with test config
     plugin, err := New(Config{
         ConnectionString: "test://localhost:9000",
+        MaxConnections:   1,
     })
     if err != nil {
         t.Fatalf("Failed to create plugin: %v", err)
@@ -513,7 +320,7 @@ To test a module that uses the plugin, inject it with `monotest.WithPlugin(alias
 
 ```go
 func TestMyModule(t *testing.T) {
-    plugin, _ := New(Config{ConnectionString: "test://localhost:9000"})
+    plugin, _ := New(Config{ConnectionString: "test://localhost:9000", MaxConnections: 1})
     plugin.SetContainer(monotest.NewContainer(plugin.Name(), monotest.NewEventBus()))
     if err := plugin.Start(context.Background()); err != nil {
         t.Fatal(err)
@@ -530,10 +337,6 @@ func TestMyModule(t *testing.T) {
 Expose multiple interfaces from one plugin:
 
 ```go
-type MyPlugin struct {
-    // ...
-}
-
 func (p *MyPlugin) DataPort() DataPort { /* ... */ }
 func (p *MyPlugin) AdminPort() AdminPort { /* ... */ }
 ```
@@ -541,6 +344,10 @@ func (p *MyPlugin) AdminPort() AdminPort { /* ... */ }
 ### Service Registration
 
 A plugin that implements `ServiceProviderModule` has `RegisterServices()` called on its own container before `Start()`. Services registered in a plugin's container are not currently served over NATS (no subscription is created for them), so calls to them get no responder. Expose plugin functionality through Go methods (ports) instead, as shown above.
+
+### Events
+
+A plugin that needs the event bus implements `EventBusAwareModule`; see [Plugins and Other Components](README.md#with-events).
 
 ### Plugin Dependencies
 
@@ -563,16 +370,6 @@ _ = app.RegisterPlugin(other, "other-plugin") // starts first
 _ = app.RegisterPlugin(mine, "my-plugin")
 ```
 
-## Comparison with Built-in Plugins
-
-| Aspect | fs-jetstream | kv-jetstream | Your Plugin |
-|--------|------------|------------|------------|
-| Scope | File/object storage | Key-value storage | Any infrastructure |
-| Complexity | Medium | Medium | Your choice |
-| External Deps | JetStream | JetStream | Your choice |
-| Testing | Unit + integration | Unit + integration | Your choice |
-| Lifecycle | Plugin standard | Plugin standard | Plugin standard |
-
 ## Troubleshooting
 
 ### Plugin Not Initialized
@@ -593,37 +390,12 @@ func (m *Module) SetPlugin(alias string, plugin mono.PluginModule) {
 }
 ```
 
-### Start Fails
-
-**Problem**: Plugin fails to start
-
-**Solution**: Ensure all required resources are available:
-
-```go
-func (p *MyPlugin) Start(ctx context.Context) error {
-    // Validate configuration
-    if p.config.ConnectionString == "" {
-        return fmt.Errorf("connection string required")
-    }
-
-    // Initialize with proper error handling
-    resource, err := NewResource(ctx, p.config)
-    if err != nil {
-        return fmt.Errorf("failed to create resource: %w", err)
-    }
-
-    p.resource = resource
-    return nil
-}
-```
-
 ## Related Documentation
 
 - [Plugin System Overview](README.md)
+- [Plugin Module API](../api/plugins.md)
 - [File Storage Plugin (fs-jetstream)](fs-jetstream.md)
 - [Key-Value Storage Plugin (kv-jetstream)](kv-jetstream.md)
 - [Core Concepts - Modules](../core-concepts/modules.md)
 
----
-
-For existing plugins, see the [Plugin System Overview](README.md). For examples of production plugins, examine `fs-jetstream` and `kv-jetstream` in the framework source code.
+For examples of production plugins, examine `plugin/fs-jetstream` and `plugin/kv-jetstream` in the framework source code.

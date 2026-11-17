@@ -1,5 +1,7 @@
 # Storage Interface
 
+This page is the reference for package `github.com/go-monolith/mono/pkg/storage`: its interfaces, data types, sentinel errors and options. Read it when you write code against the storage plugins' ports or implement a storage backend of your own. For how to choose a backend and practical patterns, see the [Storage Backends guide](../guides/storage-backends.md).
+
 The `pkg/storage` package provides a unified storage interface for communicating with different storage backends. This abstraction enables consistent storage operations across different implementations (JetStream KV, JetStream ObjectStore, and future backends like Redis or S3).
 
 ## Overview
@@ -401,27 +403,10 @@ data, err := bucket.GetWithContext(ctx, "key")
 
 ## Capability Detection
 
-Check for extended capabilities using type assertions:
+Check for extended capabilities with a type assertion on a `Storage` value; a backend implements only the interfaces it supports:
 
 ```go
 // s is a storage.Storage
-// Check if storage supports watching
-if watcher, ok := s.(storage.StorageWithWatch); ok {
-    w, err := watcher.Watch("user.*")
-    if err != nil {
-        return err
-    }
-    defer w.Stop()
-
-    for entry := range w.Updates() {
-        if entry == nil {
-            continue // initial values delivered
-        }
-        fmt.Printf("Key %s changed\n", entry.Key)
-    }
-}
-
-// Check if storage supports revisions
 if revStore, ok := s.(storage.StorageWithRevision); ok {
     entry, err := revStore.GetEntry("key")
     if err != nil {
@@ -431,21 +416,11 @@ if revStore, ok := s.(storage.StorageWithRevision); ok {
 }
 ```
 
-## Plugin Implementations
-
-The following plugins implement subsets of the storage interface:
-
-| Plugin | Base Interfaces | Extended Interfaces |
-|--------|-----------------|---------------------|
-| [kv-jetstream](../plugins/kv-jetstream.md) | Storage, StorageWithBucket | StorageWithWatch, StorageWithRevision, StorageWithKeys, StorageWithStatus |
-| [fs-jetstream](../plugins/fs-jetstream.md) | Storage, StorageWithBucket | StorageWithList, StorageWithStat, StorageWithReader |
+The [Storage Backends guide](../guides/storage-backends.md#capability-detection) shows the pattern for every capability, including watching; the [Backend Comparison](../guides/storage-backends.md#backend-comparison) lists which interfaces each built-in plugin implements.
 
 ## Related Documentation
 
 - [Key-Value Storage Plugin (kv-jetstream)](../plugins/kv-jetstream.md)
 - [File Storage Plugin (fs-jetstream)](../plugins/fs-jetstream.md)
+- [Storage Backends guide](../guides/storage-backends.md)
 - [Creating Custom Plugins](../plugins/creating-plugins.md)
-
----
-
-For plugin-specific documentation, see the individual plugin pages. For creating custom storage backends, implement the relevant interfaces from this package.

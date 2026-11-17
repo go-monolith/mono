@@ -1,31 +1,6 @@
 # Plugin Module API
 
-API documentation for the `PluginModule` and `UsePluginModule` interfaces, which enable shared infrastructure components that start before all other modules.
-
-## Signatures
-
-```go
-// PluginModule interface
-type PluginModule interface {
-    Module
-    SetContainer(container ServiceContainer)
-    Container() ServiceContainer
-}
-
-// UsePluginModule interface
-type UsePluginModule interface {
-    Module
-    SetPlugin(alias string, plugin PluginModule)
-}
-
-// Framework registration
-func (app MonoApplication) RegisterPlugin(plugin PluginModule, alias string) error
-func (app MonoApplication) Plugin(alias string) PluginModule
-```
-
-{% hint style="info" %}
-**Lifecycle Order:** Plugins start first and stop last. This guarantees that shared infrastructure (storage, caches) is ready before any module needs it.
-{% endhint %}
+This page is the reference for the `PluginModule` and `UsePluginModule` interfaces, plugin registration on `MonoApplication`, and the order in which the framework starts and stops plugins, middleware and modules. Read it when you implement a plugin or a module that uses one. For what plugins are and when to use them, see [Plugins](../plugins/README.md); for a step-by-step guide, see [Creating Plugins](../plugins/creating-plugins.md).
 
 ## Overview
 
@@ -37,12 +12,36 @@ Plugins are special modules designed for shared infrastructure that other module
 - **Excluded from middleware hooks** - Raw access without interception
 - **Registered with aliases** - Multiple instances of the same plugin type supported
 
+## Signatures
+
+```go
+// PluginModule is implemented by every plugin.
+type PluginModule interface {
+    Module // Name(), Start(), Stop()
+    SetContainer(container ServiceContainer)
+    Container() ServiceContainer
+}
+
+// UsePluginModule is implemented by modules that receive plugins.
+type UsePluginModule interface {
+    Module
+    SetPlugin(alias string, plugin PluginModule)
+}
+
+// Methods of MonoApplication
+type MonoApplication interface {
+    // ...
+    RegisterPlugin(plugin PluginModule, alias string) error
+    Plugin(alias string) PluginModule
+}
+```
+
 ## PluginModule Interface
 
 ### SetContainer
 
 ```go
-func (plugin PluginModule) SetContainer(container ServiceContainer)
+SetContainer(container ServiceContainer)
 ```
 
 Called by the framework to inject the plugin's dedicated ServiceContainer during initialization.
@@ -54,14 +53,6 @@ Called by the framework to inject the plugin's dedicated ServiceContainer during
 - Called before `Start()`
 - Called before middleware modules start
 - EventBus is already set on the container
-
-**Plugin start sequence** (each plugin, in registration order):
-1. `SetContainer()`
-2. `SetEventBus()` if the plugin implements `EventBusAwareModule` (the shared, unscoped bus)
-3. `RegisterServices()` if the plugin implements `ServiceProviderModule`
-4. `Start()`
-
-If a plugin's `Start()` fails, the plugins already started are stopped in reverse order and `app.Start()` returns the error.
 
 **Example:**
 ```go
@@ -77,7 +68,7 @@ func (p *StoragePlugin) SetContainer(container mono.ServiceContainer) {
 ### Container
 
 ```go
-func (plugin PluginModule) Container() ServiceContainer
+Container() ServiceContainer
 ```
 
 Returns the plugin's ServiceContainer. Services registered in a plugin's container are not currently served over NATS (no subscription is created for them), so calls to them get no responder; expose plugin functionality through Go methods on the plugin type instead.
@@ -97,7 +88,7 @@ func (p *StoragePlugin) Container() mono.ServiceContainer {
 ### SetPlugin
 
 ```go
-func (module UsePluginModule) SetPlugin(alias string, plugin PluginModule)
+SetPlugin(alias string, plugin PluginModule)
 ```
 
 Called by the framework for each registered plugin, in no guaranteed order. Modules should filter by alias and store the plugins they need. Only regular modules receive plugins: `SetPlugin()` is not called on middleware or on other plugins.
@@ -121,6 +112,7 @@ Called by the framework for each registered plugin, in no guaranteed order. Modu
 ```go
 type DocumentModule struct {
     storagePlugin *fsjetstream.PluginModule
+    documents     fsjetstream.FileStoragePort
 }
 
 func (m *DocumentModule) SetPlugin(alias string, plugin mono.PluginModule) {
@@ -147,10 +139,10 @@ func (m *DocumentModule) Start(ctx context.Context) error {
 ### RegisterPlugin
 
 ```go
-func (app MonoApplication) RegisterPlugin(plugin PluginModule, alias string) error
+RegisterPlugin(plugin PluginModule, alias string) error
 ```
 
-Registers a plugin with the framework under a specific alias.
+Registers a plugin with the framework under a specific alias. Must be called before `app.Start()`.
 
 **Parameters:**
 - `plugin` - The plugin instance implementing `PluginModule`
@@ -186,273 +178,59 @@ if err := app.RegisterPlugin(backupStorage, "backup-storage"); err != nil {
 ### Plugin
 
 ```go
-func (app MonoApplication) Plugin(alias string) PluginModule
+Plugin(alias string) PluginModule
 ```
 
 Returns the plugin registered under `alias`, or nil if there is none. Meant for host code (`main.go`, tests); modules receive plugins through `SetPlugin()`.
 
 ## Lifecycle Order
 
-Plugins follow a strict lifecycle order relative to other module types:
+Plugins start first and stop last, so shared infrastructure (storage, caches) is fully initialized before any module needs it and remains available until all modules have stopped.
 
-### Startup Order
-
-```
-1. Plugins          (in registration order)
-2. Middleware       (in registration order)
-3. Regular Modules  (in dependency order)
-```
-
-### Shutdown Order
+### Startup Sequence
 
 ```
-1. Regular Modules  (reverse dependency order)
-2. Middleware       (reverse registration order)
-3. Plugins          (reverse registration order)
+1. NATS server started (in NewMonoApplication); Start waits until JetStream answers
+2. Plugins start (in registration order), each:
+   - SetContainer() with its dedicated ServiceContainer
+   - SetEventBus() if it implements EventBusAwareModule (shared, unscoped bus)
+   - RegisterServices() if it implements ServiceProviderModule
+   - Start()
+3. Middleware starts (in registration order)
+4. Regular modules start (in dependency order), each:
+   - ServiceContainer bound
+   - SetPlugin() for every registered plugin, if it implements UsePluginModule
+   - SetDependencyServiceContainer(), SetEventBus(), RegisterServices()
+   - Start()
 ```
 
-This guarantees:
-- Plugins are fully initialized before any module needs them
-- Plugins remain available until all modules have stopped
+If a plugin's `Start()` fails, the plugins already started are stopped in reverse order and `app.Start()` returns the error.
 
-## Implementing a Plugin
+### Shutdown Sequence
 
-### Step 1: Define the Plugin Struct
-
-```go
-package myplugin
-
-import (
-    "context"
-    mono "github.com/go-monolith/mono"
-)
-
-type MyPlugin struct {
-    container mono.ServiceContainer
-    // Plugin-specific fields
-}
-
-// Compile-time interface check
-var _ mono.PluginModule = (*MyPlugin)(nil)
+```
+1. Regular modules stop (in reverse dependency order)
+2. Middleware stops (in reverse registration order)
+3. Plugins stop (in reverse registration order)
+   - Plugin cleanup happens here
+4. NATS connection closes
 ```
 
-### Step 2: Implement Required Methods
-
-```go
-func (p *MyPlugin) Name() string {
-    return "my-plugin"
-}
-
-func (p *MyPlugin) SetContainer(container mono.ServiceContainer) {
-    p.container = container
-}
-
-func (p *MyPlugin) Container() mono.ServiceContainer {
-    return p.container
-}
-
-func (p *MyPlugin) Start(ctx context.Context) error {
-    // Initialize plugin resources
-    return nil
-}
-
-func (p *MyPlugin) Stop(ctx context.Context) error {
-    // Cleanup plugin resources
-    return nil
-}
-```
-
-### Step 3: Add Plugin-Specific Methods
-
-```go
-// Expose plugin functionality to consuming modules
-func (p *MyPlugin) GetResource(name string) Resource {
-    // Return plugin-managed resource
-}
-```
-
-### Step 4: Register and Use
-
-```go
-// In main.go
-plugin, err := myplugin.New(config)
-if err != nil {
-    log.Fatal(err)
-}
-if err := app.RegisterPlugin(plugin, "my-plugin"); err != nil {
-    log.Fatal(err)
-}
-
-// In consuming module
-func (m *MyModule) SetPlugin(alias string, plugin mono.PluginModule) {
-    if alias == "my-plugin" {
-        m.myPlugin = plugin.(*myplugin.MyPlugin)
-    }
-}
-```
+If a regular module fails to start, the modules started before it are rolled back, but plugins (and middleware) that already started are not stopped: their `Stop()` is not called.
 
 ## Built-in Plugins
 
-### fs-jetstream
+| Plugin | Package | Backed by |
+|--------|---------|-----------|
+| [fs-jetstream](../plugins/fs-jetstream.md) | `github.com/go-monolith/mono/plugin/fs-jetstream` (`fsjetstream`) | JetStream ObjectStore (file storage) |
+| [kv-jetstream](../plugins/kv-jetstream.md) | `github.com/go-monolith/mono/plugin/kv-jetstream` (`kvjetstream`) | JetStream KeyValue store |
 
-File storage plugin using JetStream ObjectStore.
-
-```go
-import "github.com/go-monolith/mono/plugin/fs-jetstream"
-
-storage, err := fsjetstream.New(fsjetstream.Config{
-    Buckets: []fsjetstream.BucketConfig{
-        {Name: "documents", MaxBytes: 100 * 1024 * 1024},
-        {Name: "images", TTL: 24 * time.Hour},
-    },
-})
-if err != nil {
-    log.Fatal(err)
-}
-
-if err := app.RegisterPlugin(storage, "storage"); err != nil {
-    log.Fatal(err)
-}
-```
-
-See [fs-jetstream Plugin](../plugins/fs-jetstream.md) for detailed documentation.
-
-### kv-jetstream
-
-Key-value storage plugin using JetStream KeyValue store.
-
-```go
-import "github.com/go-monolith/mono/plugin/kv-jetstream"
-
-kvStore, err := kvjetstream.New(kvjetstream.Config{
-    Buckets: []kvjetstream.BucketConfig{
-        {Name: "sessions", TTL: 30 * time.Minute},
-        {Name: "cache", MaxBytes: 50 * 1024 * 1024},
-    },
-})
-if err != nil {
-    log.Fatal(err)
-}
-
-if err := app.RegisterPlugin(kvStore, "kv"); err != nil {
-    log.Fatal(err)
-}
-```
-
-See [kv-jetstream Plugin](../plugins/kv-jetstream.md) for detailed documentation.
-
-## When to Use Plugins
-
-### Use Plugins For
-
-- **Shared infrastructure** - Storage, caching, external service clients
-- **Resources requiring early initialization** - Must be ready before modules start
-- **Multiple instances** - Same resource type with different configurations
-- **Bypass middleware** - Low-level operations without interception
-
-### Use Regular Modules For
-
-- **Business logic** - Domain-specific functionality
-- **Service providers** - Services called by other modules
-- **Event emitters/consumers** - Event-driven communication
-- **Dependency relationships** - When startup order matters based on dependencies
-
-## Best Practices
-
-### Do
-
-- **Verify plugins in Start()** - Check if required plugins were injected
-- **Use descriptive aliases** - "primary-storage" vs "s1"
-- **Type-assert to specific type** - Access plugin-specific methods
-- **Document plugin requirements** - State which plugins a module needs
-
-### Don't
-
-- **Don't use plugins for business logic** - Use regular modules instead
-- **Don't assume plugin exists** - Always check for nil before using
-- **Don't register after Start()** - Plugins must be registered before `app.Start()`
-- **Don't create circular dependencies** - Plugins shouldn't depend on regular modules
-
-## Complete Example
-
-```go
-package main
-
-import (
-    "context"
-    "fmt"
-    "log"
-
-    mono "github.com/go-monolith/mono"
-    "github.com/go-monolith/mono/plugin/fs-jetstream"
-)
-
-// DocumentModule uses the storage plugin
-type DocumentModule struct {
-    storage *fsjetstream.PluginModule
-}
-
-func (m *DocumentModule) Name() string { return "documents" }
-
-func (m *DocumentModule) SetPlugin(alias string, plugin mono.PluginModule) {
-    if alias == "storage" {
-        m.storage = plugin.(*fsjetstream.PluginModule)
-    }
-}
-
-func (m *DocumentModule) Start(ctx context.Context) error {
-    if m.storage == nil {
-        return fmt.Errorf("required plugin 'storage' not registered")
-    }
-
-    // Access the documents bucket
-    docs := m.storage.Bucket("documents")
-    if docs == nil {
-        return fmt.Errorf("bucket 'documents' not configured")
-    }
-
-    return nil
-}
-
-func (m *DocumentModule) Stop(ctx context.Context) error {
-    return nil
-}
-
-func main() {
-    // Create application with JetStream enabled
-    app, err := mono.NewMonoApplication(mono.WithJetStreamStorageDir("./data/jetstream"))
-    if err != nil {
-        log.Fatal(err)
-    }
-
-    // Create and register storage plugin
-    storage, err := fsjetstream.New(fsjetstream.Config{
-        Buckets: []fsjetstream.BucketConfig{
-            {Name: "documents"},
-        },
-    })
-    if err != nil {
-        log.Fatal(err)
-    }
-    if err := app.RegisterPlugin(storage, "storage"); err != nil {
-        log.Fatal(err)
-    }
-
-    // Register module that uses the plugin
-    if err := app.Register(&DocumentModule{}); err != nil {
-        log.Fatal(err)
-    }
-
-    // Start application
-    if err := app.Start(context.Background()); err != nil {
-        log.Fatal(err)
-    }
-}
-```
+For a complete application using a plugin, see [Example: Using the Storage Plugin](../plugins/README.md#example-using-the-storage-plugin); to implement one, see [Creating Plugins](../plugins/creating-plugins.md).
 
 ## Related Documentation
 
-- [Core Concepts: Modules](../core-concepts/modules.md) - Module interface hierarchy
+- [Plugins](../plugins/README.md) - When to use plugins, usage patterns, best practices
 - [Creating Plugins](../plugins/creating-plugins.md) - Detailed plugin creation guide
+- [Core Concepts: Modules](../core-concepts/modules.md) - Module interface hierarchy
 - [fs-jetstream Plugin](../plugins/fs-jetstream.md) - File storage plugin
 - [kv-jetstream Plugin](../plugins/kv-jetstream.md) - Key-value storage plugin
