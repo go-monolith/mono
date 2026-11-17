@@ -8,7 +8,7 @@ The `fs-jetstream` plugin implements bucket-based file storage capabilities usin
 
 - **Multiple Bucket Support**: Organize files into separate buckets with independent configurations
 - **Flexible Storage**: Choose between disk-based (persistent) and memory-based (fast) storage
-- **TTL Support**: Automatically expire objects after a specified duration
+- **TTL Support**: Automatically expire objects after a bucket-level duration (`BucketConfig.TTL`)
 - **Compression**: Optional S2 compression for space efficiency
 - **Large File Support**: Streaming API for files larger than memory
 - **Metadata Headers**: Attach custom metadata to stored objects
@@ -31,7 +31,7 @@ FileStorageAdapter (struct)     ← Wraps backend, can add logging
      │
      │ wraps
      ▼
-FileStorageBackend (interface)  ← Internal backend interface
+storage.Storage (+ StorageWith*) ← Backend contract from pkg/storage
      │
      │ implemented by
      ▼
@@ -160,7 +160,7 @@ func main() {
 
     // Create application with JetStream enabled
     app, err := mono.NewMonoApplication(
-        mono.WithJetStreamDomain("default"),
+        mono.WithJetStreamStorageDir("./data/jetstream"),
     )
     if err != nil {
         panic(err)
@@ -187,10 +187,14 @@ func main() {
     }
 
     // Register plugin with an alias
-    app.RegisterPlugin(storage, "storage")
+    if err := app.RegisterPlugin(storage, "storage"); err != nil {
+        panic(err)
+    }
 
     // Register modules that use storage
-    app.Register(&DocumentModule{})
+    if err := app.Register(&DocumentModule{}); err != nil {
+        panic(err)
+    }
 
     if err := app.Start(ctx); err != nil {
         panic(err)
@@ -259,8 +263,8 @@ func (m *DocumentModule) Stop(ctx context.Context) error {
 | `Name` | `string` | Bucket name (required, must be unique) |
 | `Description` | `string` | Optional bucket description |
 | `MaxBytes` | `int64` | Maximum total size of all objects (0 = unlimited) |
-| `TTL` | `time.Duration` | Time-to-live for objects (0 = no expiry) |
-| `Replicas` | `int` | Number of replicas for replication (1-5, default 1) |
+| `TTL` | `time.Duration` | Time-to-live for objects (0 = no expiry). This is the only expiry: the `exp` argument of `Set`/`PutReader` is ignored, because JetStream ObjectStore has no per-object TTL |
+| `Replicas` | `int` | Number of replicas for replication (1-5; 0 means 1). The framework's `WithJetStreamDefaultReplicas` does not apply to plugin buckets; values above 1 need a clustered JetStream |
 | `Storage` | `StorageType` | `FileStorage` (default) or `MemoryStorage` |
 | `Compression` | `bool` | Enable S2 compression |
 
@@ -276,9 +280,11 @@ const (
 ### Plugin Options
 
 ```go
-// Create with custom logger
+// Create with custom logger (myLogger is a *slog.Logger)
 storage, err := fsjetstream.New(config, fsjetstream.WithLogger(myLogger))
 ```
+
+Without `WithLogger` the plugin logs to `slog.Default()`, not to the framework logger.
 
 ## Default Config
 
@@ -357,12 +363,13 @@ type ObjectInfo struct {
     Bucket      string            // Bucket name
     Name        string            // Object key
     Size        int64             // Size in bytes
-    Digest      string            // SHA-256 hash
+    Digest      string            // SHA-256 digest as reported by ObjectStore ("SHA-256=<base64>")
     ModTime     time.Time         // Last modified
     Deleted     bool              // Deletion marker
     Headers     map[string]string // Custom headers
     Description string            // Object description
     Chunks      uint32            // Number of chunks
+    Revision    uint64            // Always 0 for fs-jetstream
 }
 ```
 
@@ -460,6 +467,8 @@ for _, obj := range objects {
 
 ### Check Object Metadata
 
+`Get` returns `nil, nil` for a missing object; `Stat` and `GetReader` return an error wrapping `storage.ErrKeyNotFound` (check with `errors.Is`). `Delete` of a missing object is not an error.
+
 ```go
 info, err := bucket.Stat("file.txt")
 if err != nil {
@@ -498,7 +507,7 @@ func (m *MediaModule) Start(ctx context.Context) error {
     m.thumbnails.Put(ctx, "video-thumb.jpg", thumbData)
 
     // Or use Set for simple storage (from embedded storage.Storage)
-    m.uploads.Set("video.mp4", videoData, 24*time.Hour) // expires in 24h
+    m.uploads.Set("video.mp4", videoData, 0) // expiry comes from the bucket's TTL
 
     return nil
 }
@@ -510,14 +519,6 @@ func (m *MediaModule) Start(ctx context.Context) error {
 2. **Bucket Creation**: All configured buckets are created/updated in JetStream
 3. **Consumer Access**: Consumer modules receive plugin via `SetPlugin()`
 4. **Shutdown**: Plugin stops LAST (after all modules and middleware)
-
-## Performance Characteristics
-
-- **Storage Overhead**: ~100 bytes per object metadata
-- **Write Latency**: 1-10ms depending on object size and replication
-- **Read Latency**: Sub-millisecond for small objects, limited by network for large files
-- **Throughput**: Up to 10MB/s per connection
-- **Replication**: 1-5 replicas supported for high availability
 
 ## Best Practices
 

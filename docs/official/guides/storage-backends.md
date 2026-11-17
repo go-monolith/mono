@@ -8,10 +8,10 @@ The Monolith Framework provides a unified storage abstraction through the `pkg/s
 
 ### GoFiber Storage Compatibility
 
-The `mono.Storage` interface is **fully compatible** with the [GoFiber Storage](https://github.com/gofiber/storage) interface. This means you can use any of the 40+ storage implementations from the GoFiber ecosystem directly within this framework.
+`storage.Storage` (package `github.com/go-monolith/mono/pkg/storage`) has the same method set as the [GoFiber Storage](https://github.com/gofiber/storage) `Storage` interface, so a GoFiber store can be passed to code that accepts `storage.Storage`. The framework does not wrap or test them.
 
 ```go
-// mono.Storage interface is identical to fiber.Storage
+// storage.Storage has the same method set as GoFiber's Storage
 type Storage interface {
     Get(key string) ([]byte, error)
     GetWithContext(ctx context.Context, key string) ([]byte, error)
@@ -24,16 +24,6 @@ type Storage interface {
     Close() error
 }
 ```
-
-**Available GoFiber Storage Backends:**
-
-| Category | Backends |
-|----------|----------|
-| **SQL Databases** | MySQL, PostgreSQL, SQLite3, MSSQL |
-| **NoSQL** | MongoDB, Couchbase, DynamoDB |
-| **Key-Value Stores** | Redis, Valkey, Memcache, BadgerDB, Bbolt, Pebble |
-| **Cloud Storage** | S3, Azure Blob, Cloudflare KV |
-| **Embedded** | Ristretto, memory, rueidis |
 
 **Example: Using Redis from GoFiber:**
 
@@ -50,14 +40,14 @@ redisStore := redis.New(redis.Config{
     Database: 0,
 })
 
-// Use it anywhere mono.Storage is expected
+// Use it anywhere storage.Storage is expected
 var s storage.Storage = redisStore
 
 // Works seamlessly
 s.Set("key", []byte("value"), time.Hour)
 ```
 
-For the complete list of available backends and their configuration options, visit the [GoFiber Storage repository](https://github.com/gofiber/storage).
+For the available backends and their configuration options, see the [GoFiber Storage repository](https://github.com/gofiber/storage) (external; not maintained or tested by this project).
 
 ### Key Benefits
 
@@ -81,8 +71,11 @@ Storage (base)
      ├── StorageWithWatch       ← Real-time notifications
      ├── StorageWithRevision    ← Optimistic locking
      ├── StorageWithKeys        ← Key enumeration
-     └── StorageWithStatus      ← Storage status info
+     ├── StorageWithStatus      ← Storage status info
+     └── StorageWithConn[T]     ← Underlying driver connection
 ```
+
+The extended interfaces are standalone (they do not embed `Storage`); check for them with type assertions.
 
 ### Base Storage Interface
 
@@ -114,6 +107,7 @@ type Storage interface {
 | `StorageWithRevision` | Optimistic locking via revisions | `Create()`, `Update()`, `GetEntry()`, `PutWithRevision()`, `Purge()` |
 | `StorageWithKeys` | Key enumeration | `Keys()`, `KeysWithContext()` |
 | `StorageWithStatus` | Storage status information | `Status()`, `StatusWithContext()` |
+| `StorageWithConn[T]` | Underlying driver connection | `Conn()` |
 
 ## Capability Detection
 
@@ -215,7 +209,7 @@ func requireAdvancedStorage(s storage.Storage) error {
 | **Watch Changes** | No | Yes (pattern-based) |
 | **Optimistic Locking** | No | Yes (revision-based) |
 | **Metadata Retrieval** | Yes (Stat) | Yes (GetEntry) |
-| **TTL Support** | Yes | Yes |
+| **TTL Support** | Yes (bucket-level only) | Yes (bucket-level only) |
 | **Compression** | Yes (S2) | Yes (S2) |
 
 ### When to Use Each Backend
@@ -368,7 +362,7 @@ if errors.Is(err, storage.ErrRevisionMismatch) {
 }
 
 if errors.Is(err, storage.ErrBucketNotFound) {
-    // Bucket doesn't exist
+    // Bucket doesn't exist (declared for backends; the built-in plugins never return it)
 }
 ```
 

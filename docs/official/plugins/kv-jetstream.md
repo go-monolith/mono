@@ -10,7 +10,7 @@ The `kv-jetstream` plugin implements bucket-based key-value storage capabilities
 - **Flexible Storage**: Choose between disk-based (persistent) and memory-based (fast) storage
 - **Revision-Based Locking**: Optimistic locking with revision numbers for concurrent updates
 - **Real-Time Notifications**: Watch API for real-time change notifications
-- **TTL Support**: Automatically expire keys after a specified duration
+- **TTL Support**: Automatically expire keys after a bucket-level duration (`BucketConfig.TTL`)
 - **Compression**: Optional S2 compression for space efficiency
 - **Distributed**: Shared across all modules in the application
 
@@ -31,7 +31,7 @@ KVStorageAdapter (struct)       ← Wraps backend, can add logging
      │
      │ wraps
      ▼
-KVStorageBackend (interface)    ← Internal backend interface
+storage.Storage (+ StorageWith*) ← Backend contract from pkg/storage
      │
      │ implemented by
      ▼
@@ -91,8 +91,8 @@ The plugin re-exports types from `pkg/storage` for convenience:
 | `KeyOperation` | `storage.KeyOperation` | Operation type (Put, Delete, Purge) |
 | `WatchOption` | `storage.WatchOption` | Watch configuration options |
 | `WatchOptions` | `storage.WatchOptions` | Watch options struct |
-| `DeleteOption` | `storage.DeleteOption` | Delete configuration options |
-| `DeleteOptions` | `storage.DeleteOptions` | Delete options struct |
+| `DeleteOption` | `storage.DeleteOption` | Delete options (`WithDeleteRevision`); not accepted by any method yet |
+| `DeleteOptions` | `storage.DeleteOptions` | Delete options struct; not accepted by any method yet |
 
 ### Context Variants Pattern
 
@@ -191,10 +191,14 @@ func main() {
     }
 
     // Register plugin with an alias
-    app.RegisterPlugin(kvStore, "kv")
+    if err := app.RegisterPlugin(kvStore, "kv"); err != nil {
+        panic(err)
+    }
 
     // Register modules that use KV store
-    app.Register(&SessionModule{})
+    if err := app.Register(&SessionModule{}); err != nil {
+        panic(err)
+    }
 
     if err := app.Start(ctx); err != nil {
         panic(err)
@@ -228,28 +232,28 @@ func (m *SessionModule) Start(ctx context.Context) error {
 
     // Store a session (simple set, no revision tracking)
     sessionData := []byte(`{"user_id":"123","role":"admin"}`)
-    err := m.sessions.Set("sess:abc123", sessionData, 0) // 0 = no expiration
+    err := m.sessions.Set("sess.abc123", sessionData, 0) // 0 = no expiration
     if err != nil {
         return err
     }
     fmt.Println("Stored session")
 
     // Store with revision tracking (for optimistic locking)
-    rev, err := m.sessions.PutWithRevision("sess:abc123", sessionData, 0)
+    rev, err := m.sessions.PutWithRevision("sess.abc123", sessionData, 0)
     if err != nil {
         return err
     }
     fmt.Printf("Stored session with revision: %d\n", rev)
 
     // Retrieve the session (value only)
-    data, err := m.sessions.Get("sess:abc123")
+    data, err := m.sessions.Get("sess.abc123")
     if err != nil {
         return err
     }
     fmt.Printf("Retrieved: %s\n", string(data))
 
     // Retrieve with metadata (for revision-based updates)
-    entry, err := m.sessions.GetEntry("sess:abc123")
+    entry, err := m.sessions.GetEntry("sess.abc123")
     if err != nil {
         return err
     }
@@ -273,10 +277,14 @@ func (m *SessionModule) Stop(ctx context.Context) error {
 | `Description` | `string` | Optional bucket description |
 | `MaxValueSize` | `int32` | Maximum size per value in bytes (0 = unlimited) |
 | `MaxBytes` | `int64` | Maximum total size of bucket (0 = unlimited) |
-| `TTL` | `time.Duration` | Time-to-live for keys (0 = no expiry) |
-| `Replicas` | `int` | Number of replicas (1-5, default 1) |
+| `TTL` | `time.Duration` | Time-to-live for keys (0 = no expiry). This is the only expiry: the `exp` argument of `Set`, `Create`, `Update` and `PutWithRevision` is ignored, because JetStream KV has no per-key TTL |
+| `Replicas` | `int` | Number of replicas (1-5; 0 means 1). The framework's `WithJetStreamDefaultReplicas` does not apply to plugin buckets; values above 1 need a clustered JetStream |
 | `Storage` | `StorageType` | `FileStorage` (default) or `MemoryStorage` |
 | `Compression` | `bool` | Enable S2 compression |
+
+### Keys
+
+Keys must match `[-/_=.a-zA-Z0-9]+` (the NATS KV key rules; `:` and spaces are rejected with `nats: invalid key`). `.` separates the tokens that Watch patterns such as `user.*` match.
 
 ### StorageType
 
@@ -290,9 +298,11 @@ const (
 ### Plugin Options
 
 ```go
-// Create with custom logger
+// Create with custom logger (myLogger is a *slog.Logger)
 kvStore, err := kvjetstream.New(config, kvjetstream.WithLogger(myLogger))
 ```
+
+Without `WithLogger` the plugin logs to `slog.Default()`, not to the framework logger.
 
 ## Default Config
 
@@ -346,8 +356,8 @@ type KVStoragePort interface {
     UpdateWithContext(ctx context.Context, key string, val []byte, exp time.Duration, revision uint64) (uint64, error)
     Purge(key string) error
     PurgeWithContext(ctx context.Context, key string) error
-    GetEntry(key string) (*Entry, error)
-    GetEntryWithContext(ctx context.Context, key string) (*Entry, error)
+    GetEntry(key string) (*KVEntry, error)
+    GetEntryWithContext(ctx context.Context, key string) (*KVEntry, error)
     PutWithRevision(key string, val []byte, exp time.Duration) (uint64, error)
     PutWithRevisionWithContext(ctx context.Context, key string, val []byte, exp time.Duration) (uint64, error)
 
@@ -372,12 +382,12 @@ type KVStoragePort interface {
 **Convenience vs Revision-Tracking**: Use `Set()` for simple store operations. Use `PutWithRevision()` when you need the revision number for optimistic locking. Use `GetEntry()` instead of `Get()` when you need both value and revision metadata.
 {% endhint %}
 
-### Entry
+### KVEntry (alias of storage.Entry)
 
-Metadata and value returned for stored keys (from `storage.Entry`):
+Metadata and value returned for stored keys:
 
 ```go
-type Entry struct {
+type Entry struct { // storage.Entry
     Bucket    string        // Bucket name
     Key       string        // Key name
     Value     []byte        // Value data (nil for delete markers)
@@ -391,7 +401,7 @@ type Entry struct {
 
 ```go
 type KeyWatcher interface {
-    Updates() <-chan *Entry  // nil entry signals initial sync complete
+    Updates() <-chan *KVEntry  // nil entry signals initial sync complete
     Stop() error
 }
 ```
@@ -410,16 +420,20 @@ type BucketStatus struct {
 
 ## Sentinel Errors
 
-The plugin provides sentinel errors for programmatic error handling:
+The plugin provides sentinel errors for programmatic error handling. They are aliases of the `pkg/storage` errors, so `errors.Is(err, storage.ErrKeyNotFound)` and `errors.Is(err, kvjetstream.ErrKeyNotFound)` are interchangeable:
 
 ```go
 var (
-    ErrKeyNotFound      = errors.New("key not found")
-    ErrKeyExists        = errors.New("key already exists")
-    ErrRevisionMismatch = errors.New("revision mismatch")
-    ErrBucketNotFound   = errors.New("bucket not found")
+    ErrKeyNotFound      = storage.ErrKeyNotFound
+    ErrKeyExists        = storage.ErrKeyExists
+    ErrRevisionMismatch = storage.ErrRevisionMismatch
+    ErrBucketNotFound   = storage.ErrBucketNotFound
 )
 ```
+
+`ErrBucketNotFound` is declared for backends; the plugin never returns it, and `Bucket(name)` returns nil for an unknown bucket.
+
+Missing keys: `Get` returns `nil, nil`; `GetEntry`, `Update` and `Purge` return an error wrapping `ErrKeyNotFound`; `Delete` of a missing key is not an error.
 
 ## Usage Examples
 
@@ -431,40 +445,40 @@ var (
 
 ```go
 // Set (create or overwrite) - simple storage, no revision returned
-err := bucket.Set("user:123", []byte(`{"name":"Alice"}`), 0) // 0 = no expiration
+err := bucket.Set("user.123", []byte(`{"name":"Alice"}`), 0) // 0 = no expiration
 if err != nil {
     return err
 }
 
 // PutWithRevision - when you need the revision number for optimistic locking
-rev, err := bucket.PutWithRevision("user:123", []byte(`{"name":"Alice"}`), 0)
+rev, err := bucket.PutWithRevision("user.123", []byte(`{"name":"Alice"}`), 0)
 if err != nil {
     return err
 }
 fmt.Printf("Stored with revision: %d\n", rev)
 
 // Get - returns value only
-data, err := bucket.Get("user:123")
+data, err := bucket.Get("user.123")
 if err != nil {
     return err
 }
 fmt.Printf("Value: %s\n", string(data))
 
 // GetEntry - returns value with revision metadata
-entry, err := bucket.GetEntry("user:123")
+entry, err := bucket.GetEntry("user.123")
 if err != nil {
     return err
 }
 fmt.Printf("Value: %s, Revision: %d\n", string(entry.Value), entry.Revision)
 
 // Delete (soft delete - leaves tombstone)
-err = bucket.Delete("user:123")
+err = bucket.Delete("user.123")
 if err != nil {
     return err
 }
 
 // Purge (hard delete - removes all history)
-err = bucket.Purge("user:123")
+err = bucket.Purge("user.123")
 if err != nil {
     return err
 }
@@ -475,7 +489,7 @@ if err != nil {
 ```go
 // Create only succeeds if key doesn't exist
 // Signature: Create(key string, val []byte, exp time.Duration) (uint64, error)
-rev, err := bucket.Create("lock:resource", []byte("owner-123"), 0)
+rev, err := bucket.Create("lock.resource", []byte("owner-123"), 0)
 if errors.Is(err, kvjetstream.ErrKeyExists) {
     fmt.Println("Resource is already locked")
     return err
@@ -488,6 +502,11 @@ fmt.Printf("Lock acquired with revision: %d\n", rev)
 ```go
 // Get current value and revision (use GetEntry for revision metadata)
 entry, err := bucket.GetEntry("counter")
+if errors.Is(err, kvjetstream.ErrKeyNotFound) {
+    // First use: create the counter instead
+    _, err = bucket.Create("counter", []byte("1"), 0)
+    return err
+}
 if err != nil {
     return err
 }
@@ -590,8 +609,8 @@ func (m *CacheModule) Start(ctx context.Context) error {
     m.sessions = m.kv.Bucket("sessions")
 
     // Use different buckets for different purposes
-    m.cache.Set("config:app", configData, 0)
-    m.sessions.Set("sess:user123", sessionData, time.Hour) // expires in 1 hour
+    m.cache.Set("config.app", configData, 0)
+    m.sessions.Set("sess.user123", sessionData, 0) // expiry comes from the bucket's TTL
 
     return nil
 }
@@ -603,14 +622,6 @@ func (m *CacheModule) Start(ctx context.Context) error {
 2. **Bucket Creation**: All configured buckets are created/updated in JetStream
 3. **Consumer Access**: Consumer modules receive plugin via `SetPlugin()`
 4. **Shutdown**: Plugin stops LAST (after all modules and middleware)
-
-## Performance Characteristics
-
-- **Read Latency**: Sub-millisecond for in-memory, 1-5ms for disk-based
-- **Write Latency**: 1-10ms depending on replication factor
-- **Throughput**: Up to 50,000 ops/sec for in-memory buckets
-- **Storage Overhead**: ~200 bytes per key for metadata
-- **Revision Tracking**: Atomic, linearizable updates
 
 ## Best Practices
 

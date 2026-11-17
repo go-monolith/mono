@@ -65,13 +65,14 @@ package customplugin
 
 import (
     "context"
+    "fmt"
+
     mono "github.com/go-monolith/mono"
-    "github.com/go-monolith/mono/pkg/types"
 )
 
 type PluginModule struct {
     name      string
-    container types.ServiceContainer
+    container mono.ServiceContainer
     // Add your resource fields here
     resource  *YourResource
 }
@@ -126,11 +127,11 @@ func (p *PluginModule) Stop(ctx context.Context) error {
 Implement the plugin-specific methods:
 
 ```go
-func (p *PluginModule) SetContainer(container types.ServiceContainer) {
+func (p *PluginModule) SetContainer(container mono.ServiceContainer) {
     p.container = container
 }
 
-func (p *PluginModule) Container() types.ServiceContainer {
+func (p *PluginModule) Container() mono.ServiceContainer {
     return p.container
 }
 ```
@@ -175,9 +176,9 @@ package customplugin
 import (
     "context"
     "fmt"
+    "time"
 
     mono "github.com/go-monolith/mono"
-    "github.com/go-monolith/mono/pkg/types"
 )
 
 // Plugin configuration
@@ -190,7 +191,8 @@ type Config struct {
 // Plugin implementation
 type MyPlugin struct {
     name      string
-    container types.ServiceContainer
+    config    Config
+    container mono.ServiceContainer
     conn      *Connection
 }
 
@@ -201,7 +203,8 @@ func New(config Config) (*MyPlugin, error) {
     }
 
     return &MyPlugin{
-        name: "my-plugin",
+        name:   "my-plugin",
+        config: config,
     }, nil
 }
 
@@ -239,11 +242,11 @@ func (p *MyPlugin) Stop(ctx context.Context) error {
 }
 
 // PluginModule interface
-func (p *MyPlugin) SetContainer(container types.ServiceContainer) {
+func (p *MyPlugin) SetContainer(container mono.ServiceContainer) {
     p.container = container
 }
 
-func (p *MyPlugin) Container() types.ServiceContainer {
+func (p *MyPlugin) Container() mono.ServiceContainer {
     return p.container
 }
 
@@ -345,10 +348,14 @@ func main() {
         panic(err)
     }
 
-    app.RegisterPlugin(plugin, "my-plugin")
+    if err := app.RegisterPlugin(plugin, "my-plugin"); err != nil {
+        panic(err)
+    }
 
     // Register modules that use the plugin
-    app.Register(&MyModule{})
+    if err := app.Register(&MyModule{}); err != nil {
+        panic(err)
+    }
 
     // Start application
     if err := app.Start(ctx); err != nil {
@@ -437,21 +444,26 @@ func (m *MyModule) Start(ctx context.Context) error {
 
 ### Logging
 
-Use the logger from ServiceContainer:
+The framework does not inject a logger into plugins. Accept one through an option, as the built-in plugins do with `WithLogger(*slog.Logger)`, and default to `slog.Default()`:
 
 ```go
-func (p *MyPlugin) Start(ctx context.Context) error {
-    // Get logger from container
-    logger := p.container.GetService("logger").(mono.Logger)
+// MyPlugin holds a field `logger *slog.Logger`, set to slog.Default() in New
+// and replaced by WithLogger.
+type Option func(*MyPlugin)
 
-    logger.Info("Initializing plugin", "name", p.Name())
+func WithLogger(logger *slog.Logger) Option {
+    return func(p *MyPlugin) { p.logger = logger }
+}
+
+func (p *MyPlugin) Start(ctx context.Context) error {
+    p.logger.Info("Initializing plugin", "name", p.Name())
 
     if err := p.initialize(ctx); err != nil {
-        logger.Error("Initialization failed", "error", err)
+        p.logger.Error("Initialization failed", "error", err)
         return err
     }
 
-    logger.Info("Plugin initialized successfully")
+    p.logger.Info("Plugin initialized successfully")
     return nil
 }
 ```
@@ -470,9 +482,9 @@ func TestPluginStart(t *testing.T) {
         t.Fatalf("Failed to create plugin: %v", err)
     }
 
-    // Mock the container
-    container := NewMockContainer()
-    plugin.SetContainer(container)
+    // Give the plugin an in-memory container (package monotest)
+    bus := monotest.NewEventBus()
+    plugin.SetContainer(monotest.NewContainer(plugin.Name(), bus))
 
     // Start plugin
     if err := plugin.Start(ctx); err != nil {
@@ -497,6 +509,20 @@ func TestPluginStart(t *testing.T) {
 }
 ```
 
+To test a module that uses the plugin, inject it with `monotest.WithPlugin(alias, plugin)`; the harness calls `SetPlugin` as the framework does (it does not start the plugin):
+
+```go
+func TestMyModule(t *testing.T) {
+    plugin, _ := New(Config{ConnectionString: "test://localhost:9000"})
+    plugin.SetContainer(monotest.NewContainer(plugin.Name(), monotest.NewEventBus()))
+    if err := plugin.Start(context.Background()); err != nil {
+        t.Fatal(err)
+    }
+
+    monotest.CheckModule(t, &MyModule{}, monotest.WithPlugin("my-plugin", plugin))
+}
+```
+
 ## Advanced Patterns
 
 ### Multiple Ports
@@ -514,42 +540,27 @@ func (p *MyPlugin) AdminPort() AdminPort { /* ... */ }
 
 ### Service Registration
 
-Register internal services:
-
-```go
-func (p *MyPlugin) Start(ctx context.Context) error {
-    // ... initialize ...
-
-    // Register a service consumers can call
-    p.container.RegisterRequestReplyService(
-        "storage-read",
-        p.handleStorageRead,
-    )
-
-    return nil
-}
-
-func (p *MyPlugin) handleStorageRead(ctx context.Context, req *ReadRequest) (*ReadResponse, error) {
-    // Handle request using plugin resources
-    return &ReadResponse{...}, nil
-}
-```
+A plugin that implements `ServiceProviderModule` has `RegisterServices()` called on its own container before `Start()`. Services registered in a plugin's container are not currently served over NATS (no subscription is created for them), so calls to them get no responder. Expose plugin functionality through Go methods (ports) instead, as shown above.
 
 ### Plugin Dependencies
 
-If your plugin depends on another plugin:
+Plugins do not receive other plugins: `SetPlugin()` is not called on plugins. If your plugin depends on another plugin, pass it to the constructor and register the dependency first (plugins start in registration order):
 
 ```go
 type MyPlugin struct {
-    logger      mono.Logger  // Injected by framework
-    otherPlugin *OtherPlugin // Receive via SetPlugin
+    otherPlugin *OtherPlugin
 }
 
-func (p *MyPlugin) SetPlugin(alias string, plugin mono.PluginModule) {
-    if alias == "other-plugin" {
-        p.otherPlugin = plugin.(*OtherPlugin)
+func New(config Config, other *OtherPlugin) (*MyPlugin, error) {
+    if other == nil {
+        return nil, fmt.Errorf("other plugin required")
     }
+    return &MyPlugin{otherPlugin: other}, nil
 }
+
+// main.go
+_ = app.RegisterPlugin(other, "other-plugin") // starts first
+_ = app.RegisterPlugin(mine, "my-plugin")
 ```
 
 ## Comparison with Built-in Plugins

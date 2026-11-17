@@ -47,13 +47,18 @@ type UsePluginModule interface {
 ### Startup Sequence
 
 ```
-1. Framework initializes NATS
-2. Plugins start (in registration order)
-   - SetContainer() called with dedicated ServiceContainer
-   - Start() called for plugin initialization
-3. SetPlugin() called on modules implementing UsePluginModule
-4. Middleware starts
-5. Regular modules start (respecting dependency order)
+1. NATS server started (in NewMonoApplication); Start waits until JetStream answers
+2. Plugins start (in registration order), each:
+   - SetContainer() with its dedicated ServiceContainer
+   - SetEventBus() if it implements EventBusAwareModule (shared, unscoped bus)
+   - RegisterServices() if it implements ServiceProviderModule
+   - Start()
+3. Middleware starts (in registration order)
+4. Regular modules start (in dependency order), each:
+   - ServiceContainer bound
+   - SetPlugin() for every registered plugin, if it implements UsePluginModule
+   - SetDependencyServiceContainer(), SetEventBus(), RegisterServices()
+   - Start()
 ```
 
 ### Shutdown Sequence
@@ -65,6 +70,8 @@ type UsePluginModule interface {
    - Plugin cleanup happens here
 4. NATS connection closes
 ```
+
+If a regular module fails to start, the modules started before it are rolled back, but plugins (and middleware) that already started are not stopped: their `Stop()` is not called.
 
 ## When to Use Plugins
 
@@ -109,12 +116,22 @@ Provides fast key-value storage using JetStream KV Store.
 Register a plugin with one alias:
 
 ```go
-app, _ := mono.NewMonoApplication()
+app, err := mono.NewMonoApplication(mono.WithJetStreamStorageDir("./data/jetstream"))
+if err != nil {
+    log.Fatal(err)
+}
 
-storage, _ := fsjetstream.New(config)
-app.RegisterPlugin(storage, "storage")
+storage, err := fsjetstream.New(config)
+if err != nil {
+    log.Fatal(err)
+}
+if err := app.RegisterPlugin(storage, "storage"); err != nil {
+    log.Fatal(err)
+}
 
-app.Register(&DocumentModule{})  // Can access "storage" plugin
+if err := app.Register(&DocumentModule{}); err != nil { // Can access "storage" plugin
+    log.Fatal(err)
+}
 ```
 
 ### Multiple Plugin Instances
@@ -122,15 +139,30 @@ app.Register(&DocumentModule{})  // Can access "storage" plugin
 Register same plugin type with different aliases:
 
 ```go
-app, _ := mono.NewMonoApplication()
+app, err := mono.NewMonoApplication(mono.WithJetStreamStorageDir("./data/jetstream"))
+if err != nil {
+    log.Fatal(err)
+}
 
-primary, _ := fsjetstream.New(primaryConfig)
-app.RegisterPlugin(primary, "primary")
+primary, err := fsjetstream.New(primaryConfig)
+if err != nil {
+    log.Fatal(err)
+}
+if err := app.RegisterPlugin(primary, "primary"); err != nil {
+    log.Fatal(err)
+}
 
-backup, _ := fsjetstream.New(backupConfig)
-app.RegisterPlugin(backup, "backup")
+backup, err := fsjetstream.New(backupConfig)
+if err != nil {
+    log.Fatal(err)
+}
+if err := app.RegisterPlugin(backup, "backup"); err != nil {
+    log.Fatal(err)
+}
 
-app.Register(&BackupModule{})  // Can access both "primary" and "backup"
+if err := app.Register(&BackupModule{}); err != nil { // Can access both "primary" and "backup"
+    log.Fatal(err)
+}
 ```
 
 ### Plugin Configuration
@@ -175,44 +207,55 @@ See [Creating Plugins](creating-plugins.md) for a complete guide to building you
 
 ### With Middleware
 
-Plugins start before middleware, so middleware can use plugin services:
+Plugins start before middleware, whatever the registration order, but middleware does not receive plugins through `SetPlugin()`; only regular modules implementing `UsePluginModule` do:
 
 ```go
-app.Register(requestid.New())           // Middleware
-app.RegisterPlugin(storage, "storage")  // Plugin
+rid, err := requestid.New()
+if err != nil {
+    log.Fatal(err)
+}
+al, err := accesslog.New()
+if err != nil {
+    log.Fatal(err)
+}
 
-app.Register(accesslog.New())           // Middleware uses storage
-app.Register(&AppModule{})              // Module uses storage
+_ = app.Register(rid)                      // Middleware
+_ = app.RegisterPlugin(storage, "storage") // Plugin: starts first
+_ = app.Register(al)                       // Middleware
+_ = app.Register(&AppModule{})             // Module: receives "storage" via SetPlugin
 ```
 
 ### With Services
 
-Plugins can register services in their ServiceContainer for other modules to access:
+A plugin receives its own ServiceContainer, and `RegisterServices()` is called on plugins that implement `ServiceProviderModule`. However, services registered in a plugin's container are not currently served over NATS (no subscription is created for them), so a call to them gets no responder. Expose plugin functionality through Go methods on the plugin type instead, as the built-in plugins do with `Bucket()`:
 
 ```go
-func (p *StoragePlugin) Start(ctx context.Context) error {
-    // ... plugin initialization ...
-
-    // Register services in plugin's container
-    p.container.RegisterRequestReplyService("storage", p.handleStorageRequest)
-
-    return nil
+func (p *StoragePlugin) Bucket(name string) Bucket {
+    return p.buckets[name]
 }
 ```
 
 ### With Events
 
-Plugins are EventBus-aware and can publish/subscribe to events:
+Plugins that implement `EventBusAwareModule` receive the shared (unscoped) EventBus before `Start()`, and can publish and subscribe:
 
 ```go
+func (p *StoragePlugin) SetEventBus(bus mono.EventBus) {
+    p.bus = bus
+}
+
 func (p *StoragePlugin) Start(ctx context.Context) error {
-    // Access EventBus through ServiceContainer
-    eventBus := p.container.GetService("event-bus")
-
     // Subscribe to events
-    eventBus.On("document.uploaded", p.handleDocumentUpload)
-
+    sub, err := p.bus.Subscribe("events.documents.uploaded", p.handleDocumentUpload)
+    if err != nil {
+        return fmt.Errorf("subscribe: %w", err)
+    }
+    p.sub = sub
     return nil
+}
+
+func (p *StoragePlugin) handleDocumentUpload(ctx context.Context, msg *mono.Msg) {
+    // ...
 }
 ```
 
@@ -222,22 +265,34 @@ func (p *StoragePlugin) Start(ctx context.Context) error {
 func main() {
     ctx := context.Background()
 
-    // Create application
-    app, _ := mono.NewMonoApplication(
-        mono.WithJetStreamDomain("default"),
+    // Create application with JetStream enabled
+    app, err := mono.NewMonoApplication(
+        mono.WithJetStreamStorageDir("./data/jetstream"),
     )
+    if err != nil {
+        panic(err)
+    }
 
     // Register storage plugin
-    storage, _ := fsjetstream.New(fsjetstream.Config{
+    storage, err := fsjetstream.New(fsjetstream.Config{
         Buckets: []fsjetstream.BucketConfig{
             {Name: "documents", MaxBytes: 1_000_000_000},
         },
     })
-    app.RegisterPlugin(storage, "storage")
+    if err != nil {
+        panic(err)
+    }
+    if err := app.RegisterPlugin(storage, "storage"); err != nil {
+        panic(err)
+    }
 
     // Register modules that use storage
-    app.Register(&DocumentModule{})
-    app.Register(&MediaModule{})
+    if err := app.Register(&DocumentModule{}); err != nil {
+        panic(err)
+    }
+    if err := app.Register(&MediaModule{}); err != nil {
+        panic(err)
+    }
 
     // Start application
     if err := app.Start(ctx); err != nil {

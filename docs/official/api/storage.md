@@ -9,7 +9,7 @@ The storage package defines a composable interface hierarchy where implementatio
 - **Backend Agnostic Code**: Write storage code once, swap backends without changes
 - **Capability Detection**: Check for extended capabilities using type assertions
 - **Consistent Patterns**: Same API patterns across KV store, file storage, and future implementations
-- **GoFiber Compatibility**: The base `Storage` interface is fully compatible with [GoFiber Storage](https://github.com/gofiber/storage), allowing you to use any of its 40+ storage implementations (Redis, PostgreSQL, MongoDB, S3, DynamoDB, etc.) within this framework
+- **GoFiber Compatibility**: `storage.Storage` has the same method set as [GoFiber Storage](https://github.com/gofiber/storage)'s `Storage`, so a GoFiber store can be passed to code that accepts `storage.Storage`. The framework does not wrap or test them
 
 ## Interface Hierarchy
 
@@ -32,8 +32,12 @@ Storage (base)
      │
      ├── StorageWithKeys        - Key enumeration (kv-jetstream)
      │
-     └── StorageWithStatus      - Status information (kv-jetstream)
+     ├── StorageWithStatus      - Status information (kv-jetstream)
+     │
+     └── StorageWithConn[T]     - Underlying driver connection (not implemented by the built-in plugins)
 ```
+
+The extended interfaces are standalone (they do not embed `Storage`): check for them with type assertions on a `Storage` value.
 
 ## Base Interface
 
@@ -49,7 +53,9 @@ type Storage interface {
     GetWithContext(ctx context.Context, key string) ([]byte, error)
 
     // Set stores a value with optional expiration.
-    // exp=0 means no expiration.
+    // exp=0 means no expiration. Backends may ignore exp: fs-jetstream and
+    // kv-jetstream apply only the bucket TTL.
+    // An empty key or nil value is ignored without error.
     Set(key string, val []byte, exp time.Duration) error
     SetWithContext(ctx context.Context, key string, val []byte, exp time.Duration) error
 
@@ -189,6 +195,18 @@ type StorageWithStatus interface {
 
 **Used by**: [Key-Value Storage Plugin (kv-jetstream)](../plugins/kv-jetstream.md)
 
+### StorageWithConn
+
+Generic access to the underlying driver connection.
+
+```go
+type StorageWithConn[T any] interface {
+    Conn() T
+}
+```
+
+Not implemented by the built-in plugins.
+
 ## Data Types
 
 ### ObjectInfo
@@ -279,6 +297,8 @@ var (
 )
 ```
 
+`ErrBucketNotFound` is declared for backends; the built-in plugins never return it (their `Bucket(name)` returns nil for an unknown bucket).
+
 **Usage:**
 ```go
 entry, err := bucket.GetEntry("key")
@@ -339,6 +359,28 @@ Options for delete operations.
 storage.WithDeleteRevision(expectedRevision)
 ```
 
+{% hint style="warning" %}
+`DeleteOption` is not accepted by any method yet: `Delete` and `DeleteWithContext` take no options.
+{% endhint %}
+
+### Implementing a Backend
+
+Custom backends receive the options as functional options and resolve them with the `Apply*Options` helpers:
+
+| Option type | Struct (fields) | Helper |
+|-------------|-----------------|--------|
+| `ListOption` | `ListOptions{Prefix string}` | `storage.ApplyListOptions(opts...) *ListOptions` |
+| `PutOption` | `PutOptions{Description string; Headers map[string]string}` | `storage.ApplyPutOptions(opts...) *PutOptions` |
+| `WatchOption` | `WatchOptions{UpdatesOnly, IgnoreDeletes, MetaOnly bool; ResumeFromRevision uint64}` | `storage.ApplyWatchOptions(opts...) *WatchOptions` |
+| `DeleteOption` | `DeleteOptions{Revision uint64}` | `storage.ApplyDeleteOptions(opts...) *DeleteOptions` |
+
+```go
+func (b *MyBackend) ListWithContext(ctx context.Context, opts ...storage.ListOption) ([]storage.ObjectInfo, error) {
+    options := storage.ApplyListOptions(opts...)
+    return b.list(ctx, options.Prefix)
+}
+```
+
 ## Context Variants Pattern
 
 Most methods have two variants:
@@ -362,8 +404,9 @@ data, err := bucket.GetWithContext(ctx, "key")
 Check for extended capabilities using type assertions:
 
 ```go
+// s is a storage.Storage
 // Check if storage supports watching
-if watcher, ok := storage.(storage.StorageWithWatch); ok {
+if watcher, ok := s.(storage.StorageWithWatch); ok {
     w, err := watcher.Watch("user.*")
     if err != nil {
         return err
@@ -371,17 +414,20 @@ if watcher, ok := storage.(storage.StorageWithWatch); ok {
     defer w.Stop()
 
     for entry := range w.Updates() {
+        if entry == nil {
+            continue // initial values delivered
+        }
         fmt.Printf("Key %s changed\n", entry.Key)
     }
 }
 
 // Check if storage supports revisions
-if revStore, ok := storage.(storage.StorageWithRevision); ok {
+if revStore, ok := s.(storage.StorageWithRevision); ok {
     entry, err := revStore.GetEntry("key")
     if err != nil {
         return err
     }
-    // Use entry.Revision for optimistic locking
+    fmt.Printf("Revision for optimistic locking: %d\n", entry.Revision)
 }
 ```
 

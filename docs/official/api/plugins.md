@@ -20,6 +20,7 @@ type UsePluginModule interface {
 
 // Framework registration
 func (app MonoApplication) RegisterPlugin(plugin PluginModule, alias string) error
+func (app MonoApplication) Plugin(alias string) PluginModule
 ```
 
 {% hint style="info" %}
@@ -32,7 +33,7 @@ Plugins are special modules designed for shared infrastructure that other module
 
 - **Start first, stop last** - Guaranteed initialization order
 - **Excluded from dependency graph** - Don't participate in circular dependency checks
-- **Have their own ServiceContainer** - Can register services other modules access
+- **Have their own ServiceContainer** - Services registered in it are not currently served over NATS; expose plugin functionality through Go methods
 - **Excluded from middleware hooks** - Raw access without interception
 - **Registered with aliases** - Multiple instances of the same plugin type supported
 
@@ -54,6 +55,14 @@ Called by the framework to inject the plugin's dedicated ServiceContainer during
 - Called before middleware modules start
 - EventBus is already set on the container
 
+**Plugin start sequence** (each plugin, in registration order):
+1. `SetContainer()`
+2. `SetEventBus()` if the plugin implements `EventBusAwareModule` (the shared, unscoped bus)
+3. `RegisterServices()` if the plugin implements `ServiceProviderModule`
+4. `Start()`
+
+If a plugin's `Start()` fails, the plugins already started are stopped in reverse order and `app.Start()` returns the error.
+
 **Example:**
 ```go
 type StoragePlugin struct {
@@ -71,7 +80,7 @@ func (p *StoragePlugin) SetContainer(container mono.ServiceContainer) {
 func (plugin PluginModule) Container() ServiceContainer
 ```
 
-Returns the plugin's ServiceContainer, allowing other modules to access the plugin's registered services.
+Returns the plugin's ServiceContainer. Services registered in a plugin's container are not currently served over NATS (no subscription is created for them), so calls to them get no responder; expose plugin functionality through Go methods on the plugin type instead.
 
 **Returns:**
 - `ServiceContainer` - The plugin's service container
@@ -91,7 +100,7 @@ func (p *StoragePlugin) Container() mono.ServiceContainer {
 func (module UsePluginModule) SetPlugin(alias string, plugin PluginModule)
 ```
 
-Called by the framework for each registered plugin. Modules should filter by alias and store the plugins they need.
+Called by the framework for each registered plugin, in no guaranteed order. Modules should filter by alias and store the plugins they need. Only regular modules receive plugins: `SetPlugin()` is not called on middleware or on other plugins.
 
 **Parameters:**
 - `alias` - The alias used when registering the plugin
@@ -148,7 +157,7 @@ Registers a plugin with the framework under a specific alias.
 - `alias` - A unique identifier for this plugin instance
 
 **Returns:**
-- `error` - Returns error if alias is empty or already registered
+- `error` - Returns an error if plugin is nil, alias is empty, alias is already registered (wraps `ErrPluginAlreadyRegistered`), or the application has already been started
 
 {% hint style="info" %}
 **Multiple Instances:** The alias mechanism allows registering multiple instances of the same plugin type with different configurations. For example, "primary-storage" and "backup-storage" can both use the same `fsjetstream.PluginModule` implementation.
@@ -166,9 +175,21 @@ backupStorage, _ := fsjetstream.New(fsjetstream.Config{
 })
 
 // Register with different aliases
-app.RegisterPlugin(primaryStorage, "primary-storage")
-app.RegisterPlugin(backupStorage, "backup-storage")
+if err := app.RegisterPlugin(primaryStorage, "primary-storage"); err != nil {
+    log.Fatal(err)
+}
+if err := app.RegisterPlugin(backupStorage, "backup-storage"); err != nil {
+    log.Fatal(err)
+}
 ```
+
+### Plugin
+
+```go
+func (app MonoApplication) Plugin(alias string) PluginModule
+```
+
+Returns the plugin registered under `alias`, or nil if there is none. Meant for host code (`main.go`, tests); modules receive plugins through `SetPlugin()`.
 
 ## Lifecycle Order
 
@@ -254,8 +275,13 @@ func (p *MyPlugin) GetResource(name string) Resource {
 
 ```go
 // In main.go
-plugin := myplugin.New(config)
-app.RegisterPlugin(plugin, "my-plugin")
+plugin, err := myplugin.New(config)
+if err != nil {
+    log.Fatal(err)
+}
+if err := app.RegisterPlugin(plugin, "my-plugin"); err != nil {
+    log.Fatal(err)
+}
 
 // In consuming module
 func (m *MyModule) SetPlugin(alias string, plugin mono.PluginModule) {
@@ -280,8 +306,13 @@ storage, err := fsjetstream.New(fsjetstream.Config{
         {Name: "images", TTL: 24 * time.Hour},
     },
 })
+if err != nil {
+    log.Fatal(err)
+}
 
-app.RegisterPlugin(storage, "storage")
+if err := app.RegisterPlugin(storage, "storage"); err != nil {
+    log.Fatal(err)
+}
 ```
 
 See [fs-jetstream Plugin](../plugins/fs-jetstream.md) for detailed documentation.
@@ -299,8 +330,13 @@ kvStore, err := kvjetstream.New(kvjetstream.Config{
         {Name: "cache", MaxBytes: 50 * 1024 * 1024},
     },
 })
+if err != nil {
+    log.Fatal(err)
+}
 
-app.RegisterPlugin(kvStore, "kv")
+if err := app.RegisterPlugin(kvStore, "kv"); err != nil {
+    log.Fatal(err)
+}
 ```
 
 See [kv-jetstream Plugin](../plugins/kv-jetstream.md) for detailed documentation.
@@ -383,19 +419,29 @@ func (m *DocumentModule) Stop(ctx context.Context) error {
 }
 
 func main() {
-    // Create application
-    app, _ := mono.New()
+    // Create application with JetStream enabled
+    app, err := mono.NewMonoApplication(mono.WithJetStreamStorageDir("./data/jetstream"))
+    if err != nil {
+        log.Fatal(err)
+    }
 
     // Create and register storage plugin
-    storage, _ := fsjetstream.New(fsjetstream.Config{
+    storage, err := fsjetstream.New(fsjetstream.Config{
         Buckets: []fsjetstream.BucketConfig{
             {Name: "documents"},
         },
     })
-    app.RegisterPlugin(storage, "storage")
+    if err != nil {
+        log.Fatal(err)
+    }
+    if err := app.RegisterPlugin(storage, "storage"); err != nil {
+        log.Fatal(err)
+    }
 
     // Register module that uses the plugin
-    app.Register(&DocumentModule{})
+    if err := app.Register(&DocumentModule{}); err != nil {
+        log.Fatal(err)
+    }
 
     // Start application
     if err := app.Start(context.Background()); err != nil {
