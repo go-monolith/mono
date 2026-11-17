@@ -67,22 +67,24 @@ The `%w` verb preserves the original error, allowing callers to use `errors.Is()
 
 ```go
 err := m.processPayment(ctx, 1000)
-if errors.Is(err, paymentService.ErrInsufficientFunds) {
+if errors.Is(err, ErrInsufficientFunds) { // a sentinel of your own package
     // Handle specific error
 }
 ```
+
+Across a request-reply call, sentinel identity is lost. Use `monoerrors.GetRemoteError(err)` and inspect `.Message` (the handler's `err.Error()`) and `.ErrorType`. `errors.Is` works only for local errors and the framework's own sentinels (`ErrServiceOverloaded`, `ErrHandlerPanic`, `ErrServiceUnavailable`); see [How Handler Errors Reach the Caller](#how-handler-errors-reach-the-caller).
 
 ## Service Handler Error Patterns
 
 ### Request-Reply Handlers
 
-Request-Reply handlers return errors that propagate immediately to the caller:
+Request-Reply handlers return errors that propagate immediately to the caller (as a `*monoerrors.RemoteError`, see below). The framework also logs each returned error at Error level (`RequestReply handler error`):
 
 ```go
 func (m *OrderModule) handleGetOrder(ctx context.Context, req *GetOrderRequest) (*Order, error) {
     // Validate request
     if req.OrderID == "" {
-        return nil, errors.New("order ID required")  // Client sees this error
+        return nil, errors.New("order ID required")  // Client sees this message
     }
 
     // Find order
@@ -96,23 +98,43 @@ func (m *OrderModule) handleGetOrder(ctx context.Context, req *GetOrderRequest) 
 }
 ```
 
+#### How Handler Errors Reach the Caller
+
+When a request-reply handler returns an error, the framework replies with these headers:
+
+| Header | Value |
+|--------|-------|
+| `Mono-Error` | `true` |
+| `Mono-Error-Message` | `err.Error()`: the full wrapped message |
+| `Mono-Error-Type` | The type name of the returned error, lower-cased, without an `Error` suffix: `*OrderError` gives `order`, `errors.New` gives `errorstring`, `fmt.Errorf("...%w", err)` gives `wrap`. The framework's own values are `overloaded`, `handler-panic` and `shutting-down`. |
+
+The client maps the framework's own types to `ErrServiceOverloaded`, `ErrHandlerPanic` and `ErrServiceUnavailable`; any other error becomes a `*monoerrors.RemoteError` whose `Unwrap` returns nil:
+
+```go
+resp, err := client.Call(ctx, data)
+if remote, ok := monoerrors.GetRemoteError(err); ok {
+    // remote.Message is the handler's err.Error(), remote.ErrorType its type name
+    if remote.ErrorType == "order" {
+        // ...
+    }
+}
+```
+
+Because the full wrapped message reaches the caller, keep internal details in logs, not in returned errors. To give callers a usable `ErrorType`, return the custom error type unwrapped.
+
 ### Queue Group Handlers
 
 {% hint style="info" %}
 Queue group handlers use fire-and-forget semantics. Errors are logged but **not** returned to the sender.
 {% endhint %}
 
-Queue group handlers don't return errors to the sender (fire-and-forget pattern). Log errors instead:
+Queue group handlers don't return errors to the sender (fire-and-forget pattern). The framework logs a returned error at Error level (`QueueGroup handler error`), so add context to the error rather than logging it again:
 
 ```go
 func (m *OrderModule) handleProcessOrder(ctx context.Context, order *Order) error {
-    // Log error instead of propagating
     if err := m.validateOrder(ctx, order); err != nil {
-        m.logger.Error("Failed to validate order",
-            "order_id", order.ID,
-            "error", err,
-        )
-        return err  // Logged, not propagated to sender
+        // Logged by the framework, not propagated to sender
+        return fmt.Errorf("validate order %s: %w", order.ID, err)
     }
 
     return nil
@@ -304,18 +326,14 @@ func (m *OrderModule) processOrderBatch(ctx context.Context, orders []*Order) er
 
 ### Log Errors with Context
 
-Include relevant information when logging errors:
+Include relevant information when logging errors. An error a handler returns is already logged by the framework (with `error`, `service`, `module` and `subject` fields), so put the context into the returned error:
 
 ```go
 func (m *OrderModule) handleCreateOrder(ctx context.Context, req *CreateOrderRequest) (*Order, error) {
     order, err := m.createOrder(ctx, req)
     if err != nil {
-        m.logger.Error("Failed to create order",
-            "customer_id", req.CustomerID,
-            "amount", req.Amount,
-            "error", err,
-        )
-        return nil, err
+        // Logged by the framework as "RequestReply handler error"
+        return nil, fmt.Errorf("create order for customer %s: %w", req.CustomerID, err)
     }
 
     m.logger.Info("Order created successfully",
@@ -374,21 +392,24 @@ The framework provides sentinel errors. Check for specific failures:
 ```go
 import (
     "errors"
-    mono "github.com/go-monolith/mono"
-    monierr "github.com/go-monolith/mono/pkg/errors"
+    "fmt"
+
+    "github.com/go-monolith/mono"
+    monoerrors "github.com/go-monolith/mono/pkg/errors"
 )
 
-func (m *OrderModule) getDependency(ctx context.Context) (PaymentService, error) {
-    service, err := m.container.RequestReplyService(ctx, "payment-service")
+// m.payment is the mono.ServiceLookup stored in SetDependencyServiceContainer.
+func (m *OrderModule) chargeClient() (mono.RequestReplyServiceClient, error) {
+    client, err := m.payment.GetRequestReplyService("charge")
     if err != nil {
-        // Check if it's a missing dependency error
-        if errors.Is(err, monierr.ErrServiceNotFound) {
+        // Check if it's a missing service error
+        if errors.Is(err, monoerrors.ErrServiceNotFound) {
             return nil, fmt.Errorf("payment service not configured")
         }
         return nil, fmt.Errorf("failed to get payment service: %w", err)
     }
 
-    return service.(PaymentService), nil
+    return client, nil
 }
 ```
 
@@ -399,7 +420,7 @@ Since v0.1.0 the framework reports boundary problems with three sentinel errors:
 | Error | When |
 |-------|------|
 | `ErrServiceContractMismatch` | A contract names a different module or service kind than the registered service |
-| `ErrMissingDependency` | A `ConsumeServices()` contract names a module that is not in `Dependencies()` |
+| `ErrMissingDependency` | A `ConsumeServices()` contract names a module that is not in `Dependencies()`, or a declared dependency is not registered |
 | `ErrModuleBoundaryViolation` | A module crosses an undeclared boundary while `WithStrictModuleBoundaries` is on |
 
 Contract problems surface from `app.Start`, wrapped in `ErrModuleStartFailed`:
@@ -407,11 +428,11 @@ Contract problems surface from `app.Start`, wrapped in `ErrModuleStartFailed`:
 ```go
 if err := app.Start(ctx); err != nil {
     switch {
-    case errors.Is(err, monierr.ErrServiceNotFound):
+    case errors.Is(err, monoerrors.ErrServiceNotFound):
         // a consumed service is not registered by its provider
-    case errors.Is(err, monierr.ErrServiceContractMismatch):
+    case errors.Is(err, monoerrors.ErrServiceContractMismatch):
         // a consumed service has a different kind than the contract
-    case errors.Is(err, monierr.ErrMissingDependency):
+    case errors.Is(err, monoerrors.ErrMissingDependency):
         // a consumed contract's module is missing from Dependencies()
     }
     log.Fatalf("start: %v", err)
@@ -426,19 +447,50 @@ Configuration errors occur during framework setup:
 
 ```go
 app, err := mono.NewMonoApplication(
-    mono.WithJetStreamEnabled(true),
-    mono.WithJetStreamStorageDir("/tmp/jetstream"),
+    mono.WithJetStreamStorageDir("/tmp/jetstream"), // also enables JetStream
 )
 if err != nil {
     // Could be ConfigurationError with specific option that failed
-    var confErr *monierr.ConfigurationError
+    var confErr *monoerrors.ConfigurationError
     if errors.As(err, &confErr) {
-        fmt.Printf("Configuration failed at option %d (%s): %v\n",
-            confErr.OptionIndex, confErr.OptionName, confErr.Err)
+        fmt.Printf("Configuration option %s failed: %v\n",
+            confErr.OptionName, confErr.Err)
     }
     return err
 }
 ```
+
+`ConfigurationError.OptionIndex` is currently always 0, so print `OptionName` and `Err` only.
+
+### Framework Error Types
+
+All in `monoerrors "github.com/go-monolith/mono/pkg/errors"`.
+
+| Sentinel | Meaning |
+|----------|---------|
+| `ErrModuleNotFound`, `ErrModuleAlreadyRegistered` | Module lookup or registration |
+| `ErrServiceNotFound`, `ErrServiceAlreadyRegistered` | Service lookup or registration |
+| `ErrCircularDependency`, `ErrMissingDependency` | Dependency resolution |
+| `ErrServiceUnavailable` | The handling instance is shutting down, or the service cannot be reached |
+| `ErrServiceOverloaded` | The worker pool and its queue are full |
+| `ErrHandlerPanic` | The handler panicked; the panic was recovered and logged |
+| `ErrInvalidConfiguration` | An option rejected its value |
+| `ErrModuleStartFailed`, `ErrModuleStopFailed`, `ErrModulePanic` | Module lifecycle failures |
+| `ErrContainerNotBound` | Container used before it was bound to a module |
+| `ErrPluginNotFound`, `ErrPluginAlreadyRegistered` | Plugin lookup or registration |
+| `ErrServiceContractMismatch`, `ErrModuleBoundaryViolation` | Module boundaries (see above) |
+
+| Type | Fields | Helpers |
+|------|--------|---------|
+| `*ModuleError` | `ModuleName`, `Operation`, `Err` | `IsModuleError` |
+| `*ServiceError` | `ServiceName`, `ModuleName`, `ServiceType`, `Err` | `IsServiceError`, `GetServiceError` |
+| `*DependencyError` | `Module`, `Dependency`, `Chain`, `Err` | `IsDependencyError` |
+| `*ConfigurationError` | `OptionIndex` (currently always 0), `OptionName`, `Value`, `Err` | `IsConfigurationError`, `GetConfigurationError` |
+| `*TimeoutError` | `Operation`, `Duration`, `Err`; `Timeout()` returns true | `IsTimeoutError` |
+| `*EventStreamError` | `StreamName`, `Subject`, `Operation`, `Err` | `IsEventStreamError`, `GetEventStreamError` |
+| `*RemoteError` | `Message`, `ServiceName`, `ModuleName`, `ErrorType`; `Unwrap` returns nil | `IsRemoteError`, `GetRemoteError` |
+
+Every type except `RemoteError` unwraps to its `Err`, so `errors.Is(err, monoerrors.ErrServiceNotFound)` works through them. `AggregateErrors(errs)` joins several errors into one.
 
 ## Error Response Patterns
 
@@ -579,7 +631,7 @@ Before returning an error from a function:
 ## Related Documentation
 
 - [Middleware System](../middleware/README.md)
-- [API Reference - Error Types](../api/README.md)
+- [Framework Error Types](#framework-error-types)
 - [Testing Guide](testing.md)
 - [Logging Guide](logging.md)
 

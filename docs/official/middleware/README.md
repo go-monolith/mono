@@ -29,10 +29,14 @@ HTTP-style access logging for all service handlers.
 
 **Quick Start**:
 ```go
-accessModule, _ := accesslog.New(
-    accesslog.WithOutput(os.Stdout),
+accessFile, _ := os.OpenFile("access.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
+accessModule, err := accesslog.New(
+    accesslog.WithOutput(accessFile), // closed by the module on Stop
     accesslog.WithFormat(accesslog.FormatJSON),
 )
+if err != nil {
+    return err
+}
 
 app.Register(accessModule)
 ```
@@ -44,20 +48,21 @@ Learn more: [Access Log Middleware](accesslog.md)
 Tamper-evident audit logging with cryptographic hash chaining.
 
 - **Package**: `github.com/go-monolith/mono/middleware/audit`
-- **Purpose**: Log all framework events with cryptographic integrity protection
+- **Purpose**: Log module start/stop and service and event consumer registrations, optionally hash-chained
 - **Features**:
-  - Hash chaining for tamper detection
-  - User context tracking
-  - Custom audit trail hooks
-  - Secure log file permissions
+  - Optional hash chaining for tamper detection
+  - User context field filled by a function you supply
 
 **Quick Start**:
 ```go
 auditFile, _ := os.OpenFile("audit.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
-auditModule, _ := audit.New(
+auditModule, err := audit.New(
     audit.WithOutput(auditFile),
     audit.WithHashChaining(""),
 )
+if err != nil {
+    return err
+}
 
 app.Register(auditModule)
 ```
@@ -74,11 +79,14 @@ Automatic request ID generation and propagation for distributed tracing.
   - Automatic UUID generation
   - Request ID extraction from headers
   - Context injection for handlers
-  - Automatic propagation to outgoing messages
+  - Automatic propagation to outgoing request-reply calls, queue group sends and stream consumer publishes (not to events or channel services)
 
 **Quick Start**:
 ```go
-requestIDMiddleware, _ := requestid.New()
+requestIDMiddleware, err := requestid.New()
+if err != nil {
+    return err
+}
 app.Register(requestIDMiddleware)
 ```
 
@@ -86,24 +94,24 @@ Learn more: [Request ID Middleware](requestid.md)
 
 ## Middleware Lifecycle
 
-Middleware modules follow the standard module lifecycle:
+Middleware modules can be registered in any position relative to modules: the framework collects them at `Start`, starts them after plugins and before modules, and stops them after modules. Only the order *among* middleware matters (see below). The framework calls only `Start`, `Stop` and the hooks on a middleware module; it does not call `Dependencies`, `SetDependencyServiceContainer`, `SetEventBus`, `RegisterServices` or `RegisterEventConsumers`.
 
 ```
-1. Module Registration (earliest)
-   └─ Middleware can register and prepare
+1. app.Start
+   └─ Plugins start, then middleware start (in registration order)
 
-2. Other Module Startup
-   └─ Middleware may be called during module initialization
+2. Module Startup
+   └─ Hooks fire for each module's service and event consumer registrations,
+      and when each module has started
 
 3. Service Handler Execution
-   └─ Middleware wraps handlers and logs events
+   └─ Wrapped handlers run; outgoing service-client messages pass OnOutgoingMessage
 
-4. Framework Events
-   └─ Middleware hooks into framework lifecycle
-
-5. Application Shutdown
-   └─ Middleware cleans up resources (last)
+4. Application Shutdown
+   └─ Modules stop (a hook fires for each), then middleware stop (reverse order)
 ```
+
+The hooks fire for module started/stopped events, service and event consumer registrations, and outgoing service-client messages. `OnConfigurationChange` is currently never called.
 
 ## Using Multiple Middleware
 
@@ -112,10 +120,27 @@ You can register multiple middleware modules together:
 ```go
 app, _ := mono.NewMonoApplication()
 
-// Register middleware
-app.Register(requestid.New())
-app.Register(accesslog.New(accesslog.WithFormat(accesslog.FormatText)))
-app.Register(audit.New(audit.WithOutput(auditFile)))
+// Register middleware: accesslog before requestid (see the note below)
+accessModule, err := accesslog.New(
+    accesslog.WithOutput(accessFile),
+    accesslog.WithFormat(accesslog.FormatText),
+)
+if err != nil {
+    return err
+}
+app.Register(accessModule)
+
+requestIDModule, err := requestid.New()
+if err != nil {
+    return err
+}
+app.Register(requestIDModule)
+
+auditModule, err := audit.New(audit.WithOutput(auditFile))
+if err != nil {
+    return err
+}
+app.Register(auditModule)
 
 // Register application modules
 app.Register(&OrderModule{})
@@ -125,17 +150,17 @@ app.Register(&PaymentModule{})
 app.Start(context.Background())
 ```
 
-Middleware are processed in registration order. The `requestid` middleware is often registered first since other middleware may use request IDs.
+Middleware are processed in registration order: each one wraps the handler produced by the previous one, so the **last** registered middleware runs **first** when a message arrives. Register `accesslog` **before** `requestid`: `requestid` must run before `accesslog` for a generated ID to reach the access log. Queue group and stream consumer entries only show an ID that arrived in the `X-Request-ID` header.
 
 ## Middleware vs Modules
 
 | Aspect | Middleware | Module |
 |--------|-----------|--------|
 | **Purpose** | Cross-cutting concerns | Business logic |
-| **Registration** | Called before modules | Called alongside modules |
+| **Lifecycle** | Started after plugins and before modules, stopped after modules | Started in dependency order |
 | **Interface** | MiddlewareModule | Module |
 | **Lifecycle Hooks** | Framework events | Module lifecycle |
-| **Dependencies** | Can depend on modules | Independent |
+| **Dependencies** | None (only `Start`/`Stop` and the hooks are called) | Declares dependencies on other modules |
 | **Examples** | Logging, tracing, security | Order, Payment, Notification |
 
 ## Common Patterns
@@ -148,12 +173,18 @@ Enable middleware based on configuration:
 app, _ := mono.NewMonoApplication(mono.WithLogLevel(mono.LogLevelDebug))
 
 if config.EnableAudit {
-    auditModule, _ := audit.New()
+    auditModule, err := audit.New(audit.WithOutput(auditFile))
+    if err != nil {
+        return err
+    }
     app.Register(auditModule)
 }
 
 if config.EnableAccessLog {
-    accessModule, _ := accesslog.New()
+    accessModule, err := accesslog.New(accesslog.WithOutput(accessFile))
+    if err != nil {
+        return err
+    }
     app.Register(accessModule)
 }
 ```
@@ -162,13 +193,16 @@ if config.EnableAccessLog {
 
 Multiple middleware working together:
 
+With `accesslog` registered first and `requestid` second, a request runs through:
+
 ```
 Request
-  ├→ RequestID Middleware (generates ID)
-  ├→ AccessLog Middleware (logs request)
-  ├→ Audit Middleware (security logging)
+  ├→ RequestID Middleware (registered last, runs first: extracts or generates ID)
+  ├→ AccessLog Middleware (logs request, sees the ID in the context)
   └→ Handler (processes request)
 ```
+
+The audit middleware is not on the request path: it only records registrations and module lifecycle events.
 
 ### Custom Middleware
 
@@ -177,35 +211,53 @@ Create your own middleware by implementing `MiddlewareModule`:
 ```go
 type MyMiddleware struct{}
 
-func (m *MyMiddleware) Name() string { return "my-middleware" }
+var _ mono.MiddlewareModule = (*MyMiddleware)(nil)
 
-func (m *MyMiddleware) OnModuleLifecycleEvent(ctx context.Context, event *types.ModuleLifecycleEvent) error {
-    // Hook into module lifecycle
-    return nil
+func (m *MyMiddleware) Name() string                    { return "my-middleware" }
+func (m *MyMiddleware) Start(ctx context.Context) error { return nil }
+func (m *MyMiddleware) Stop(ctx context.Context) error  { return nil }
+
+// Each hook receives a value and returns the (possibly modified) value
+// for the next middleware in the chain.
+func (m *MyMiddleware) OnModuleLifecycle(ctx context.Context, e mono.ModuleLifecycleEvent) mono.ModuleLifecycleEvent {
+    return e
 }
 
-func (m *MyMiddleware) OnServiceRegistration(ctx context.Context, sr *types.ServiceRegistration) error {
-    // Hook into service registration
-    return nil
+func (m *MyMiddleware) OnServiceRegistration(ctx context.Context, r mono.ServiceRegistration) mono.ServiceRegistration {
+    return r // wrap r.RequestHandler etc. here
 }
 
-// More hooks...
+// Currently never called by the framework.
+func (m *MyMiddleware) OnConfigurationChange(ctx context.Context, e mono.ConfigurationEvent) mono.ConfigurationEvent {
+    return e
+}
+
+func (m *MyMiddleware) OnOutgoingMessage(o mono.OutgoingMessageContext) mono.OutgoingMessageContext {
+    return o
+}
+
+func (m *MyMiddleware) OnEventConsumerRegistration(ctx context.Context, e mono.EventConsumerEntry) mono.EventConsumerEntry {
+    return e
+}
+
+func (m *MyMiddleware) OnEventStreamConsumerRegistration(ctx context.Context, e mono.EventStreamConsumerEntry) mono.EventStreamConsumerEntry {
+    return e
+}
 ```
 
 ## Performance Considerations
 
 Middleware adds processing overhead. Consider:
 
-- **Request ID**: Minimal overhead (~100ns per request)
-- **Access Log**: Moderate overhead (~1-5µs per request, depends on I/O)
-- **Audit**: Higher overhead (~10-50µs per request, due to hashing)
+- **Request ID**: one context value per handler call
+- **Access Log**: one unbuffered write per entry under a mutex; wrap the writer in a `bufio.Writer` if needed
+- **Audit**: cost per registration or lifecycle event, not per request
 
 For high-performance applications, be selective about which middleware you enable.
 
 ## Best Practices
 
 ✓ **Do**
-- Register middleware early before modules
 - Keep middleware focused on single concerns
 - Use middleware for cross-cutting concerns
 - Configure output files with appropriate permissions (especially audit)
@@ -214,7 +266,7 @@ For high-performance applications, be selective about which middleware you enabl
 - Put business logic in middleware
 - Have middleware depend on specific modules
 - Use middleware for request transformation (use handlers instead)
-- Log sensitive data (use the framework's redaction features)
+- Log sensitive data; the framework does not redact log output
 
 ## Related Documentation
 

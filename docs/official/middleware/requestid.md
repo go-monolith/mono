@@ -9,7 +9,9 @@ The `requestid` middleware automatically:
 - Generates a unique UUID for each request
 - Extracts existing request IDs from incoming messages
 - Injects request ID into handler execution context
-- Propagates request ID to outgoing messages
+- Propagates request ID to outgoing request-reply calls, queue group sends and stream consumer publishes
+
+For stream consumer and event stream consumer batches there is one ID per batch, taken from the first message or generated. Events (`EventDefinition.Publish`, `EventBus.Publish`) and channel services do not carry the ID.
 
 This enables tracing requests through your entire application for debugging and monitoring.
 
@@ -22,7 +24,7 @@ This enables tracing requests through your entire application for debugging and 
 - **Automatic UUID Generation**: Creates UUIDs for requests without IDs
 - **Request ID Extraction**: Reads X-Request-ID headers from incoming messages
 - **Context Injection**: Makes request ID available to handlers via context
-- **Automatic Propagation**: Forwards request ID to downstream service calls
+- **Automatic Propagation**: Forwards request ID to downstream service calls (not to events)
 - **Distributed Tracing**: Correlate requests across modules
 - **Zero Configuration**: Works out of the box with sensible defaults
 
@@ -39,26 +41,26 @@ import "github.com/go-monolith/mono/middleware/requestid"
 ### New
 
 ```go
-func New() (MiddlewareModule, error)
+func New(opts ...Option) (*RequestIDModule, error)
 ```
 
-Creates a new request ID middleware instance. No configuration options needed.
+Creates a new request ID middleware instance. No options are needed; `WithHeaderName` changes the header.
 
-### FromContext
+### WithHeaderName
 
 ```go
-func FromContext(ctx context.Context) string
+func WithHeaderName(name string) Option
 ```
 
-Extracts the request ID from the context. Returns empty string if not found.
+Sets the header the request ID is read from and written to (default `requestid.HeaderName`, `"X-Request-ID"`; empty is rejected).
 
-### WithContext
+### GetRequestID
 
 ```go
-func WithContext(ctx context.Context, requestID string) context.Context
+func GetRequestID(ctx context.Context) string
 ```
 
-Creates a new context with the specified request ID attached.
+Extracts the request ID from the context. Returns empty string if not found. There is no function to put an ID into a context; send it as a header instead (see [HTTP Gateway Integration](#http-gateway-integration)).
 
 ## Basic Usage
 
@@ -81,7 +83,7 @@ func main() {
     // Create application
     app, _ := mono.NewMonoApplication()
 
-    // Register middleware BEFORE other modules
+    // Register middleware (any position relative to modules)
     app.Register(requestIDMiddleware)
 
     // Register your modules
@@ -143,7 +145,7 @@ Client Request (no request ID)
 ```go
 func (m *OrderModule) handleCreateOrder(ctx context.Context, req *CreateOrderRequest) (*Order, error) {
     // Extract request ID from context
-    requestID := requestid.FromContext(ctx)
+    requestID := requestid.GetRequestID(ctx)
 
     // Use in logging
     m.logger.Info("Creating order", "request_id", requestID, "order_id", req.OrderID)
@@ -159,7 +161,7 @@ func (m *OrderModule) handleCreateOrder(ctx context.Context, req *CreateOrderReq
 import "github.com/go-monolith/mono/middleware/requestid"
 
 func (m *OrderModule) handleOrder(ctx context.Context, order *Order) error {
-    requestID := requestid.FromContext(ctx)
+    requestID := requestid.GetRequestID(ctx)
     // Use requestID for logging, tracing, etc.
     return nil
 }
@@ -167,13 +169,13 @@ func (m *OrderModule) handleOrder(ctx context.Context, order *Order) error {
 
 ## Configuration Options
 
-The Request ID Middleware requires no configuration - it works with zero options:
+The Request ID Middleware works with zero options:
 
-| Setting | Default |
-|---------|---------|
-| Configuration Options | None |
-| UUID Generation | Automatic |
-| Header Name | `X-Request-ID` |
+| Option | Description | Default |
+|--------|-------------|---------|
+| `WithHeaderName` | Header name for the request ID | `X-Request-ID` (`requestid.HeaderName`) |
+
+UUIDs (v4) are generated automatically when the incoming message has no ID.
 
 ## Default Config
 
@@ -185,44 +187,31 @@ requestid.New()  // Works out of the box, no options needed
 
 ### With Access Log Middleware
 
-The request ID automatically appears in access logs:
+The request ID appears in access logs. Register `accesslog` **before** `requestid`: the last registered middleware runs first, and `requestid` must run before `accesslog` for a generated ID to reach the access log. If you change the header with `WithHeaderName`, pass the same name to `accesslog.WithRequestIDHeader`.
 
 ```go
-app.Register(requestid.New())
-app.Register(accesslog.New(accesslog.WithFormat(accesslog.FormatJSON)))
+accessModule, err := accesslog.New(
+    accesslog.WithOutput(accessFile),
+    accesslog.WithFormat(accesslog.FormatJSON),
+)
+if err != nil {
+    return err
+}
+app.Register(accessModule)
+
+requestIDModule, err := requestid.New()
+if err != nil {
+    return err
+}
+app.Register(requestIDModule)
 ```
 
 Access log output:
 ```json
-{
-  "module": "order",
-  "service": "create-order",
-  "status": "success",
-  "duration_ms": 2.456,
-  "request_id": "550e8400-e29b-41d4-a716-446655440000"
-}
+{"duration_ms":2,"module":"order","request_id":"550e8400-e29b-41d4-a716-446655440000","request_size":128,"response_size":256,"service":"create-order","service_type":"request_reply","status":"success","ts":"2025-01-15T10:30:00Z"}
 ```
 
-### With Audit Middleware
-
-Audit entries include request IDs for tracing:
-
-```go
-app.Register(requestid.New())
-app.Register(audit.New(audit.WithOutput(auditFile)))
-```
-
-Audit log entry:
-```json
-{
-  "event_type": "service_registration",
-  "request_id": "550e8400-e29b-41d4-a716-446655440000",
-  "details": {
-    "module": "payment",
-    "service": "process-payment"
-  }
-}
-```
+The audit middleware does not record request IDs: it never sees service calls.
 
 ## Practical Examples
 
@@ -232,17 +221,31 @@ Audit log entry:
 func main() {
     app, _ := mono.NewMonoApplication()
 
-    // Request ID first (other middleware uses it)
-    app.Register(requestid.New())
-
-    // Access logging with request IDs
-    app.Register(accesslog.New(
+    // Access logging first, so that requestid (registered next) runs before it
+    accessFile, _ := os.OpenFile("access.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
+    accessModule, err := accesslog.New(
+        accesslog.WithOutput(accessFile),
         accesslog.WithFormat(accesslog.FormatJSON),
-    ))
+    )
+    if err != nil {
+        log.Fatal(err)
+    }
+    app.Register(accessModule)
 
-    // Audit logging with request IDs
+    // Request ID second
+    requestIDModule, err := requestid.New()
+    if err != nil {
+        log.Fatal(err)
+    }
+    app.Register(requestIDModule)
+
+    // Audit logging (lifecycle and registration events)
     auditFile, _ := os.OpenFile("audit.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
-    app.Register(audit.New(audit.WithOutput(auditFile)))
+    auditModule, err := audit.New(audit.WithOutput(auditFile))
+    if err != nil {
+        log.Fatal(err)
+    }
+    app.Register(auditModule)
 
     // Application modules
     app.Register(&OrderModule{})
@@ -256,7 +259,7 @@ func main() {
 
 ```go
 func (m *OrderModule) handleCreateOrder(ctx context.Context, req *CreateOrderRequest) (*Order, error) {
-    requestID := requestid.FromContext(ctx)
+    requestID := requestid.GetRequestID(ctx)
 
     // Include request ID in all logs
     m.logger.Info("Order creation started",
@@ -290,9 +293,9 @@ func (m *OrderModule) handleCreateOrder(ctx context.Context, req *CreateOrderReq
 ```go
 // Trace requests across services
 func (m *OrderModule) CreateOrder(ctx context.Context, req *CreateOrderRequest) (*Order, error) {
-    requestID := requestid.FromContext(ctx)
+    requestID := requestid.GetRequestID(ctx)
 
-    // Start span with request ID
+    // Start span with request ID (pseudo-code for a third-party tracer)
     span := tracer.StartSpan("create_order", trace.WithAttributes(
         attribute.String("request_id", requestID),
     ))
@@ -331,7 +334,7 @@ Track request latencies by request ID:
 
 ```go
 func (m *OrderModule) handleCreateOrder(ctx context.Context, req *CreateOrderRequest) (*Order, error) {
-    requestID := requestid.FromContext(ctx)
+    requestID := requestid.GetRequestID(ctx)
     startTime := time.Now()
 
     // Process...
@@ -354,7 +357,7 @@ If you have a reverse proxy in front of your application, ensure it doesn't over
 {% endhint %}
 
 ```nginx
-# Nginx: Pass through existing request ID or generate new one
+# Nginx: always sets a new ID ($request_id is generated per request)
 proxy_set_header X-Request-ID $request_id;
 ```
 
@@ -370,7 +373,7 @@ go func() {
 
 // ✅ CORRECT: Pass context to goroutine
 go func(ctx context.Context) {
-    requestID := requestid.FromContext(ctx)
+    requestID := requestid.GetRequestID(ctx)
     m.doAsyncWork(ctx)  // Request ID preserved
 }(ctx)
 ```
@@ -386,7 +389,7 @@ func (m *Module) Handle(ctx context.Context, req *Request) error {
 
 // ✅ CORRECT: Extract and use request ID
 func (m *Module) Handle(ctx context.Context, req *Request) error {
-    requestID := requestid.FromContext(ctx)
+    requestID := requestid.GetRequestID(ctx)
     m.logger.Info("Processing", "request_id", requestID)
     return nil
 }
@@ -395,7 +398,7 @@ func (m *Module) Handle(ctx context.Context, req *Request) error {
 ## Best Practices
 
 ✓ **Do**
-- Register request ID middleware FIRST
+- Register request ID middleware after accesslog (so it runs first)
 - Use request ID in all logging
 - Pass context to all downstream calls
 - Include request ID in error responses
@@ -411,12 +414,18 @@ func (m *Module) Handle(ctx context.Context, req *Request) error {
 
 ### Request ID Not Propagating
 
-**Cause**: RequestID middleware not registered first
+**Cause**: The message is an event or a channel service message (not propagated), or the downstream call does not use the handler's context
+
+**Solution**: Pass the handler's `ctx` to the downstream request-reply call, queue group send or stream consumer publish; events and channel services do not carry the ID.
+
+### Request ID Missing from Access Logs
+
+**Cause**: `requestid` registered before `accesslog`
 
 **Solution**:
 ```go
-app.Register(requestid.New())  // Must be FIRST
-app.Register(accesslog.New())
+app.Register(accessModule)    // first
+app.Register(requestIDModule) // second: runs first
 app.Register(&OrderModule{})
 ```
 
@@ -427,7 +436,7 @@ app.Register(&OrderModule{})
 **Solution**:
 ```go
 func (m *Module) Handle(ctx context.Context, req *Request) error {
-    requestID := requestid.FromContext(ctx)  // Extract it!
+    requestID := requestid.GetRequestID(ctx)  // Extract it!
     m.logger.Info("Processing", "request_id", requestID)
     return nil
 }
@@ -437,8 +446,10 @@ func (m *Module) Handle(ctx context.Context, req *Request) error {
 
 If you're adding an HTTP gateway in front of NATS:
 
+Send the ID as a message header; the middleware reads it in the handler and does not overwrite an existing header on outgoing messages:
+
 ```go
-// HTTP Server
+// HTTP Server (orderClient is a mono.RequestReplyServiceClient)
 http.HandleFunc("/api/orders", func(w http.ResponseWriter, r *http.Request) {
     // Extract or generate request ID from HTTP request
     requestID := r.Header.Get("X-Request-ID")
@@ -446,11 +457,12 @@ http.HandleFunc("/api/orders", func(w http.ResponseWriter, r *http.Request) {
         requestID = uuid.New().String()
     }
 
-    // Pass to NATS service
-    ctx := context.Background()
-    ctx = requestid.WithContext(ctx, requestID)
-
-    result, err := orderService.Create(ctx, &Order{})
+    // Pass to NATS service as a header
+    resp, err := orderClient.CallMsg(r.Context(), &mono.Msg{
+        Header: mono.Header{requestid.HeaderName: {requestID}},
+        Data:   body,
+    })
+    // ...
 })
 ```
 

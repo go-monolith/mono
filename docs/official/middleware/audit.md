@@ -4,20 +4,14 @@ The Audit Middleware provides tamper-evident audit logging with cryptographic ha
 
 ## Overview
 
-The `audit` middleware automatically logs all framework events with cryptographic signatures to detect tampering. It's designed for compliance requirements, security incident investigation, and maintaining integrity of audit trails.
-
-{% hint style="warning" %}
-**Critical:** Register audit middleware **first**, before any other modules. This ensures all framework events are captured in the audit trail.
-{% endhint %}
+The `audit` middleware records module start/stop and service and event consumer registrations as JSON lines, optionally linked by a SHA-256 hash chain to detect tampering. It does not record service calls. It can be registered in any position: the framework collects middleware at `Start`, before any module starts.
 
 ## Features
 
-- **Hash Chaining**: Cryptographic linkage between log entries
-- **Tamper Detection**: Detects if logs have been modified after creation
-- **Event Logging**: Captures framework lifecycle events
-- **User Context**: Tracks user information from request context
-- **Custom Audit Trails**: Hook into audit events
-- **Secure Permissions**: Automatic file permission management (0600)
+- **Hash Chaining**: Optional cryptographic linkage between log entries (off by default)
+- **Tamper Detection**: Detects if logs have been modified after creation (`audit.VerifyChain`)
+- **Event Logging**: Captures module lifecycle and registration events
+- **User Context**: A function you supply (`WithUserContext`) fills `user_context`; it is not called with request contexts
 
 ## Installation
 
@@ -32,10 +26,10 @@ import "github.com/go-monolith/mono/middleware/audit"
 ### New
 
 ```go
-func New(opts ...Option) (MiddlewareModule, error)
+func New(opts ...Option) (*AuditModule, error)
 ```
 
-Creates a new audit middleware instance with the given options.
+Creates a new audit middleware instance with the given options. `WithOutput` is required: without it `New` returns the error `audit module requires WithOutput option`.
 
 ### WithOutput
 
@@ -43,15 +37,23 @@ Creates a new audit middleware instance with the given options.
 func WithOutput(w io.Writer) Option
 ```
 
-Sets the output destination for audit logs (typically a secure file).
+Sets the output destination for audit logs (typically a file opened with mode 0600). The module syncs and closes the writer on `Stop` when it implements `Sync()` / `io.Closer`; do not close it yourself.
 
 ### WithHashChaining
 
 ```go
-func WithHashChaining(prevHash string) Option
+func WithHashChaining(lastSavedHash string) Option
 ```
 
-Enables hash chaining for tamper detection. Pass empty string to start new chain, or previous hash for log rotation.
+Enables hash chaining for tamper detection. Pass empty string to start new chain, or the last `entry_hash` of the previous log to continue it.
+
+### WithUserContext
+
+```go
+func WithUserContext(fn func(context.Context) string) Option
+```
+
+Sets the function that fills `user_context` on each entry (nil is rejected; the default returns `""`). The framework calls it with the `Start`/`Stop` context or `context.Background()`, not with a request context.
 
 ## Basic Usage
 
@@ -75,7 +77,7 @@ func main() {
     if err != nil {
         panic(err)
     }
-    defer auditFile.Close()
+    // The audit module closes the file on Stop
 
     // Create audit middleware
     auditModule, err := audit.New(
@@ -89,7 +91,7 @@ func main() {
     // Create application
     app, _ := mono.NewMonoApplication()
 
-    // Register audit middleware FIRST (before other modules)
+    // Register audit middleware (any position)
     app.Register(auditModule)
 
     // Register your modules
@@ -106,8 +108,9 @@ All configuration is done through functional options passed to `New()`:
 
 | Option | Type | Description | Default |
 |--------|------|-------------|---------|
-| `WithOutput` | `io.Writer` | Output destination for audit logs | - |
-| `WithHashChaining` | `string` | Previous hash for chain continuity | "" |
+| `WithOutput` | `io.Writer` | Output destination for audit logs | required |
+| `WithHashChaining` | `string` | Enables chaining; last hash for chain continuity | disabled |
+| `WithUserContext` | `func(context.Context) string` | Fills `user_context` | returns `""` |
 
 ### WithOutput
 
@@ -121,20 +124,22 @@ audit.New(audit.WithOutput(file))
 
 Start a new chain:
 ```go
-audit.New(audit.WithHashChaining(""))  // New chain
+audit.New(audit.WithOutput(file), audit.WithHashChaining(""))  // New chain
 ```
 
 Continue existing chain (for log rotation):
 ```go
-lastHash := loadLastHashFromPreviousLog()
-audit.New(audit.WithHashChaining(lastHash))  // Resume chain
+lastHash := loadLastHashFromPreviousLog() // your helper: last entry_hash of the old file
+audit.New(audit.WithOutput(file), audit.WithHashChaining(lastHash))  // Resume chain
 ```
 
 ## Default Config
 
 ```go
-audit.New(audit.WithOutput(file))  // Starts new chain by default
+audit.New(audit.WithOutput(file))  // No hash chaining: prev_hash and entry_hash are written empty
 ```
+
+Hash chaining is off by default; pass `audit.WithHashChaining("")` to start a chain, or the last `entry_hash` to continue one.
 
 ## Security Considerations
 
@@ -142,7 +147,7 @@ audit.New(audit.WithOutput(file))  // Starts new chain by default
 **Never** use permissions other than `0600` for audit log files. World-readable audit logs (`0644`) or group-readable logs (`0640`) can expose sensitive information.
 {% endhint %}
 
-- **Permissions**: Always use secure file permissions (0600) for audit logs
+- **Permissions**: Open audit log files with mode 0600 yourself; the module does not set permissions
 - **Storage**: Store audit logs on separate filesystems if possible
 - **Archival**: Archive and secure old logs away from application access
 - **Verification**: Regularly verify hash chain integrity for tampering detection
@@ -162,7 +167,7 @@ newFile, _ := os.OpenFile("audit.log", ...)
 audit.New(audit.WithOutput(newFile), audit.WithHashChaining(""))
 
 // ✅ CORRECT: Continue chain from last hash
-lastHash := extractLastHashFromFile("audit.log.old")
+lastHash := extractLastHashFromFile("audit.log.old") // your helper
 newFile, _ := os.OpenFile("audit.log", ...)
 audit.New(audit.WithOutput(newFile), audit.WithHashChaining(lastHash))
 ```
@@ -186,52 +191,44 @@ Audit logs may capture user identifiers, IP addresses, or request details. Ensur
 
 ## Audit Log Format
 
-Each audit entry includes:
+Each audit entry is one JSON line:
 
 ```json
-{
-  "timestamp": "2025-12-30T08:30:15.123Z",
-  "event_type": "module_started",
-  "details": {
-    "module_name": "order",
-    "status": "success"
-  },
-  "hash": "sha256:abc123...",
-  "prev_hash": "sha256:def456..."
-}
+{"timestamp":"2025-12-30T08:30:15.123456789Z","event_type":"module.started","module_name":"order","details":{"duration_ms":3},"prev_hash":"","entry_hash":"9f2c…"}
 ```
 
 | Field | Description |
 |-------|-------------|
-| `timestamp` | When the event occurred (ISO 8601) |
-| `event_type` | Type of framework event (module_started, etc.) |
-| `details` | Event-specific information |
-| `hash` | SHA-256 hash of current entry |
-| `prev_hash` | SHA-256 hash of previous entry |
+| `timestamp` | When the event occurred (UTC, RFC 3339 with nanoseconds) |
+| `event_type` | Type of event (see below) |
+| `module_name` | Module name (omitted when empty) |
+| `service_name` | Service or event name (omitted when empty) |
+| `details` | Event-specific information (omitted when empty) |
+| `user_context` | Value returned by the `WithUserContext` function (omitted when empty) |
+| `prev_hash` | `entry_hash` of the previous entry (`""` for the first entry of a new chain, or when chaining is off) |
+| `entry_hash` | Hex SHA-256 of timestamp, event_type, module_name, service_name, details, user_context and prev_hash (`""` when chaining is off) |
 
 ## Events Captured
 
-The audit middleware captures these framework events:
+The audit middleware captures these events (`audit.EventType` constants):
 
-- `framework_started` - Application framework initialized
-- `framework_stopped` - Application framework shut down
-- `module_registered` - Module registered with framework
-- `module_started` - Module initialization completed
-- `module_stopped` - Module shutdown completed
-- `module_lifecycle_error` - Error during module lifecycle
-- `configuration_event` - Configuration change detected
-- `service_registration` - Service registered by module
-- `outgoing_message` - Message sent to NATS
+- `module.started` (`EventModuleStarted`) - a module started; `details.duration_ms`
+- `module.stopped` (`EventModuleStopped`) - a module stopped; `details.error` when it failed
+- `service.registered` (`EventServiceRegistered`) - a service, event consumer or event stream consumer was registered; `details.service_type`
+- `configuration.updated` (`EventConfigurationUpdate`) - defined, but currently never emitted (the framework never calls `OnConfigurationChange`)
+- `custom.audit_trail` (`EventCustomAuditTrail`) - custom entries sent through `audit.NewAuditAdapter`; the `audit-trail` channel service it needs is not registered in a running application (the framework does not call `RegisterServices` on middleware modules), so this path is currently not usable
+
+Module registration, middleware modules themselves and plugins are not recorded.
 
 ## Hash Chaining Explained
 
 Hash chaining provides tamper detection:
 
 ```
-Entry 1: hash=h1, prev_hash=null
-Entry 2: hash=h2, prev_hash=h1
-Entry 3: hash=h3, prev_hash=h2
-Entry 4: hash=h4, prev_hash=h3
+Entry 1: entry_hash=h1, prev_hash=""
+Entry 2: entry_hash=h2, prev_hash=h1
+Entry 3: entry_hash=h3, prev_hash=h2
+Entry 4: entry_hash=h4, prev_hash=h3
 ```
 
 If an attacker modifies Entry 2:
@@ -245,63 +242,41 @@ If an attacker modifies Entry 2:
 
 ```go
 auditFile, _ := os.OpenFile("logs/audit.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
-defer auditFile.Close()
+// The module closes auditFile on Stop
 
-auditModule, _ := audit.New(
+auditModule, err := audit.New(
     audit.WithOutput(auditFile),
     audit.WithHashChaining(""),
 )
+if err != nil {
+    return err
+}
 
 app, _ := mono.NewMonoApplication()
-app.Register(auditModule) // Register FIRST
+app.Register(auditModule)
 app.Register(&OrderModule{})
 app.Start(context.Background())
 ```
 
 ### Log Rotation with Chain Continuity
 
-```go
-// On log rotation
-func rotateAuditLog() error {
-    // Get last hash from current log
-    lastHash := extractLastHashFromFile("logs/audit.log")
-
-    // Close old file
-    currentAuditFile.Close()
-
-    // Rotate file
-    os.Rename("logs/audit.log", "logs/audit.log.1")
-
-    // Create new file
-    newFile, _ := os.OpenFile("logs/audit.log", os.O_CREATE|os.O_WRONLY, 0600)
-
-    // Continue chain with last hash
-    newAuditModule, _ := audit.New(
-        audit.WithOutput(newFile),
-        audit.WithHashChaining(lastHash), // Link to previous log
-    )
-
-    app.swapAuditModule(newAuditModule)
-    return nil
-}
-```
-
-### Integration with Request ID Middleware
+The audit module cannot be replaced in a running application, so rotate at restart: read the last `entry_hash` of the old file and start the new process with `audit.WithHashChaining(lastHash)` on the new file.
 
 ```go
-app.Register(requestid.New())
+// At startup, after the previous process has stopped
+lastHash := extractLastHashFromFile("logs/audit.log") // your helper
+os.Rename("logs/audit.log", "logs/audit.log.1")
 
-auditFile, _ := os.OpenFile("audit.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
-auditModule, _ := audit.New(
-    audit.WithOutput(auditFile),
-    audit.WithHashChaining(""),
+newFile, _ := os.OpenFile("logs/audit.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
+auditModule, err := audit.New(
+    audit.WithOutput(newFile),
+    audit.WithHashChaining(lastHash), // Link to previous log
 )
+if err != nil {
+    return err
+}
 app.Register(auditModule)
-
-app.Register(&OrderModule{})
 ```
-
-Audit entries will include request IDs for tracing.
 
 ## Verifying Audit Log Integrity
 
@@ -309,90 +284,55 @@ Audit entries will include request IDs for tracing.
 
 ```bash
 # Extract hashes from log
-jq '.hash, .prev_hash' audit.log > hashes.txt
-
-# Verify chain
-python3 verify_chain.py audit.log
+jq '.entry_hash, .prev_hash' audit.log > hashes.txt
 ```
 
 ### Programmatic Verification
 
+`audit.VerifyChain` checks both the linkage and each recomputed `entry_hash` (`audit.ComputeEntryHash`):
+
 ```go
 func verifyAuditLog(filename string) error {
-    file, _ := os.Open(filename)
+    file, err := os.Open(filename)
+    if err != nil {
+        return err
+    }
     defer file.Close()
 
+    var entries []audit.Entry
     scanner := bufio.NewScanner(file)
-    var prevHash string
-
     for scanner.Scan() {
-        var entry AuditEntry
-        json.Unmarshal(scanner.Bytes(), &entry)
-
-        // Verify chain linkage
-        if prevHash != "" && entry.PrevHash != prevHash {
-            return fmt.Errorf("chain broken at entry: %v", entry.Timestamp)
+        var entry audit.Entry
+        if err := json.Unmarshal(scanner.Bytes(), &entry); err != nil {
+            return err
         }
-
-        prevHash = entry.Hash
+        entries = append(entries, entry)
+    }
+    if err := scanner.Err(); err != nil {
+        return err
     }
 
-    return nil
+    return audit.VerifyChain(entries)
 }
 ```
 
+`VerifyChain` expects the first entry to have an empty `prev_hash`, so a file continued with `WithHashChaining(lastHash)` verifies only when its entries are concatenated after those of its predecessor.
+
+Other exported helpers: `audit.NewHashChain(lastSavedHash)` / `HashChain.AddEntry`, the `audit.Entry` type and the `audit.EventType` constants.
+
 ## Performance Characteristics
 
-- **Memory**: ~1KB per entry
-- **CPU**: ~10-50µs per event (due to hashing)
-- **I/O**: Single write per event (buffered)
+- **Cost**: per registration or module lifecycle event, not per request
+- **I/O**: two unbuffered writes per entry (the JSON and the newline), serialized by a mutex
 - **Hash Algorithm**: SHA-256
-
-For high-volume applications, consider:
-- Batching audit entries
-- Using faster storage
-- Separating critical events from less important ones
 
 ## Compliance Use Cases
 
-### PCI DSS
-
-Log all access to payment systems and verify integrity:
-
-```go
-auditFile, _ := os.OpenFile("logs/pci-audit.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
-auditModule, _ := audit.New(
-    audit.WithOutput(auditFile),
-    audit.WithHashChaining(""),
-)
-```
-
-### HIPAA
-
-Maintain tamper-proof audit trail of PHI access:
-
-```go
-// Automatic audit of all events with hash chaining
-app.Register(auditModule)
-```
-
-### Financial Systems
-
-Immutable record of transactions and state changes:
-
-```go
-// Chain continues across log rotations
-lastHash := getLastHashFromArchive()
-auditModule, _ := audit.New(
-    audit.WithOutput(newLogFile),
-    audit.WithHashChaining(lastHash),
-)
-```
+The module records framework lifecycle and registration events only. Records of access to data or of transactions (PCI DSS, HIPAA, financial systems) need application code.
 
 ## Best Practices
 
 ✓ **Do**
-- Register audit middleware FIRST, before other modules
 - Use secure file permissions (0600)
 - Store audit logs on separate filesystem
 - Archive and secure old logs
@@ -419,11 +359,9 @@ auditModule, _ := audit.New(
 
 ### Performance Issues
 
-**Cause**: Hash computation overhead on high-volume systems
+**Cause**: Slow output writer (entries are written synchronously)
 
 **Solution**:
-- Use dedicated audit thread
-- Batch audit entries
 - Use faster storage for audit logs
 
 ## Related Documentation
