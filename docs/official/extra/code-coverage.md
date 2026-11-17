@@ -45,7 +45,7 @@ Expect the exact figure to move a little with the Go release you build under: th
 
 | Excluded | Why |
 | --- | --- |
-| `examples/` | Documentation programs, built and run by `make run-example-*` rather than unit tested |
+| `examples/` | Documentation programs; four of them (basic, multi-module, analytics, cron-scheduler) are built and run by `make run-example-1` to `make run-example-4`, none are unit tested |
 | `bench/` | Performance benchmarks and the benchmark JSON parser |
 | `test/` | Integration suite, run separately via `make test-integration` under `-tags=integration` |
 
@@ -62,7 +62,7 @@ Changing the exclusions therefore means editing both files together. If the shap
 
 ## Coverage in CI
 
-Coverage runs on a single Go version leg of the pull-request matrix — the figure does not meaningfully vary by toolchain version, and running it on all six would send Codecov six duplicate uploads of the same commit. The push-to-`main` workflow uploads too, which is what gives Codecov a base report for per-pull-request deltas.
+Coverage runs on a single Go version leg of the pull-request matrix — the figure does not meaningfully vary by toolchain version, and running it on both legs would send Codecov two duplicate uploads of the same commit. The push-to-`main` workflow uploads too, which is what gives Codecov a base report for per-pull-request deltas.
 
 Each workflow runs three separate steps rather than one combined target:
 

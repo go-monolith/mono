@@ -28,7 +28,7 @@ Powered by NATS.io's distributed architecture, your application can seamlessly e
 
 - **Distributed Modular Monolith** - Start simple, scale horizontally without code changes
 - **NATS.io Powered** - Built on NATS distributed messaging for high scalability and resilience
-- **Embedded or External NATS** - Run embedded for development or single instance deployment, connect to production NATS clusters for HA deployments
+- **Embedded NATS** - Every instance runs an embedded NATS server; instances form a cluster with `WithNATSClustering` (or a NATS config file) for HA deployments
 - **Event-Driven Communication** - Publish/subscribe patterns for loose coupling
 - **Five Service Patterns** - Channel, Request-Reply, Queue Group, Stream Consumer, and Cron services
 - **JetStream Persistence** - Durable messaging with at-least-once delivery guarantees
@@ -94,7 +94,7 @@ New to Mono Framework? Start here:
 | Build your first module quickly      | [⚡ Quick Start](getting-started/quickstart.md)      |
 | Understand how to organize your app  | [📁 Project Structure](getting-started/project-structure.md) |
 | Learn the core concepts              | [🧠 Core Concepts](core-concepts/README.md)          |
-| See working examples                 | [Examples](../examples/)                             |
+| See working examples                 | [Examples](../../examples/basic/README.md)           |
 | Look up API details                  | [📚 API Reference](api/README.md)                    |
 
 ## Core Concepts
@@ -113,6 +113,10 @@ Learn by example:
 - [Multi-Module](../../examples/multi-module/README.md) - Order system with dependencies and service patterns
 - [Analytics](../../examples/analytics/README.md) - Channel-based services for high-performance communication
 - [Event Emitter](../../examples/event-emitter/README.md) - Event publishing and consumption patterns
+- [Cron Scheduler](../../examples/cron-scheduler/README.md) - Server-scheduled cron services
+- [NATS Config](../../examples/nats-config/README.md) - NATS config file with programmatic overrides
+- [AutoTLS](../../examples/auto-tls/README.md) - Let's Encrypt certificates for the client listener
+- [Kubernetes Cluster](../../examples/k8s-cluster/README.md) - Clustered JetStream on Kubernetes
 
 ## Explore More
 

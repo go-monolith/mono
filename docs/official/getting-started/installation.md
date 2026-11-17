@@ -76,11 +76,17 @@ go run main.go
 You should see:
 
 ```
-INFO [main] app/framework.go:XXX framework starting
-INFO [main] app/nats.go:XXX NATS server started
+time=... level=INFO msg="NATS server started" server_name=... host=127.0.0.1 port=4222 jetstream=false
+time=... level=INFO msg="Application initialized"
+time=... level=INFO msg="Module registered" module=hello
+time=... level=INFO msg="Starting application"
 ...
-INFO [main] app/framework.go:XXX framework started
-INFO [main] app/framework.go:XXX framework stopping
+time=... level=INFO msg="Application started successfully"
+time=... level=INFO msg="Stopping application"
+...
+time=... level=INFO msg="NATS server stopped successfully"
+time=... level=INFO msg="Application stopped successfully"
+time=... level=INFO msg="Shutdown completed"
 ```
 
 ## What's Installed?
@@ -107,9 +113,9 @@ The import path follows Go's versioning convention.
 
 ## Troubleshooting
 
-### Port Conflict: "address already in use"
+### Port Conflict: "NATS server not ready after 10s timeout"
 
-The NATS server listens on port 4222 by default. If you get an "address already in use" error:
+The NATS server listens on port 4222 by default. If `NewMonoApplication` fails with `failed to start NATS: NATS server not ready after 10s timeout`, port 4222 is probably in use:
 
 **Option 1:** Stop the service using that port
 ```bash

@@ -15,7 +15,7 @@ Common questions developers ask when working with the Monolith Framework.
 ```go
 // Define your module
 type OrderModule struct {
-    logger types.Logger
+    logger mono.Logger
 }
 
 // Implement required Module interface
@@ -35,9 +35,18 @@ func (m *OrderModule) Stop(ctx context.Context) error {
 
 // Register and start
 func main() {
-    app, _ := mono.NewMonoApplication()
-    app.Register(&OrderModule{})
-    app.Start(context.Background())
+    app, err := mono.NewMonoApplication()
+    if err != nil {
+        log.Fatal(err)
+    }
+    // Nothing injects a logger into a plain module: pass the framework's.
+    if err := app.Register(&OrderModule{logger: app.Logger()}); err != nil {
+        log.Fatal(err)
+    }
+    if err := app.Start(context.Background()); err != nil {
+        log.Fatal(err)
+    }
+    defer app.Stop(context.Background())
 }
 ```
 
@@ -53,54 +62,74 @@ func main() {
 
 ### Q: How do modules communicate with each other?
 
-**A:** The Monolith Framework provides five communication patterns through NATS:
+**A:** The Monolith Framework provides in-process Channel services plus four patterns over NATS. In the snippets, `container` is the module's own container (passed to `RegisterServices`), `m.orders` is the "order" dependency's container (passed to `SetDependencyServiceContainer`), and `helper` is `github.com/go-monolith/mono/pkg/helper`.
 
-1. **Channel Services** - In-process Go channels for bidirectional communication (lowest latency, single process only)
+1. **Channel Services** - In-process Go channels for bidirectional communication (lowest latency, single process only, not through NATS)
 
 ```go
-// Module A creates a channel and handles it
-dataChannel := make(chan *Data)
-go m.handleDataChannel(dataChannel)
+// Module A registers a channel pair in RegisterServices
+in, out := make(chan *mono.Msg, 100), make(chan *mono.Msg, 100)
+err := container.RegisterChannelService("updates", in, out)
+```
 
-// Module B sends data
-dataChannel <- &Data{...}
+```go
+// Module B gets the channels from its dependency container
+in, out, err := m.orders.GetChannelService("updates", m.Name())
 ```
 
 2. **Request-Reply Services** - Synchronous inter-module calls with automatic service discovery (supports distribution)
 
 ```go
-// Module A registers a service
-m.container.RegisterRequestReplyService("get-order", m.handleGetOrder)
+// Module A registers a service in RegisterServices
+err := helper.RegisterTypedRequestReplyService(container, "get-order",
+    json.Unmarshal, json.Marshal, m.handleGetOrder)
+```
 
+```go
 // Module B calls the service
-response, err := m.container.RequestReplyService(ctx, "order", "get-order", &GetOrderRequest{})
+var resp GetOrderResponse
+err := helper.CallRequestReplyService(ctx, m.orders, "get-order",
+    json.Marshal, json.Unmarshal, GetOrderRequest{ID: "42"}, &resp)
 ```
 
 3. **Queue Group Services** - Asynchronous load-balanced processing (fire-and-forget)
 
 ```go
-// Module A registers queue group
-m.container.RegisterQueueGroupService("process-order", "order-workers", m.handleProcessOrder)
+// Module A registers a queue group in RegisterServices
+err := container.RegisterQueueGroupService("process-order",
+    mono.QGHP{QueueGroup: "order-workers", Handler: m.handleProcessOrder})
+```
 
-// Module B publishes to queue
-m.container.QueueGroupService(ctx, "order", "process-order", &ProcessOrderRequest{})
+```go
+// Module B sends to the queue
+err := helper.SendQueueGroupService(ctx, m.orders, "process-order",
+    json.Marshal, ProcessOrderRequest{ID: "42"})
 ```
 
 4. **Event Stream Consumers** - Persistent event consumption with acknowledgment (JetStream)
 
 ```go
-// Module A emits events
-m.eventBus.Publish(ctx, &OrderCreatedEvent{...})
+// Shared definition, in the emitter's contract package
+var OrderCreatedV1 = helper.EventDefinition[OrderCreatedEvent]("order", "OrderCreated", "v1")
+```
 
-// Module B registers consumer
-m.eventBus.RegisterStreamConsumer(&OrderCreatedEvent{}, m.handleOrderCreated)
+```go
+// Module A emits events
+err := OrderCreatedV1.Publish(m.eventBus, OrderCreatedEvent{OrderID: "42"}, nil)
+```
+
+```go
+// Module B registers a consumer in RegisterEventConsumers(registry mono.EventRegistry) error
+return helper.RegisterTypedEventStreamConsumer(registry, OrderCreatedV1,
+    mono.StreamConsumerConfig{Stream: mono.StreamConfig{Name: "order-events"}},
+    m.handleOrderCreated, m)
 ```
 
 5. **Cron Services** - Server-scheduled periodic work via the JetStream message scheduler (single fire per occurrence across a cluster, requires JetStream)
 
 ```go
-// Register a server-side schedule; the handler runs on each occurrence.
-m.container.RegisterCronService("nightly-rollup", mono.CronServiceConfig{
+// Register a server-side schedule in RegisterServices; the handler runs on each occurrence.
+err := container.RegisterCronService("nightly-rollup", mono.CronServiceConfig{
     Schedule: "@daily",
     Payload:  []byte(`{"job":"rollup"}`),
 }, m.handleRollup)
@@ -110,6 +139,8 @@ m.container.RegisterCronService("nightly-rollup", mono.CronServiceConfig{
 - Use Channel for high-frequency in-process communication
 - Use Request-Reply for synchronous operations
 - Use Queue Groups for asynchronous fire-and-forget work
+- Use Stream Consumers for durable, acknowledged work (JetStream)
+- Use Cron services for scheduled work (JetStream)
 - Use Event Consumers for event-driven patterns
 
 **Learn more:** [Inter-Module Communication - Core Concepts](../core-concepts/inter-module-communication.md)
@@ -133,26 +164,39 @@ m.container.RegisterCronService("nightly-rollup", mono.CronServiceConfig{
 **Example - Channel Service (high frequency):**
 
 ```go
-// Module creates channel for real-time updates
-updateChan := make(chan *OrderUpdate, 100)
-go m.listenForUpdates(updateChan)
+// Provider registers the channel pair in RegisterServices
+in, out := make(chan *mono.Msg, 100), make(chan *mono.Msg, 100)
+if err := container.RegisterChannelService("updates", in, out); err != nil {
+    return err
+}
+```
 
-// Other modules send frequent updates
+```go
+// A consumer module gets the channels from its dependency container
+in, _, err := m.orders.GetChannelService("updates", m.Name())
+if err != nil {
+    return err
+}
 for _, update := range updates {
-    updateChan <- update  // Very fast
+    in <- &mono.Msg{Data: update} // Very fast, no serialization through NATS
 }
 ```
 
 **Example - Request-Reply Service:**
 
 ```go
-// Module registers service
-m.container.RegisterRequestReplyService("get-status", func(ctx context.Context, req *StatusRequest) (*StatusResponse, error) {
-    return &StatusResponse{Status: "ready"}, nil
-})
+// Module registers the service in RegisterServices
+err := helper.RegisterTypedRequestReplyService(container, "get-status", json.Unmarshal, json.Marshal,
+    func(ctx context.Context, req StatusRequest, msg *mono.Msg) (StatusResponse, error) {
+        return StatusResponse{Status: "ready"}, nil
+    })
+```
 
-// Caller invokes service
-response, err := m.container.RequestReplyService(ctx, "module-name", "get-status", &StatusRequest{})
+```go
+// Caller invokes the service through the provider's dependency container
+var resp StatusResponse
+err := helper.CallRequestReplyService(ctx, m.status, "get-status",
+    json.Marshal, json.Unmarshal, StatusRequest{}, &resp)
 ```
 
 **Learn more:** [Inter-Module Communication - Core Concepts](../core-concepts/inter-module-communication.md)
@@ -260,7 +304,10 @@ func TestCreateOrder(t *testing.T) {
 Since v0.1.0 you can also start a module without NATS using `monotest`, and check its boundaries with one call:
 
 ```go
+bus := monotest.NewEventBus()
+inventory := monotest.NewContainer("inventory", bus) // register stand-in services on it
 monotest.CheckModule(t, order.NewModule(),
+    monotest.WithEventBus(bus),
     monotest.WithDependency("inventory", inventory))
 ```
 
@@ -286,16 +333,18 @@ app, err := mono.NewMonoApplication()
 
 // Only JetStream-specific features are unavailable:
 // - Event Stream Consumers (use regular Event Consumers instead)
+// - Stream Consumer services
+// - Cron services
+// - The fs-jetstream and kv-jetstream storage plugins
 // - Message persistence across restarts
 // - Stream replay
 ```
 
-**Enable JetStream only if you need persistence:**
+**Enable JetStream only if you need persistence** (setting a storage directory enables it):
 
 ```go
 app, err := mono.NewMonoApplication(
-    mono.WithJetStreamEnabled(true),
-    mono.WithJetStreamStorageDir("/tmp/jetstream"),
+    mono.WithJetStreamStorageDir("/var/lib/my-app/jetstream"),
 )
 ```
 
@@ -315,31 +364,31 @@ app, err := mono.NewMonoApplication(
 
 ```go
 type OrderModule struct {
-    logger types.Logger
-    db     *Database  // Dependency to check
+    logger mono.Logger
+    db     *sql.DB // Dependency to check
 }
 
 // Implement health check
-func (m *OrderModule) Health(ctx context.Context) types.HealthStatus {
+func (m *OrderModule) Health(ctx context.Context) mono.HealthStatus {
     // Check if database is responsive
-    if err := m.db.Ping(ctx); err != nil {
+    if err := m.db.PingContext(ctx); err != nil {
         m.logger.Warn("Health check failed", "error", err)
-        return types.HealthStatusUnhealthy
+        return mono.HealthStatus{Healthy: false, Message: err.Error()}
     }
 
-    return types.HealthStatusHealthy
+    return mono.HealthStatus{Healthy: true, Message: "operational"}
 }
 
 // Framework aggregates health from all modules
-app, _ := mono.NewMonoApplication()
-app.Register(&OrderModule{})
+app, err := mono.NewMonoApplication()
+// ... register and start the modules ...
 
 // Get overall health
-health := app.Health()  // Returns Healthy only if all modules are healthy
+health := app.Health(ctx) // Healthy only if the framework, NATS and all health-aware modules are healthy
 ```
 
 **Key points:**
-- Return `HealthStatusHealthy` or `HealthStatusUnhealthy`
+- Return `mono.HealthStatus{Healthy: ..., Message: ...}` (optionally with `Details`)
 - Keep health checks fast (no expensive operations)
 - Check critical dependencies only
 - Framework aggregates health from all modules
@@ -350,65 +399,37 @@ health := app.Health()  // Returns Healthy only if all modules are healthy
 
 ### Q: What's the recommended project structure?
 
-**A:** Organize your project like this:
+**A:** Give each module its own package under `modules/`, with a `contract` sub-package that is the only package other modules import:
 
 ```
 my-app/
-├── main.go                          # Entry point
+├── main.go                          # Entry point: creates the app, registers modules
 ├── go.mod
 ├── go.sum
-├── README.md
 │
-├── internal/                        # Private application code
-│   ├── ordermodule/
-│   │   ├── order.go                 # Module implementation
-│   │   ├── handler.go               # Service handlers
-│   │   └── handler_test.go          # Unit tests
+├── modules/
+│   ├── order/
+│   │   ├── contract/                # DTOs, typed service contracts, emitted events
+│   │   │   └── contract.go
+│   │   ├── module.go                # mono.Module implementation
+│   │   ├── ports.go                 # Ports this module needs, in its own types
+│   │   ├── adapter.go               # Adapters to other modules' contracts
+│   │   ├── service.go               # Business logic over the ports
+│   │   └── module_test.go           # monotest.CheckModule conformance test
 │   │
-│   └── paymentmodule/
-│       ├── payment.go
-│       ├── handler.go
-│       └── handler_test.go
+│   └── payment/
+│       ├── contract/
+│       │   └── contract.go
+│       └── module.go
 │
-├── pkg/                             # Public packages (if any)
-│   └── orderapi/                    # APIs exposed to external packages
-│       └── types.go
-│
-├── test/                            # Integration tests
-│   ├── integration/
-│   │   └── order_service_test.go    # Integration tests
-│   └── testdata/                    # Test fixtures
-│
-├── config/                          # Configuration
-│   └── config.go
-│
-└── docs/                            # Documentation
-    ├── README.md
-    └── architecture.md
+└── imports_test.go                  # monotest.CheckImports(t): checks the contract import rule
 ```
 
 **Key principles:**
 - Group related functionality in modules
 - Keep modules independent and focused
-- Put integration tests in `test/integration/`
-- Use internal packages for private code
+- Import another module's `contract` package and nothing else of it
 - Document architecture and design decisions
-
-**Example module structure:**
-
-```go
-// internal/ordermodule/order.go
-package ordermodule
-
-type OrderModule struct {
-    logger types.Logger
-    // ... other fields
-}
-
-func (m *OrderModule) Name() string { return "order" }
-func (m *OrderModule) Start(ctx context.Context) error { ... }
-func (m *OrderModule) Stop(ctx context.Context) error { ... }
-```
 
 **Learn more:** [Getting Started - Project Structure](../getting-started/project-structure.md)
 
@@ -425,21 +446,22 @@ func (m *OrderModule) Stop(ctx context.Context) error { ... }
 app.Register(&MyModule{})  // Don't forget this!
 ```
 
-2. **Service not registered in Start():**
+2. **Service not registered in `RegisterServices`:** implement `ServiceProviderModule` and register there (the framework calls it before `Start`):
 ```go
-func (m *MyModule) Start(ctx context.Context) error {
-    m.container.RegisterRequestReplyService("my-service", m.handleRequest)
-    return nil
+func (m *MyModule) RegisterServices(container mono.ServiceContainer) error {
+    return container.RegisterRequestReplyService("my-service", m.handleRequest)
 }
 ```
 
 3. **Service name mismatch:**
 ```go
-// Registration uses: "services.module-name.service-name"
-m.container.RegisterRequestReplyService("get-order", ...)
+// Registration in module "order" uses the subject "services.order.get-order"
+container.RegisterRequestReplyService("get-order", m.handleGetOrder)
+```
 
-// Call must use same module and service name
-m.container.RequestReplyService(ctx, "module-name", "get-order", ...)
+```go
+// The caller must use the same service name, on the "order" dependency container
+client, err := m.orders.GetRequestReplyService("get-order")
 ```
 
 4. **Module not started:**
@@ -462,16 +484,16 @@ app.Start(ctx)  // Then start
 
 2. **Event handler not registered:**
 ```go
-func (m *MyModule) RegisterEventConsumers(registry types.EventRegistry) {
-    registry.RegisterEventConsumer(&OrderCreatedEvent{}, m.handleOrderCreated)
+func (m *MyModule) RegisterEventConsumers(registry mono.EventRegistry) error {
+    return helper.RegisterTypedEventConsumer(registry, OrderCreatedV1, m.handleOrderCreated, m)
 }
 ```
 
 3. **Event subject doesn't match:**
 ```go
-// Events use subject: "events.domain.event-type"
-// Make sure publisher and consumer use same event types
-m.eventBus.Publish(ctx, &OrderCreatedEvent{})
+// Publisher and consumer must use the same event definition
+// (helper.EventDefinition, normally from the emitter's contract package)
+err := OrderCreatedV1.Publish(m.eventBus, OrderCreatedEvent{OrderID: "42"}, nil)
 ```
 
 ---
