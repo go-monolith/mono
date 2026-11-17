@@ -934,7 +934,8 @@ func (m *mockQueueGroupServiceClient) SendMsg(ctx context.Context, msg *types.Ms
 
 // mockStreamConsumerServiceClient for testing
 type mockStreamConsumerServiceClient struct {
-	publishFunc func(context.Context, []byte) (types.MsgPubAck, error)
+	publishFunc    func(context.Context, []byte) (types.MsgPubAck, error)
+	publishMsgFunc func(context.Context, *types.Msg) (types.MsgPubAck, error)
 }
 
 func (m *mockStreamConsumerServiceClient) Publish(ctx context.Context, data []byte) (types.MsgPubAck, error) {
@@ -945,6 +946,9 @@ func (m *mockStreamConsumerServiceClient) Publish(ctx context.Context, data []by
 }
 
 func (m *mockStreamConsumerServiceClient) PublishMsg(ctx context.Context, msg *types.Msg) (types.MsgPubAck, error) {
+	if m.publishMsgFunc != nil {
+		return m.publishMsgFunc(ctx, msg)
+	}
 	return m.Publish(ctx, msg.Data)
 }
 

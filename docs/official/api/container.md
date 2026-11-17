@@ -664,9 +664,15 @@ func StreamConsumerService[T any](moduleName, serviceName string) StreamConsumer
 |------------|----------|----------|
 | `RequestReplyDefinition[Req, Resp]` | `Register(container, handler, opts...)` | `Call(ctx, container, req) (Resp, error)` |
 | `QueueGroupDefinition[T]` | `Register(container, pairs...)` | `Send(ctx, container, payload) error` |
-| `StreamConsumerDefinition[T]` | `Register(container, config, handler)` | `Publish(ctx, container, payload) (MsgPubAck, error)` |
+| `StreamConsumerDefinition[T]` | `Register(container, config, handler)` | `Publish(ctx, container, payload, opts...) (MsgPubAck, error)` |
 
 All three have `WithMarshaler`, `WithUnmarshaler` (JSON by default), `ToBase()` and `Subject()`. The constructors panic on a module or service name that is not kebab-case.
+
+**Message IDs.** `Publish` (and `helper.PublishStreamConsumerService`) accept `helper.WithMsgID(id)`, which sends the JetStream message ID header (`Nats-Msg-Id`). The stream stores an ID once within its duplicate window (`StreamConfig.Duplicates`, 2 minutes when zero) and acknowledges a repeat with `Duplicate() == true` and the sequence of the stored message. Use it to retry a failed publish: a publish error, for example a timeout while a cluster has no quorum, does not prove that the message was not stored. Derive the ID from the message's identity (an order ID, an idempotency key), not from the attempt. An empty ID fails with `helper.ErrEmptyMsgID`.
+
+```go
+ack, err := contract.OrderPlaced.Publish(ctx, services, event, helper.WithMsgID("order-"+event.OrderID))
+```
 
 `Register` records the contract in `ServiceEntry.Contract`. It returns `ErrServiceContractMismatch` when the container belongs to a different module than the contract names.
 

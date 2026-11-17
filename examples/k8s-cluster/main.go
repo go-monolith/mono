@@ -9,7 +9,8 @@
 // together. An HTTP API on HTTP_ADDR exposes:
 //
 //	GET /hello?name=x   call the hello service and record a visit in the
-//	                    replicated stream
+//	                    replicated stream; with &id=y the visit is published
+//	                    with message ID y, so a retried request is stored once
 //	GET /cluster        list the instances answering $SRV.PING across the
 //	                    cluster, and the replicas of the visits stream
 //	GET /healthz        liveness: the process is serving HTTP
@@ -40,6 +41,7 @@ import (
 	"github.com/go-monolith/mono"
 	"github.com/go-monolith/mono/examples/k8s-cluster/greeter"
 	"github.com/go-monolith/mono/examples/k8s-cluster/greeter/contract"
+	"github.com/go-monolith/mono/pkg/helper"
 )
 
 // config is read from the environment; every value but the routes has a
@@ -261,9 +263,17 @@ func (a *api) routes() http.Handler {
 			writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
 			return
 		}
+		// A client that retries a failed request passes the same id: the
+		// failed publish may still have been stored (a timeout while the
+		// cluster has no quorum), and the message ID makes the stream store
+		// the visit once.
+		var opts []helper.PublishOption
+		if id := r.URL.Query().Get("id"); id != "" {
+			opts = append(opts, helper.WithMsgID("visit-"+id))
+		}
 		ack, err := contract.Visits.Publish(ctx, services, contract.Visit{
 			Name: name, GreetedBy: greeting.Instance, At: time.Now().UTC(),
-		})
+		}, opts...)
 		if err != nil {
 			writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
 			return
@@ -271,7 +281,7 @@ func (a *api) routes() http.Handler {
 		writeJSON(w, http.StatusOK, map[string]any{
 			"http_instance": instance,
 			"greeting":      greeting,
-			"visit_stored":  map[string]any{"stream": ack.Stream(), "sequence": ack.Sequence()},
+			"visit_stored":  map[string]any{"stream": ack.Stream(), "sequence": ack.Sequence(), "duplicate": ack.Duplicate()},
 		})
 	})
 

@@ -212,7 +212,7 @@ The reverse cutover is the same runbook with the colours swapped. One wait appli
 Every strategy here keeps the framework's guarantees: stream consumer and cron messages are delivered **at least once**, and durable consumers keep their position across restarts and cutovers (no replay was observed in any run). Plan for these effects:
 
 - **Redelivery after the ack wait.** A message handled but not acknowledged before its pod stopped, or whose acknowledgement was lost while a consumer leader moved, is delivered again after `AckWait`. Handlers must be idempotent. In one experiment that moved consumer leaders several times in quick succession, 29 messages were delivered a second time; the cutover runbook runs had none.
-- **A publish error doesn't mean the message wasn't stored.** A publish that timed out while the cluster had no quorum was stored and handled once the quorum returned (seen on 2 servers). A caller that retries can store it twice. Deduplicate with a `Nats-Msg-Id` header through `PublishMsg`; typed definitions can't set it yet ([#38](https://github.com/go-monolith/mono/issues/38)).
+- **A publish error doesn't mean the message wasn't stored.** A publish that timed out while the cluster had no quorum was stored and handled once the quorum returned (seen on 2 servers). A caller that retries can store it twice. Publish with a message ID (`helper.WithMsgID`, see [Typed Service Contracts](../api/container.md#typed-service-contracts)) and retry with the same ID: the stream stores the message once.
 
 ## Methodology and Limits
 

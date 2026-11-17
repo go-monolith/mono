@@ -146,12 +146,23 @@ kubectl -n mono-demo port-forward svc/mono-cluster 8080:8080 &
 
 curl 'localhost:8080/hello?name=ada'
 # {"greeting": {"message": "Hello, ada!", "instance": "mono-cluster-1"},
-#  "http_instance": "mono-cluster-0", "visit_stored": {"stream": "GREETER_VISITS", "sequence": 1}}
+#  "http_instance": "mono-cluster-0", "visit_stored": {"stream": "GREETER_VISITS", "sequence": 1, "duplicate": false}}
 ```
 
 `http_instance` is the pod that served the HTTP request (port-forward sticks to
 one pod). `greeting.instance` is the pod whose `hello` handler answered. Repeat
 the call and other pods show up: the request crossed a NATS route.
+
+A failed `/hello` may still have stored its visit (a publish that timed out
+while the cluster had no quorum, for example). To retry safely, pass an `id`:
+the visit is published with that message ID (`helper.WithMsgID`), and a
+repeat within 2 minutes is acknowledged as a duplicate instead of being stored
+again:
+
+```bash
+curl 'localhost:8080/hello?name=ada&id=req-42'   # "sequence": 2, "duplicate": false
+curl 'localhost:8080/hello?name=ada&id=req-42'   # "sequence": 2, "duplicate": true
+```
 
 ```bash
 curl localhost:8080/cluster
