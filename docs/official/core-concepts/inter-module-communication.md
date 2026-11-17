@@ -738,17 +738,17 @@ Additional considerations:
 
 ## Performance Characteristics
 
-Typical latencies on modern hardware:
+Indicative latencies (not benchmarked by this project; actual figures depend on message size, load and configuration):
 
-| Pattern | Latency | Throughput | Durability |
-|---------|---------|-----------|------------|
-| Channel | ~1µs | >1M msgs/sec | None |
-| Request-Reply | ~1ms | ~10K msgs/sec | None |
-| Queue Group | ~1ms | ~10K msgs/sec | None |
-| Stream Consumer | ~5ms | ~5K msgs/sec | JetStream |
-| Cron | schedule-driven | per-schedule | JetStream |
-| EventConsumer | ~1ms | ~10K msgs/sec | None |
-| EventStreamConsumer | ~5ms | ~5K msgs/sec | JetStream |
+| Pattern | Latency | Durability |
+|---------|---------|------------|
+| Channel | ~1µs (in-process) | None |
+| Request-Reply | ~1ms | None |
+| Queue Group | ~1ms | None |
+| Stream Consumer | higher (persistence) | JetStream |
+| Cron | schedule-driven | JetStream |
+| EventConsumer | ~1ms | None |
+| EventStreamConsumer | higher (persistence) | JetStream |
 
 ---
 

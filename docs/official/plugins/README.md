@@ -219,9 +219,9 @@ if err != nil {
     log.Fatal(err)
 }
 
-_ = app.Register(rid)                      // Middleware
-_ = app.RegisterPlugin(storage, "storage") // Plugin: starts first
 _ = app.Register(al)                       // Middleware
+_ = app.RegisterPlugin(storage, "storage") // Plugin: starts first
+_ = app.Register(rid)                      // Middleware: after accesslog (see middleware ordering)
 _ = app.Register(&AppModule{})             // Module: receives "storage" via SetPlugin
 ```
 
