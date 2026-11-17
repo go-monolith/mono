@@ -34,7 +34,7 @@ Create a test file alongside your module:
 ```go
 // mymodule.go
 type MyModule struct {
-    logger types.Logger
+    logger mono.Logger
     // ... other fields
 }
 
@@ -197,6 +197,8 @@ func TestHandleOrderUpdateConcurrently(t *testing.T) {
 Integration tests run with a real embedded NATS server:
 
 ```go
+//go:build integration
+
 // test/integration/order_service_test.go
 package integration
 
@@ -233,7 +235,7 @@ func TestOrderServiceWithNATS(t *testing.T) {
 
 ### Testing Service Communication
 
-Test Request-Reply services:
+Test Request-Reply services (`contract` is the order module's contract package, as in the [multi-module example](../../../examples/multi-module/README.md)):
 
 ```go
 func TestOrderServiceRequestReply(t *testing.T) {
@@ -244,24 +246,15 @@ func TestOrderServiceRequestReply(t *testing.T) {
     app.Start(ctx)
     defer app.Stop(ctx)
 
-    // Call a Request-Reply service registered by OrderModule
-    req := &GetOrderRequest{OrderID: "order-1"}
-    order := &Order{}
-
-    // Framework would provide service discovery here
-    // This is a simplified example
-    service, err := getOrderService(app)
-    if err != nil {
-        t.Fatalf("service not found: %v", err)
-    }
-
-    result, err := service.GetOrder(ctx, req)
+    // Call a Request-Reply service registered by OrderModule through its contract
+    resp, err := contract.PlaceOrder.Call(ctx, app.Services("order"),
+        contract.CreateOrderRequest{ProductID: "laptop", Quantity: 1, Amount: 10})
     if err != nil {
         t.Fatalf("service call failed: %v", err)
     }
 
-    if result.ID != "order-1" {
-        t.Errorf("unexpected order ID: %v", result.ID)
+    if resp.OrderID == "" {
+        t.Error("expected an order ID")
     }
 }
 ```
@@ -287,10 +280,12 @@ func TestOrderEventPublishing(t *testing.T) {
     defer app.Stop(ctx)
 
     // Publish an event (from OrderModule)
-    app.EventBus().Publish(ctx, &OrderCreatedEvent{
+    if err := contract.OrderCreatedV1.Publish(app.EventBus("order"), contract.OrderCreatedEvent{
         OrderID: "order-1",
         Amount:  100,
-    })
+    }, nil); err != nil {
+        t.Fatalf("publish failed: %v", err)
+    }
 
     // Allow event to propagate
     time.Sleep(100 * time.Millisecond)
@@ -310,9 +305,9 @@ Test with persistent streams:
 func TestOrderEventStreamWithJetStream(t *testing.T) {
     ctx := context.Background()
 
-    // Enable JetStream for persistence
+    // Enable JetStream (stored in a temporary directory)
     app, err := mono.NewMonoApplication(
-        mono.WithJetStreamEnabled(true),
+        mono.WithJetStreamStorageDir(t.TempDir()),
     )
     if err != nil {
         t.Fatalf("failed to create app: %v", err)
@@ -324,10 +319,12 @@ func TestOrderEventStreamWithJetStream(t *testing.T) {
     app.Start(ctx)
     defer app.Stop(ctx)
 
-    // Publish event
-    app.EventBus().Publish(ctx, &OrderCreatedEvent{
+    // Publish event to its JetStream stream
+    if _, err := contract.OrderCreatedV1.EventStreamPublish(ctx, app.EventBus("order"), contract.OrderCreatedEvent{
         OrderID: "order-1",
-    })
+    }, nil); err != nil {
+        t.Fatalf("publish failed: %v", err)
+    }
 
     // Restart modules - JetStream should replay events
     // (This would be a separate integration test scenario)
@@ -344,20 +341,36 @@ Add one per module. `CheckModule` starts the module, runs your exercise, stops i
 
 ```go
 func TestOrderModuleConformance(t *testing.T) {
+    // One stand-in per dependency of the order module, all on one bus.
     bus := monotest.NewEventBus()
     inventory := monotest.NewContainer("inventory", bus)
-    err := monotest.StubRequestReply(inventory, "check-stock",
-        func(_ context.Context, req CheckStockRequest) (CheckStockResponse, error) {
-            return CheckStockResponse{Available: true, Stock: 5}, nil
-        })
-    if err != nil {
+    payment := monotest.NewContainer("payment", bus)
+    notification := monotest.NewContainer("notification", bus)
+
+    if err := monotest.StubRequestReply(inventory, "check-stock",
+        func(_ context.Context, req inventorycontract.CheckStockRequest) (inventorycontract.CheckStockResponse, error) {
+            return inventorycontract.CheckStockResponse{Available: true, Stock: 5}, nil
+        }); err != nil {
+        t.Fatal(err)
+    }
+    if err := monotest.StubRequestReply(payment, "process",
+        func(_ context.Context, req paymentcontract.ProcessPaymentRequest) (paymentcontract.ProcessPaymentResponse, error) {
+            return paymentcontract.ProcessPaymentResponse{Success: true, TransactionID: "txn"}, nil
+        }); err != nil {
+        t.Fatal(err)
+    }
+    if err := monotest.StubQueueGroup(notification, "on-order-created",
+        func(_ context.Context, n notificationcontract.OrderCreatedNotification) error { return nil }); err != nil {
         t.Fatal(err)
     }
 
     monotest.CheckModule(t, order.NewModule(),
         monotest.WithDependency("inventory", inventory),
+        monotest.WithDependency("payment", payment),
+        monotest.WithDependency("notification", notification),
         monotest.WithExercise(func(ctx context.Context, h *monotest.Harness) error {
-            _, err := contract.PlaceOrder.Call(ctx, h.Container(), contract.PlaceOrderRequest{ProductID: "laptop", Quantity: 1})
+            _, err := contract.PlaceOrder.Call(ctx, h.Container(),
+                contract.CreateOrderRequest{ProductID: "laptop", Quantity: 1, Amount: 10})
             return err
         }))
 }
@@ -387,7 +400,7 @@ type fakeInventory struct{ available bool }
 func (f fakeInventory) Available(context.Context, string, int) (bool, error) { return f.available, nil }
 
 func TestPlaceOrderOutOfStock(t *testing.T) {
-    service, err := order.NewService(fakeInventory{available: false}, fakePayment{}, fakeEvents{})
+    service, err := order.NewService(fakeInventory{available: false}, fakePayment{}, fakeNotification{}, fakeEvents{})
     if err != nil {
         t.Fatal(err)
     }
@@ -401,13 +414,20 @@ func TestPlaceOrderOutOfStock(t *testing.T) {
 ### Driving a Module
 
 ```go
-h := monotest.New(t, order.NewModule(), monotest.WithDependency("inventory", inventory))
+h := monotest.New(t, order.NewModule(),
+    monotest.WithDependency("inventory", inventory),
+    monotest.WithDependency("payment", payment),
+    monotest.WithDependency("notification", notification))
 if err := h.Start(ctx); err != nil {
     t.Fatal(err)
 }
 defer h.Stop(ctx)
 
-resp := monotest.Call[PlaceOrderRequest, PlaceOrderResponse](t, h, "place-order", PlaceOrderRequest{ProductID: "laptop", Quantity: 1})
+resp := monotest.Call[contract.CreateOrderRequest, contract.CreateOrderResponse](t, h, "place-order",
+    contract.CreateOrderRequest{ProductID: "laptop", Quantity: 1, Amount: 10})
+if resp.Status != "success" {
+    t.Errorf("status = %q", resp.Status)
+}
 
 if inventory.Calls("check-stock") != 1 {
     t.Error("inventory was not consulted")
@@ -505,11 +525,11 @@ Use dependency injection for testability:
 type OrderModule struct {
     paymentService PaymentService
     storage        OrderStorage
-    logger         types.Logger
+    logger         mono.Logger
 }
 
 // New creates a module with dependencies
-func New(payment PaymentService, storage OrderStorage, logger types.Logger) *OrderModule {
+func New(payment PaymentService, storage OrderStorage, logger mono.Logger) *OrderModule {
     return &OrderModule{
         paymentService: payment,
         storage:        storage,
@@ -534,7 +554,7 @@ func TestOrderModuleWithMocks(t *testing.T) {
 ### Creating Test Logger
 
 ```go
-func newTestLogger() types.Logger {
+func newTestLogger() mono.Logger {
     // Return a no-op logger for testing
     return &testLogger{}
 }
@@ -545,9 +565,9 @@ func (l *testLogger) Debug(msg string, args ...any) {}
 func (l *testLogger) Info(msg string, args ...any) {}
 func (l *testLogger) Warn(msg string, args ...any) {}
 func (l *testLogger) Error(msg string, args ...any) {}
-func (l *testLogger) With(args ...any) types.Logger { return l }
-func (l *testLogger) WithModule(name string) types.Logger { return l }
-func (l *testLogger) WithError(err error) types.Logger { return l }
+func (l *testLogger) With(args ...any) mono.Logger { return l }
+func (l *testLogger) WithModule(name string) mono.Logger { return l }
+func (l *testLogger) WithError(err error) mono.Logger { return l }
 ```
 
 ### Creating Test Context

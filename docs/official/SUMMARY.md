@@ -3,6 +3,7 @@
 ## Getting Started
 
 * [👋 Welcome](README.md)
+* [Getting Started](getting-started/README.md)
 * [📦 Installation](getting-started/installation.md)
 * [⚡ Quick Start](getting-started/quickstart.md)
 * [📁 Project Structure](getting-started/project-structure.md)

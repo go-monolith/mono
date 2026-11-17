@@ -41,7 +41,7 @@ Each server needs:
 
 **Routes.** Give every server the same list: all servers of the cluster, its own included. A server ignores the route to itself, so one list fits every instance. A route has the form `nats://[user:password@]host:port`; percent-encode special characters in credentials.
 
-Without a config file, `NewMonoApplication` returns an error when clustering and JetStream are configured without a server name or without a route. With a config file ([`WithNATSConfigFile`](../api/framework.md#withnatsconfigfile)), the checks run at `Start` on the merged configuration.
+Without a config file, `NewMonoApplication` returns an error when clustering and JetStream are configured without a server name or without a route. With a config file ([`WithNATSConfigFile`](../api/framework.md#withnatsconfigfile)), the checks run when the embedded server starts, still inside `NewMonoApplication`, on the merged configuration.
 
 ## Programmatic Configuration
 
@@ -92,7 +92,7 @@ func main() {
 
 ### With a NATS config file
 
-`WithNATSClustering` is merged into the file's `cluster{}` block: name, host and port come from the option, its routes are added to the file's `cluster.routes` (the server uses both lists), and the file's authorization, TLS, permissions, pool size and compression apply. `WithNATSServerName` overrides the file's `server_name`, and `WithNATSClusterAuth` overrides the user and password of its `cluster.authorization`. Use a file for what the options cannot express, such as route TLS.
+`WithNATSClustering` is merged into the file's `cluster{}` block: name, host and port come from the option, its routes are added to the file's `cluster.routes` (the server uses both lists), and the file's authorization, TLS, permissions, pool size and compression apply. `WithNATSServerName` sets `server_name` when the file has none, and must equal it when the file sets one (otherwise `NewMonoApplication` fails), and `WithNATSClusterAuth` overrides the user and password of its `cluster.authorization`. Use a file for what the options cannot express, such as route TLS.
 
 ## Route Authentication
 
@@ -104,7 +104,7 @@ func main() {
 
 ## Operator Access (System Account)
 
-Some cluster operations need the NATS system account: `nats server report jetstream` lists every server of the meta group, and `nats server raft peer-remove <server>` removes a server from it, which retiring servers for good requires (scaling down for good, or a [blue-green cutover](../extra/kubernetes-deployment.md#joined-cluster)). `WithNATSSystemAccount(username, password)` adds a system account user:
+Since v0.2.2. Some cluster operations need the NATS system account: `nats server report jetstream` lists every server of the meta group, and `nats server raft peer-remove <server>` removes a server from it, which retiring servers for good requires (scaling down for good, or a [blue-green cutover](../extra/kubernetes-deployment.md#joined-cluster)). `WithNATSSystemAccount(username, password)` adds a system account user:
 
 ```go
 mono.WithNATSSystemAccount("admin", os.Getenv("NATS_SYSTEM_PASSWORD"))
@@ -113,7 +113,7 @@ mono.WithNATSSystemAccount("admin", os.Getenv("NATS_SYSTEM_PASSWORD"))
 - Clients without credentials, the framework's own included, keep working in the global account, so the application's streams and consumers are unaffected. Enabling it on a running cluster one server at a time is safe. A client that sends credentials (a URL with user info, a token) is now rejected unless they are the system account user's: remove leftover credentials from client URLs first.
 - The user connects to the client listener: keep it private (the example binds it to loopback and operators use a port-forward), and load the password from a secret.
 - **This is not client authentication.** The system account protects only the `$SYS` requests. Clients without credentials still have full access to the global account, every stream and consumer included. Keep the client listener unexposed (loopback, as in the example), or configure real client authorization in a NATS config file and add the system account user there.
-- With a NATS config file, add the user there instead when the file configures accounts or has an `authorization` block: `accounts { "$SYS": { users: [ { user: admin, password: $NATS_SYSTEM_PASSWORD } ] } }` and `system_account: "$SYS"`. With only these two settings, clients without credentials keep working too.
+- With a NATS config file, add the user there instead when the file configures accounts or has an `authorization` block: `accounts { "$SYS": { users: [ { user: admin, password: $NATS_SYSTEM_PASSWORD } ] } }` and `system_account: "$SYS"`. With only these two settings, clients without credentials keep working too. Combining `WithNATSSystemAccount` with such a file (accounts, `system_account`, an `authorization` block, users, `no_sys_acc` or an operator) is rejected: `NewMonoApplication` returns an error.
 
 ## Replicas
 
@@ -181,7 +181,7 @@ On shutdown, nats-server steps down the RAFT leaders it holds; the framework add
 These situations can delete JetStream data. The framework cannot detect most of them, so plan for them.
 
 - **Do not turn an existing standalone store into a cluster member.** When a server starts in clustered mode, the cluster's meta layer is the source of truth: about 30s after it recovers, nats-server deletes every locally stored stream and consumer the meta layer does not know. That includes your own streams, KV buckets and object stores, and all consumer positions. Start the cluster on empty storage directories, then move the data with `nats stream backup` / `restore`, or with mirrors or sources from the old server.
-- **Do not rename a JetStream server.** A server's RAFT identity is derived from its name, so a server with a new name is a new peer, and the cluster removes the local replicas assigned to the old one. A single-replica stream on that server is lost. Keep the name stable, which is why a StatefulSet pod name fits. When both `WithNATSServerName` and `server_name` in a config file are set, `Start` fails unless they are equal.
+- **Do not rename a JetStream server.** A server's RAFT identity is derived from its name, so a server with a new name is a new peer, and the cluster removes the local replicas assigned to the old one. A single-replica stream on that server is lost. Keep the name stable, which is why a StatefulSet pod name fits. When both `WithNATSServerName` and `server_name` in a config file are set, `NewMonoApplication` returns an error unless they are equal.
 - **Single-replica streams live on one server.** Losing that server's volume loses them. Use `WithJetStreamDefaultReplicas(3)`, or `Replicas` on your own streams. The KV and object stores of the `kv-jetstream` and `fs-jetstream` plugins are not covered by this option, so set their replicas in the plugin configuration.
 - **Non-durable consumers.** A consumer created with a `Name` only is deleted by the server once it has not been pulled for its inactivity threshold. That replays its stream when the consumer is recreated, and on an interest-retention stream it removes the messages only that consumer still needed. The framework's own consumers are durable. At start it gives non-durable consumers still at the default 5s threshold, yours included, one hour (see [Upgrading](upgrading.md#go-126-and-nats-server-v21410)). Use durable consumers for anything that must survive. The start pass covers every stream of the account, so it also reaches plain non-durable pull consumers of other clients connected to the same servers (another replica during a rolling update, a script, a service in another language): when such a client goes away, its consumer lives up to an hour instead of five seconds. On an interest-retention stream it keeps its messages for that hour, and on a work-queue stream a new consumer with an overlapping filter is rejected until it expires. Give such consumers an explicit `InactiveThreshold` (any value other than 5s is left alone), or make them durable.
 - **Rolling back.** See [Rolling Back from v0.2.x](upgrading.md#rolling-back-from-v02x).
@@ -197,7 +197,7 @@ Use a StatefulSet, not a Deployment: its pod names (`orders-0`, `orders-1`, ...)
 - **`podManagementPolicy: Parallel`.** With the default ordered start, `orders-1` is created only after `orders-0` is Ready. `orders-0` alone has no JetStream quorum, so its `Start` waits for JetStream and fails after the ready timeout whatever its probes check, and the cluster never forms. Parallel creates all pods at once, so their servers route to each other and elect leaders while every `Start` waits.
 - **An odd number of replicas**, 3 or more for JetStream that survives the loss of a server.
 - **Required `podAntiAffinity` on `kubernetes.io/hostname`**, so that one node failure takes down only one server.
-- **A PodDisruptionBudget** with `maxUnavailable: 1`, so that a node drain never takes down a quorum.
+- **A PodDisruptionBudget** with `minAvailable: 2` (for 3 servers; `maxUnavailable: 1` is equivalent), so that a node drain never takes down a quorum.
 - **A volumeClaimTemplate** mounted at the JetStream storage directory.
 
 ### Headless Service and routes

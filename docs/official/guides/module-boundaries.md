@@ -212,7 +212,7 @@ for _, r := range app.ModuleBoundaries() { // nil unless the app is running
 
 The lists are empty, never nil, when there is nothing to list, so a JSON export of the report always has `observed`, `unused_dependencies`, `unused_contracts` and `violations`.
 
-`Stop` logs the same summary: one Warn per violation kind, one Info per declared dependency and per consumed contract that was never looked up. A dependency declared only for start ordering is legitimate, and so is a contract that was not called during this run.
+`Stop` logs the same summary: one Warn per recorded violation (kind, dependency and subject), one Info per declared dependency and per consumed contract that was never used. A dependency declared only for start ordering is legitimate, and so is a contract that was not called during this run.
 
 {% hint style="info" %}
 **Existing applications keep working.** In the default mode nothing is rejected. The report shows where modules step outside their declared boundaries, so you can fix them before turning strict mode on.
@@ -234,22 +234,38 @@ Violations fail with `ErrModuleBoundaryViolation`. Void container methods become
 
 ```go
 func TestOrderModuleConformance(t *testing.T) {
+    // One stand-in per dependency of the order module, all on one bus.
     bus := monotest.NewEventBus()
     inventory := monotest.NewContainer("inventory", bus)
-    // Register the dependency's service through its own contract...
-    err := inventorycontract.CheckStock.Register(inventory,
-        func(context.Context, inventorycontract.CheckStockRequest, *types.Msg) (inventorycontract.CheckStockResponse, error) {
+    payment := monotest.NewContainer("payment", bus)
+    notification := monotest.NewContainer("notification", bus)
+
+    // Register each dependency's service through its own contract...
+    if err := inventorycontract.CheckStock.Register(inventory,
+        func(context.Context, inventorycontract.CheckStockRequest, *mono.Msg) (inventorycontract.CheckStockResponse, error) {
             return inventorycontract.CheckStockResponse{Available: true, Stock: 5}, nil
-        })
-    if err != nil {
+        }); err != nil {
+        t.Fatal(err)
+    }
+    if err := paymentcontract.Process.Register(payment,
+        func(context.Context, paymentcontract.ProcessPaymentRequest, *mono.Msg) (paymentcontract.ProcessPaymentResponse, error) {
+            return paymentcontract.ProcessPaymentResponse{Success: true, TransactionID: "txn"}, nil
+        }); err != nil {
         t.Fatal(err)
     }
     // ...or with a JSON stub: monotest.StubRequestReply / monotest.StubQueueGroup.
+    if err := monotest.StubQueueGroup(notification, "on-order-created",
+        func(context.Context, notificationcontract.OrderCreatedNotification) error { return nil }); err != nil {
+        t.Fatal(err)
+    }
 
     monotest.CheckModule(t, order.NewModule(),
         monotest.WithDependency("inventory", inventory),
+        monotest.WithDependency("payment", payment),
+        monotest.WithDependency("notification", notification),
         monotest.WithExercise(func(ctx context.Context, h *monotest.Harness) error {
-            _, err := contract.PlaceOrder.Call(ctx, h.Container(), contract.PlaceOrderRequest{ProductID: "laptop", Quantity: 1})
+            _, err := contract.PlaceOrder.Call(ctx, h.Container(),
+                contract.CreateOrderRequest{ProductID: "laptop", Quantity: 1, Amount: 10})
             return err
         }))
 }
@@ -276,19 +292,27 @@ func TestOrderModuleConformance(t *testing.T) {
 | `WithEmittedEvents(defs...)` | Events of other modules, for consumers that use `registry.GetEventByName` |
 | `WithPlugin(alias, plugin)` | Inject a plugin. Give it a container first with `plugin.SetContainer(monotest.NewContainer(...))` |
 | `WithStopTimeout(d)` | Bound `Stop` (default 5s) |
+| `WithEventBus(bus)` | Run on this bus instead of the dependencies' bus (or a new one) |
 | `Strict()` | Reject violations, like `WithStrictModuleBoundaries`. Ignored by `CheckModule` |
 
 **Driving a module directly:**
 
 ```go
-h := monotest.New(t, order.NewModule(), monotest.WithDependency("inventory", inventory))
-if err := h.Start(ctx); err != nil { t.Fatal(err) }
+h := monotest.New(t, order.NewModule(),
+    monotest.WithDependency("inventory", inventory),
+    monotest.WithDependency("payment", payment),
+    monotest.WithDependency("notification", notification))
+if err := h.Start(ctx); err != nil { t.Fatal(err) } // monotest.Call before Start fails with monotest.ErrNotStarted
 defer h.Stop(ctx)
 
-resp := monotest.Call[contract.PlaceOrderRequest, contract.PlaceOrderResponse](t, h, "place-order", req)
+req := contract.CreateOrderRequest{ProductID: "laptop", Quantity: 1, Amount: 10}
+resp := monotest.Call[contract.CreateOrderRequest, contract.CreateOrderResponse](t, h, "place-order", req)
+if resp.Status != "success" { t.Errorf("status = %q", resp.Status) }
 inventory.Calls("check-stock") // handler runs on the stand-in
 h.Report()                     // the module's boundary report (empty lists before Start)
 h.ModulePublished()            // subjects the module itself published
+h.Published()                  // every subject published on the bus, by anyone
+h.Logs()                       // lines the framework-side logger wrote, warnings included
 h.EventBus()                   // publish consumed events here with def.Publish
 ```
 
@@ -333,7 +357,7 @@ Limits:
 - In a Go workspace, every workspace module counts as part of the application.
 - The `go` command must be on `PATH`, which it is under `go test`.
 
-`monotest.ImportViolations(ctx, opts...)` returns the same findings without a test, for a command or a CI step.
+`monotest.ImportViolations(ctx, opts...)` returns the same findings without a test, for a command or a CI step. It returns `[]monotest.ImportViolation` (`Rule`, `Package`, `Import`, `Module`, `Reason`); `Rule` is `monotest.ImportRuleContract` (`contract-import`) or `monotest.ImportRuleModule` (`module-import`). The options are of type `monotest.ImportOption`.
 
 ## What Is Not Checked
 
@@ -347,7 +371,7 @@ Limits:
 ## Migrating Existing Modules
 
 1. Move request/response types and event definitions into `<module>/contract`, and add a typed definition per service.
-2. Provider: replace `container.RegisterRequestReplyService("name", ...)` / `helper.RegisterTyped*Service(...)` with `contract.X.Register(container, handler)`.
+2. Provider: replace `container.RegisterRequestReplyService("name", ...)` / `helper.RegisterTypedRequestReplyService` / `RegisterTypedQueueGroupService` / `RegisterTypedStreamConsumerService(...)` with `contract.X.Register(container, handler)`.
 3. Consumer: replace `helper.CallRequestReplyService(ctx, c, "name", json.Marshal, json.Unmarshal, &req, &resp)` with `resp, err := contract.X.Call(ctx, c, req)`.
 4. Replace provider-owned adapters (`provider.NewXAdapter(container)`) with a consumer-owned port and adapter.
 5. Replace raw `eventBus.Request("services.other.svc", ...)` with a declared dependency and a contract call.
