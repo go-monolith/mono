@@ -1,6 +1,6 @@
 # Upgrading from v0.1.x to v0.2.x
 
-This page covers upgrading an application from any v0.1.x release to the latest v0.2.x release (v0.2.2). Each change names the release that introduced it. Applications on v0.1.2 can skip the changes marked v0.1.2.
+This page covers upgrading an application from any v0.1.x release to v0.2.x. Each change names the release that introduced it (up to v0.2.2; later v0.2.x releases so far changed documentation only). Applications on v0.1.2 can skip the changes marked v0.1.2.
 
 ## Who Is Affected
 
