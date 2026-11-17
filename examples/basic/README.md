@@ -56,6 +56,8 @@ func (m *HelloModule) Stop(ctx context.Context) error {
 }
 ```
 
+The real module also implements `mono.HealthCheckableModule` (a `Health` method that returns `mono.HealthStatus{Healthy: true}`), which is why `health.Modules` lists it with `supports_health: true`.
+
 Note: The framework automatically logs module lifecycle events (registration, start, stop), so modules don't need to implement their own logging for basic operations.
 
 ## Running the Example
@@ -67,23 +69,41 @@ cd examples/basic
 # Run the example
 go run .
 
-# Expected output:
+# Expected output (framework log lines are interleaved and omitted here):
 # === Mono-Framework Basic Example ===
-# Demonstrates: Framework initialization, module registration, and lifecycle management
+# Demonstrates: Application initialization, module registration, and lifecycle management
 #
-# ✓ Framework created successfully
+# ✓ App created successfully
 # ✓ Module registered successfully
-# ✓ Framework started - module is running
+#   → Hello from HelloModule! Module is now running...
+#   → Module name: hello-world
+# ✓ App started - module is running
 #
-# Framework Health: healthy=true, nats_healthy=true
+# App Health:
+# {
+#   "healthy": true,
+#   "state": 2,
+#   "nats_healthy": true,
+#   "modules": {
+#     "hello-world": {
+#       "name": "hello-world",
+#       "healthy": true,
+#       "supports_health": true
+#     }
+#   },
+#   "timestamp": "..."
+# }
 # Registered modules: [hello-world]
 #
 # Press Ctrl+C to shutdown...
-# [Log entries from the module...]
 #
 # Shutdown signal received...
-# ✓ Framework stopped successfully
+#   → Goodbye from HelloModule!
+# ✓ App stopped successfully
 # Example completed!
+
+# Or, from the repository root (stops after 3 s):
+# make run-example-1
 ```
 
 ## Key Concepts Demonstrated
@@ -94,6 +114,7 @@ go run .
 app, err := mono.NewMonoApplication(
     mono.WithLogLevel(mono.LogLevelInfo),
     mono.WithLogFormat(mono.LogFormatText),
+    mono.WithNATSLogging(false, false, false), // NATS server logs off (the default)
     mono.WithShutdownTimeout(10*time.Second),
 )
 ```
@@ -134,19 +155,19 @@ Check the operational status of the app and all modules.
 
 After understanding this basic example, explore:
 
-1. **[Multi-Module Example](../multi-module/)** - Learn about:
+1. **[Multi-Module Example](../multi-module/README.md)** - Learn about:
    - Module dependencies
    - Inter-module communication
    - Request-reply patterns
    - Event-driven architecture
 
-2. **[Channel Services Example](../channel-services/)** - Learn about:
+2. **[Analytics Example (Channel Services)](../analytics/README.md)** - Learn about:
    - Channel-based services
    - Advanced service patterns
    - Custom message handlers
 
 ## See Also
 
-- [Design Document](../../docs/spec/foundation.md)
-- [Module Interface Documentation](../../pkg/types/module.go)
-- [Framework API Documentation](../../pkg/types/framework.go)
+- [Design Document](https://github.com/go-monolith/mono/blob/main/docs/spec/foundation.md)
+- [Module Interface Documentation](https://github.com/go-monolith/mono/blob/main/pkg/types/module.go)
+- [Framework API Documentation](https://github.com/go-monolith/mono/blob/main/pkg/types/framework.go)

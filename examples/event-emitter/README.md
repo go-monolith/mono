@@ -63,12 +63,23 @@ The `NotificationModule` implements `EventConsumerModule`:
 ```go
 func (m *NotificationModule) RegisterEventConsumers(registry mono.EventRegistry) error {
     // Pattern 1: Type-safe consumer with direct import
-    helper.RegisterTypedEventConsumer(registry, tracking.OrderCreatedV1,
-        m.handleOrderCreated, m)
+    if err := helper.RegisterTypedEventConsumer(registry, tracking.OrderCreatedV1,
+        m.handleOrderCreated, m); err != nil {
+        return err
+    }
 
-    // Pattern 2: Event discovery without direct import
-    event, _ := registry.GetEventByName("OrderShipped", "v1", "tracking")
-    registry.RegisterEventConsumer(event, m.handleOrderShipped, m)
+    // Pattern 2: Event discovery by name, version and module
+    event, ok := registry.GetEventByName("OrderShipped", "v1", "tracking")
+    if !ok {
+        return fmt.Errorf("OrderShipped v1 not found")
+    }
+    return registry.RegisterEventConsumer(event, func(ctx context.Context, msg *mono.Msg) error {
+        var e tracking.OrderShippedEvent
+        if err := json.Unmarshal(msg.Data, &e); err != nil {
+            return err
+        }
+        return m.handleOrderShipped(ctx, e, msg)
+    }, m)
 }
 ```
 
@@ -88,7 +99,7 @@ This example demonstrates two ways to register event consumers:
    - Best for modules in same codebase
 
 2. **Discovery Pattern** (Runtime Lookup)
-   - No direct dependency on emitter module
+   - No dependency on the emitter's event definition variable (looked up at runtime by name/version/module); the payload type must still match. Here it is imported from `tracking` for brevity, but a consumer may declare its own struct
    - Manual JSON unmarshaling
    - Runtime dependency resolution
    - Best for avoiding circular imports
@@ -98,22 +109,21 @@ This example demonstrates two ways to register event consumers:
 ### Prerequisites
 
 - Go 1.26 or higher
-- Framework installed: `go get github.com/go-monolith/mono`
+- A clone of this repository (the example is built from the framework's own Go module)
 
 ### Run the Example
 
 ```bash
-# From the mono-framework-v0 directory
-make run-example-4
-
-# Or manually
 cd examples/event-emitter
 go run .
+
+# or, from the repository root:
+go run ./examples/event-emitter
 ```
 
 ## Expected Output
 
-When you run the example, you should see:
+When you run the example, you should see (framework and plugin log lines are interleaved and omitted here; the order of the module list printed from `app.Modules()` varies, and file names and sizes depend on the run):
 
 ```
 === Mono-Framework Event Emitter Example ===
@@ -123,7 +133,7 @@ App created successfully
 Storage plugin registered (fs-jetstream)
 Tracking module registered (EventEmitterModule)
 Notification module registered (EventConsumerModule + UsePluginModule)
-Registered modules: [tracking notification]
+Registered modules: [notification tracking]
 
 App started successfully
 
@@ -158,10 +168,10 @@ Total shipping notifications sent: 1
 
 === Stored Event Files ===
 Files in 'order-created-events' bucket: 2
-  - ORD-000001_20250105_143022.json (123 bytes)
-  - ORD-000002_20250105_143023.json (121 bytes)
+  - ORD-000001_20261117_205806.json (143 bytes)
+  - ORD-000002_20261117_205806.json (144 bytes)
 Files in 'order-shipped-events' bucket: 1
-  - ORD-000001_20250105_143022.json (85 bytes)
+  - ORD-000001_20261117_205806.json (83 bytes)
 
 Press Ctrl+C to shutdown...
 ```
@@ -181,7 +191,7 @@ event-emitter/
 
 ### Key Files
 
-- **`tracking/events.go`** - Defines `OrderCreatedV1` and `OrderShippedV1` event definitions with schemas
+- **`tracking/events.go`** - Defines the `OrderCreatedV1` and `OrderShippedV1` event definitions (payload types in `types.go`)
 - **`tracking/module.go`** - Implements `EventEmitterModule.EmitEvents()` and provides `CreateOrder()`, `ShipOrder()` methods
 - **`notification/module.go`** - Implements `EventConsumerModule.RegisterEventConsumers()` and handles events
 - **`main.go`** - Sets up the application, registers modules and plugin, and runs scenarios
@@ -190,16 +200,13 @@ event-emitter/
 
 ### 1. Event Declaration
 
-Events are declared as typed definitions with schemas:
+Events are declared as typed definitions:
 
 ```go
 // In tracking/events.go
-var OrderCreatedV1 = mono.EventDefinition[OrderCreatedEvent]{
-    Name:    "OrderCreated",
-    Version: "v1",
-    Domain:  "tracking",
-    // ... schema details
-}
+var OrderCreatedV1 = helper.EventDefinition[OrderCreatedEvent](
+    "tracking", "OrderCreated", "v1", // module, name, version -> subject events.tracking.v1.order-created
+)
 ```
 
 ### 2. Event Publishing
@@ -224,6 +231,7 @@ func (m *NotificationModule) handleOrderCreated(
     msg *mono.Msg) error {
     // event is already unmarshaled to OrderCreatedEvent
     fmt.Printf("Order: %s, Customer: %s\n", event.OrderID, event.CustomerID)
+    return nil
 }
 ```
 
@@ -250,7 +258,7 @@ func (m *NotificationModule) SetPlugin(alias string, plugin mono.PluginModule) {
 
 ## Next Steps
 
-- Review the [Core Concepts > Service Communication](../../docs/official/core-concepts/communication.md) guide for other communication patterns
+- Review the [Core Concepts > Inter-Module Communication](../../docs/official/core-concepts/inter-module-communication.md) guide for other communication patterns
 - Explore the [multi-module example](../multi-module/README.md) for Request-Reply and Queue Group patterns
 - Check the [API documentation](https://pkg.go.dev/github.com/go-monolith/mono) for detailed reference
 

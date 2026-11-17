@@ -62,7 +62,7 @@ Notification (no deps)─┘
 
 ## Code Structure
 
-Every module follows the hexagonal layout from [`docs/architect/hexagonal-architecture.md`](../../docs/architect/hexagonal-architecture.md): a `contract` sub-package is the only thing other modules import.
+Every module follows the hexagonal layout from [`docs/architect/hexagonal-architecture.md`](https://github.com/go-monolith/mono/blob/main/docs/architect/hexagonal-architecture.md): a `contract` sub-package is the only thing other modules import.
 
 ```
 examples/multi-module/
@@ -243,14 +243,21 @@ go run .
 
 ### Expected Output
 
+Framework log lines are interleaved and omitted here; the order of the module list printed from `app.Modules()` varies from run to run, and order and transaction IDs are timestamps.
+
 ```
 === Mono-Framework Multi-Module Example ===
-Demonstrates: Module dependencies, RequestReply, QueueGroup, Events, Request ID Tracking, Access Logging
+Demonstrates: Module dependencies, RequestReply, QueueGroup, EventEmitterModule, EventRegistryAwareModule
 
 ✓ App created successfully
-✓ Request ID middleware registered
 ✓ Access log middleware registered (output: access.log)
-✓ Business modules registered: [requestid accesslog inventory payment notification order]
+✓ Request ID middleware registered
+✓ Business modules registered: [payment notification order accesslog requestid inventory]
+  → Inventory module started with 4 products in stock
+  → Payment module started
+  → Notification: registered consumer for order.OrderCreated (events.order.v1.order-created)
+  → Notification module started
+  → Order module started (depends on: inventory, payment, notification)
 ✓ App started (request ID tracking and access logging active)
 
 App Health: healthy=true, nats_healthy=true
@@ -262,14 +269,21 @@ Running example scenarios...
   → Placing order for product 'laptop' (qty: 1, $999.99 USD)
   → Inventory: check_stock(laptop, qty=1) → available=true, stock=10
   → Payment: process(order=order_xxx, amount=999.99 USD) → SUCCESS, txn=txn_xxx
-  ✓ Order created successfully: order_xxx
   → Notification [service]: Order order_xxx created for product laptop (amount: $999.99)
-  → Notification [event]: Order order_xxx created for product laptop (amount: $999.99)
+  ✓ Order created successfully: order_xxx
 
+  → Notification [event]: Order order_xxx created for product laptop (amount: $999.99)
 [Scenario 2] Out of Stock
   → Placing order for product 'rare-item' (qty: 1, $1999.99 USD)
   → Inventory: check_stock(rare-item, qty=1) → available=false, stock=0
   ✗ Order failed: out of stock
+
+[Scenario 3] Another Order
+  → Placing order for product 'mouse' (qty: 2, $29.99 USD)
+  ...
+[Scenario 4] Third Order
+  → Placing order for product 'keyboard' (qty: 1, $79.99 USD)
+  ...
 
 Press Ctrl+C to shutdown...
 Tip: Check 'access.log' to see all service calls logged in JSON format with X-Request-ID
@@ -280,17 +294,17 @@ Tip: Check 'access.log' to see all service calls logged in JSON format with X-Re
 All service calls are automatically logged to `access.log` in JSON format. The request ID middleware generates unique IDs (UUIDs) for each request and propagates them across service calls. Example entries:
 
 ```json
-{"ts":"2024-01-15T10:30:00Z","request_id":"a1b2c3d4-e5f6-7890-abcd-ef1234567890","module":"inventory","service":"check-stock","method":"request_reply","status":"success","duration_ms":2,"request_size":45,"response_size":62}
-{"ts":"2024-01-15T10:30:00Z","request_id":"a1b2c3d4-e5f6-7890-abcd-ef1234567890","module":"payment","service":"process","method":"request_reply","status":"success","duration_ms":5,"request_size":98,"response_size":85}
-{"ts":"2024-01-15T10:30:00Z","request_id":"a1b2c3d4-e5f6-7890-abcd-ef1234567890","module":"notification","service":"on-order-created","method":"queue_group","status":"success","duration_ms":1,"request_size":150,"response_size":0}
+{"duration_ms":0,"module":"inventory","request_id":"6e770331-fb0b-42c3-b5d1-fc717bdf3321","request_size":36,"response_size":29,"service":"check-stock","service_type":"request_reply","status":"success","ts":"2026-11-17T12:57:34Z"}
+{"duration_ms":50,"module":"payment","request_id":"6e770331-fb0b-42c3-b5d1-fc717bdf3321","request_size":64,"response_size":93,"service":"process","service_type":"request_reply","status":"success","ts":"2026-11-17T12:57:34Z"}
+{"duration_ms":0,"module":"notification","request_id":"6e770331-fb0b-42c3-b5d1-fc717bdf3321","request_size":119,"response_size":0,"service":"on-order-created","service_type":"queue_group","status":"success","ts":"2026-11-17T12:57:34Z"}
 ```
 
-Each log entry includes:
+Keys appear in alphabetical order. Each log entry includes:
 - **ts**: Timestamp in RFC3339 format
 - **request_id**: Unique request ID (UUID) for distributed tracing
 - **module**: Module that registered the service
 - **service**: Service name
-- **method**: Service type (request_reply, queue_group, stream_consumer)
+- **service_type**: Service type (request_reply, queue_group, stream_consumer, event_consumer, event_stream_consumer, channel)
 - **status**: success or error
 - **duration_ms**: Handler execution time in milliseconds
 - **request_size**: Request data size in bytes
@@ -317,10 +331,11 @@ cat access.log | jq 'select(.request_id == "a1b2c3d4-e5f6-7890-abcd-ef1234567890
 ### 1. Request ID Middleware
 
 ```go
-// Create request ID middleware (must be registered BEFORE accesslog)
+// Create request ID middleware (must be registered AFTER accesslog)
 requestIDModule, _ := requestid.New()
 
-// Register request ID middleware first
+// Register request ID middleware after the access log middleware
+app.Register(accessModule)
 app.Register(requestIDModule)
 ```
 
@@ -331,28 +346,28 @@ The request ID middleware provides automatic request tracking across distributed
 - **Context Injection**: The request ID is injected into the handler's context for use in logging
 - **Automatic Propagation**: When a handler makes outgoing service calls, the request ID is automatically added to outgoing message headers
 
-**Why register before accesslog:**
-The request ID middleware wraps handlers *before* accesslog, so when handlers execute:
-1. Request ID middleware extracts/generates the request ID and injects it into message headers
-2. Access log middleware extracts the request ID from headers for logging
+**Why register after accesslog:**
+Middleware registered later wraps handlers outermost, so when handlers execute:
+1. Request ID middleware extracts/generates the request ID and puts it into the handler context (outgoing calls carry it in the X-Request-ID header)
+2. Access log middleware logs the `X-Request-ID` header value, or falls back to `requestid.GetRequestID(ctx)` when the incoming message had no header
 
 ### 2. Access Logging Middleware
 
 ```go
-// Create access log middleware (after requestid)
+// Create access log middleware (registered before requestid)
 accessFile, _ := os.OpenFile("access.log",
-    os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+    os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
 accessModule, _ := accesslog.New(
     accesslog.WithOutput(accessFile),
     accesslog.WithFormat(accesslog.FormatJSON),
 )
 
 // Register middleware in order:
-// 1. requestid (extracts/generates request IDs)
-// 2. accesslog (logs requests with request IDs)
+// 1. accesslog (logs requests with request IDs)
+// 2. requestid (outermost: sets the request ID in the context before accesslog's wrapper runs)
 // 3. business modules
-app.Register(requestIDModule)
 app.Register(accessModule)
+app.Register(requestIDModule)
 app.Register(inventoryModule)  // Will be logged with request IDs
 app.Register(paymentModule)    // Will be logged with request IDs
 // ...
@@ -370,14 +385,13 @@ The access log middleware automatically wraps all service handlers to capture:
 - Configurable output: Text or JSON format
 - Field selection: Choose which fields to log
 - Thread-safe: Safe for concurrent requests
-- Minimal overhead: ~1-2μs per request
 - Distributed tracing: Request IDs allow correlating logs across services
 
 ### 3. Module Dependencies
 
 ```go
 // Order module declares its dependencies
-func (m *Module) Dependencies() []string {
+func (m *OrderModule) Dependencies() []string {
     return []string{"inventory", "payment", "notification"}
 }
 ```
@@ -447,7 +461,7 @@ if !approved {
 
 // Notification failure doesn't fail the order (graceful degradation)
 if err := s.notification.OrderPlaced(ctx, placed); err != nil {
-    fmt.Printf("warning: %v\n", err) // Best effort
+    fmt.Printf("  → Warning: failed to send notification for order %s: %v\n", orderID, err) // Best effort
 }
 ```
 
@@ -468,8 +482,8 @@ Ideas for learning and experimentation:
 
 ## See Also
 
-- [Basic Example](../basic/) - Simple single-module example
-- [Channel Services Example](../channel-services/) - Channel-based communication patterns (if implemented)
-- [Design Document](../../docs/spec/foundation.md) - Complete framework design
-- [Hexagonal Architecture Guide](../../docs/architect/hexagonal-architecture.md) - Contracts, ports and adapters
-- [Module Interface Documentation](../../pkg/types/module.go) - All module interfaces
+- [Basic Example](../basic/README.md) - Simple single-module example
+- [Analytics Example](../analytics/README.md) - Channel-based communication patterns
+- [Design Document](https://github.com/go-monolith/mono/blob/main/docs/spec/foundation.md) - Complete framework design
+- [Hexagonal Architecture Guide](https://github.com/go-monolith/mono/blob/main/docs/architect/hexagonal-architecture.md) - Contracts, ports and adapters
+- [Module Interface Documentation](https://github.com/go-monolith/mono/blob/main/pkg/types/module.go) - All module interfaces

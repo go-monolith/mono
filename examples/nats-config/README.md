@@ -17,6 +17,8 @@ When both a config file and programmatic options are specified:
 1. **Config file provides base settings** - All settings from the file are applied first
 2. **Programmatic options override** - Options like `WithNATSPort()` take precedence
 
+Exceptions: `WithNATSClustering` is merged into the file's `cluster {}` block (its routes are added to the file's), and options left at their defaults do not override the file.
+
 ```go
 app, err := mono.NewMonoApplication(
     mono.WithNATSConfigFile("server.conf"), // Base: port=4222, host=127.0.0.1

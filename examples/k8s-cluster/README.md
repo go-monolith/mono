@@ -30,7 +30,7 @@ instance serves every service, and the services behave as one application:
 |---|---|
 | `main.go` | Host program: configuration from the environment, the application, the HTTP API |
 | `greeter/` | The module (`module.go`) and its contract (`contract/`) |
-| `Dockerfile` | Static binary on `distroless/static:nonroot` (~8 MB); build context is the repository root |
+| `Dockerfile` | Static binary on `gcr.io/distroless/static-debian12:nonroot`; build context is the repository root |
 | `Dockerfile.dockerignore` | Keeps the build context small |
 | `deploy/k8s.yaml` | Namespace, headless and HTTP Services, StatefulSet, PodDisruptionBudget |
 | `deploy/create-route-secret.sh` | Creates the Secret with a random route password and system account password |
@@ -198,7 +198,8 @@ for every replicated stream and consumer and for the JetStream meta group.
   - `/readyz` of the remaining pods reports `"available": true`.
   - Cron keeps firing, once per occurrence.
   - A stream or consumer whose leader was on the lost pod elects a new one
-    within seconds; the fetch loops may log one `Fetch error` meanwhile.
+    within seconds; the fetch loops may log a `Fetch error` (or `Cron fetch error`)
+    warning meanwhile, then `… cleared` once fetching works again.
 - **When the pod comes back** (with its PVC), its `Start` waits until its
   replicas have caught up, then it serves again. It does not restart.
 - **While two pods are down**, there is no quorum. Request-reply keeps
@@ -210,7 +211,8 @@ for every replicated stream and consumer and for the JetStream meta group.
 Delivery is at least once: a visit fetched by a pod that shuts down before
 acknowledging it is delivered again after the consumer's ack wait (30 s).
 
-Measured with 5 requests per second through the Service, every visit tracked:
+Measured on a 3-node test cluster (Kubernetes 1.37, 5 requests per second
+through the Service), every visit tracked:
 
 | | Requests failed | Visits lost / duplicated / replayed |
 |---|---|---|
