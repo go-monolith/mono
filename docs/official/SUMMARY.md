@@ -56,6 +56,7 @@
 
 * [📎 Extra Resources](extra/README.md)
 * [🤔 FAQ](extra/faq.md)
+* [☸️ Kubernetes Deployment Strategies](extra/kubernetes-deployment.md)
 * [📊 Code Coverage](extra/code-coverage.md)
 
 ## Examples

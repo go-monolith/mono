@@ -224,6 +224,19 @@ readinessProbe:         # may include JetStream.Available
 
 Set the pod's `terminationGracePeriodSeconds` above `WithShutdownTimeout`, so that module `Stop` runs before the pod is killed (see [Graceful Shutdown](../api/framework.md#withshutdowntimeout)).
 
+### Rolling updates
+
+Kubernetes removes a terminating pod from the Service endpoints asynchronously, while it sends the container SIGTERM. A host program that closes its HTTP listener on SIGTERM can therefore still receive a few requests it no longer accepts, which clients see as connection errors. Delay the signal with a `preStop` sleep. The `sleep` action needs no shell in the image (Kubernetes 1.30+):
+
+```yaml
+lifecycle:
+  preStop:
+    sleep:
+      seconds: 5
+```
+
+The sleep counts toward `terminationGracePeriodSeconds`, so the grace period must cover the sleep plus `WithShutdownTimeout`. With 3 servers and 3 replicas, a rolling update keeps JetStream available: one server restarts at a time and the other two keep the quorum. For canaries, rollbacks, node drains and blue-green cutovers, with measured results, see [Kubernetes Deployment Strategies](../extra/kubernetes-deployment.md).
+
 ## Checklist
 
 - [ ] A stable, unique server name per server (`WithNATSServerName`, from the StatefulSet pod name)
@@ -232,6 +245,7 @@ Set the pod's `terminationGracePeriodSeconds` above `WithShutdownTimeout`, so th
 - [ ] `WithJetStreamDefaultReplicas(3)` (and `Replicas` on streams and cron services that set their own)
 - [ ] An odd number of servers, one per node, with a PodDisruptionBudget
 - [ ] A liveness probe that never depends on JetStream; readiness may include `JetStream.Available`
+- [ ] A `preStop` sleep, so a terminating pod keeps serving until it has left the Service endpoints
 - [ ] `podManagementPolicy: Parallel` and `publishNotReadyAddresses: true`
 
 ## Related Documentation
@@ -240,3 +254,4 @@ Set the pod's `terminationGracePeriodSeconds` above `WithShutdownTimeout`, so th
 - [Service Container API](../api/container.md) - stream consumer and cron services
 - [Upgrading to v0.2.0](upgrading.md#upgrading-to-v020)
 - [Kubernetes cluster example](../../../examples/k8s-cluster/README.md)
+- [Kubernetes Deployment Strategies](../extra/kubernetes-deployment.md) - rolling, canary and blue-green deployments, measured
