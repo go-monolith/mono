@@ -93,7 +93,9 @@ mono.NewMonoApplication(
   - A `preStop` sleep of 5 s keeps the pod serving while it is removed from
     the Service endpoints, so clients don't get connection errors during a
     rolling update. It uses the `sleep` action, which needs no shell in the
-    image (Kubernetes 1.30+).
+    image (Kubernetes 1.30+). Older clusters reject the manifest: use
+    `exec: {command: ["sleep", "5"]}` instead, with a base image that has a
+    `sleep` binary (the distroless image used here has none).
   - A PodDisruptionBudget with `minAvailable: 2`, so node drains evict one
     pod at a time and JetStream keeps its quorum.
 
