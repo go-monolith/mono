@@ -1,34 +1,31 @@
 # 🧬 Middleware
 
-Middleware modules provide cross-cutting functionality that runs alongside your application modules. They intercept framework events and service handlers to add features like logging, auditing, and request tracking.
+Middleware modules add cross-cutting behaviour (logging, auditing, request tracking) without changing your module code. They intercept service and event consumer registrations, module lifecycle events and outgoing service-client messages.
+
+Read this page to choose a built-in middleware, to learn the **ordering rule**, or to write your own middleware.
 
 ## What is Middleware?
 
-Middleware modules implement the `MiddlewareModule` interface to:
+A middleware module implements `mono.MiddlewareModule`: the `Module` methods (`Name`, `Start`, `Stop`) plus six hooks. Each hook receives a value and returns the (possibly modified) value for the next middleware in the chain. Middleware use the hooks to:
 
-- Intercept service handler execution
-- Hook into framework lifecycle events
-- Add cross-cutting concerns without modifying module code
-- Maintain separation of concerns
+- Wrap service and event consumer handlers
+- Observe module started/stopped events
+- Modify outgoing service-client messages (for example, add headers)
 
 ## Built-in Middleware
 
-The framework comes with three built-in middleware modules:
+| Middleware | Package | What it does | Page |
+|------------|---------|--------------|------|
+| Access log | `github.com/go-monolith/mono/middleware/accesslog` | One entry per handler call with timing, sizes, status and request ID; text or JSON | [Access Log](accesslog.md) |
+| Audit | `github.com/go-monolith/mono/middleware/audit` | Records module start/stop and service and event consumer registrations, optionally hash-chained; does not record service calls | [Audit](audit.md) |
+| Request ID | `github.com/go-monolith/mono/middleware/requestid` | Extracts or generates a request ID, puts it in the handler context, and propagates it to outgoing request-reply calls, queue group sends and stream consumer publishes (not to events or channel services) | [Request ID](requestid.md) |
 
-### 1. Access Log Middleware
+Registering all three:
 
-HTTP-style access logging for all service handlers.
-
-- **Package**: `github.com/go-monolith/mono/middleware/accesslog`
-- **Purpose**: Log request/response details including timing, sizes, and status
-- **Features**:
-  - Text and JSON output formats
-  - Request ID tracking integration
-  - Configurable output destination
-  - Performance metrics
-
-**Quick Start**:
 ```go
+app, _ := mono.NewMonoApplication()
+
+// accesslog before requestid (see Ordering below)
 accessFile, _ := os.OpenFile("access.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
 accessModule, err := accesslog.New(
     accesslog.WithOutput(accessFile), // closed by the module on Stop
@@ -37,24 +34,14 @@ accessModule, err := accesslog.New(
 if err != nil {
     return err
 }
-
 app.Register(accessModule)
-```
 
-Learn more: [Access Log Middleware](accesslog.md)
+requestIDModule, err := requestid.New()
+if err != nil {
+    return err
+}
+app.Register(requestIDModule)
 
-### 2. Audit Middleware
-
-Tamper-evident audit logging with cryptographic hash chaining.
-
-- **Package**: `github.com/go-monolith/mono/middleware/audit`
-- **Purpose**: Log module start/stop and service and event consumer registrations, optionally hash-chained
-- **Features**:
-  - Optional hash chaining for tamper detection
-  - User context field filled by a function you supply
-
-**Quick Start**:
-```go
 auditFile, _ := os.OpenFile("audit.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
 auditModule, err := audit.New(
     audit.WithOutput(auditFile),
@@ -63,38 +50,35 @@ auditModule, err := audit.New(
 if err != nil {
     return err
 }
-
 app.Register(auditModule)
+
+// Application modules (any position)
+app.Register(&OrderModule{})
+app.Register(&PaymentModule{})
+
+app.Start(context.Background())
 ```
 
-Learn more: [Audit Middleware](audit.md)
+## Ordering
 
-### 3. Request ID Middleware
+**Relative to modules, position does not matter.** The framework collects middleware at `Start`, starts them after plugins and before modules, and stops them after modules.
 
-Automatic request ID generation and propagation for distributed tracing.
+**Among middleware, order matters.** Each middleware wraps the handler produced by the previous one, so the **last** registered middleware runs **first** when a message arrives.
 
-- **Package**: `github.com/go-monolith/mono/middleware/requestid`
-- **Purpose**: Track requests across module boundaries for debugging and tracing
-- **Features**:
-  - Automatic UUID generation
-  - Request ID extraction from headers
-  - Context injection for handlers
-  - Automatic propagation to outgoing request-reply calls, queue group sends and stream consumer publishes (not to events or channel services)
+For the built-in middleware this means: register `accesslog` **before** `requestid`. `requestid` must run before `accesslog` for a generated ID to reach the access log. Queue group and stream consumer entries only show an ID that arrived in the `X-Request-ID` header.
 
-**Quick Start**:
-```go
-requestIDMiddleware, err := requestid.New()
-if err != nil {
-    return err
-}
-app.Register(requestIDMiddleware)
+With `accesslog` registered first and `requestid` second, a request runs through:
+
+```
+Request
+  ├→ RequestID Middleware (registered last, runs first: extracts or generates ID)
+  ├→ AccessLog Middleware (logs request, sees the ID in the context)
+  └→ Handler (processes request)
 ```
 
-Learn more: [Request ID Middleware](requestid.md)
+The audit middleware is not on the request path: it only records registrations and module lifecycle events.
 
 ## Middleware Lifecycle
-
-Middleware modules can be registered in any position relative to modules: the framework collects them at `Start`, starts them after plugins and before modules, and stops them after modules. Only the order *among* middleware matters (see below). The framework calls only `Start`, `Stop` and the hooks on a middleware module; it does not call `Dependencies`, `SetDependencyServiceContainer`, `SetEventBus`, `RegisterServices` or `RegisterEventConsumers`.
 
 ```
 1. app.Start
@@ -111,46 +95,8 @@ Middleware modules can be registered in any position relative to modules: the fr
    └─ Modules stop (a hook fires for each), then middleware stop (reverse order)
 ```
 
-The hooks fire for module started/stopped events, service and event consumer registrations, and outgoing service-client messages. `OnConfigurationChange` is currently never called.
-
-## Using Multiple Middleware
-
-You can register multiple middleware modules together:
-
-```go
-app, _ := mono.NewMonoApplication()
-
-// Register middleware: accesslog before requestid (see the note below)
-accessModule, err := accesslog.New(
-    accesslog.WithOutput(accessFile),
-    accesslog.WithFormat(accesslog.FormatText),
-)
-if err != nil {
-    return err
-}
-app.Register(accessModule)
-
-requestIDModule, err := requestid.New()
-if err != nil {
-    return err
-}
-app.Register(requestIDModule)
-
-auditModule, err := audit.New(audit.WithOutput(auditFile))
-if err != nil {
-    return err
-}
-app.Register(auditModule)
-
-// Register application modules
-app.Register(&OrderModule{})
-app.Register(&PaymentModule{})
-
-// Start
-app.Start(context.Background())
-```
-
-Middleware are processed in registration order: each one wraps the handler produced by the previous one, so the **last** registered middleware runs **first** when a message arrives. Register `accesslog` **before** `requestid`: `requestid` must run before `accesslog` for a generated ID to reach the access log. Queue group and stream consumer entries only show an ID that arrived in the `X-Request-ID` header.
+- The framework calls only `Start`, `Stop` and the hooks on a middleware module. It does not call `Dependencies`, `SetDependencyServiceContainer`, `SetEventBus`, `RegisterServices` or `RegisterEventConsumers`.
+- `OnConfigurationChange` is currently never called.
 
 ## Middleware vs Modules
 
@@ -189,24 +135,9 @@ if config.EnableAccessLog {
 }
 ```
 
-### Middleware Chain
-
-Multiple middleware working together:
-
-With `accesslog` registered first and `requestid` second, a request runs through:
-
-```
-Request
-  ├→ RequestID Middleware (registered last, runs first: extracts or generates ID)
-  ├→ AccessLog Middleware (logs request, sees the ID in the context)
-  └→ Handler (processes request)
-```
-
-The audit middleware is not on the request path: it only records registrations and module lifecycle events.
-
 ### Custom Middleware
 
-Create your own middleware by implementing `MiddlewareModule`:
+Implement all of `mono.MiddlewareModule`:
 
 ```go
 type MyMiddleware struct{}
@@ -247,8 +178,6 @@ func (m *MyMiddleware) OnEventStreamConsumerRegistration(ctx context.Context, e 
 
 ## Performance Considerations
 
-Middleware adds processing overhead. Consider:
-
 - **Request ID**: one context value per handler call
 - **Access Log**: one unbuffered write per entry under a mutex; wrap the writer in a `bufio.Writer` if needed
 - **Audit**: cost per registration or lifecycle event, not per request
@@ -258,9 +187,8 @@ For high-performance applications, be selective about which middleware you enabl
 ## Best Practices
 
 ✓ **Do**
-- Keep middleware focused on single concerns
-- Use middleware for cross-cutting concerns
-- Configure output files with appropriate permissions (especially audit)
+- Keep middleware focused on a single cross-cutting concern
+- Open output files with appropriate permissions (especially audit)
 
 ✗ **Don't**
 - Put business logic in middleware
@@ -274,7 +202,3 @@ For high-performance applications, be selective about which middleware you enabl
 - [Audit Middleware](audit.md)
 - [Request ID Middleware](requestid.md)
 - [Core Concepts - Modules](../core-concepts/modules.md)
-
----
-
-Ready to explore specific middleware? Continue with [Access Log Middleware](accesslog.md).

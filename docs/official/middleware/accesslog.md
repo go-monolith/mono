@@ -1,13 +1,11 @@
 # Access Log Middleware
 
-The Access Log Middleware provides HTTP-style access logging for all service handlers, capturing request/response details including timing, sizes, status, and request IDs.
+The `accesslog` middleware writes one access log entry per service handler call, with timing, request and response sizes, status and request ID, in text or JSON. It works like HTTP access logging in traditional web servers.
 
-## Overview
-
-The `accesslog` middleware automatically logs every service call with detailed information about the request and response. It's similar to HTTP access logging in traditional web servers.
+Read this page to set up access logging, to choose the fields and format, or to understand an entry.
 
 {% hint style="info" %}
-**Order matters:** Register the access log middleware **before** the Request ID middleware. Middleware wrap handlers in registration order, so the last one registered runs first; `requestid` must run before `accesslog` for a generated ID to reach the access log. Queue group and stream consumer entries only show an ID that arrived in the `X-Request-ID` header. The position relative to application modules does not matter.
+**Ordering:** register `accesslog` **before** `requestid` so that generated request IDs reach the access log. See [Ordering](README.md#ordering).
 {% endhint %}
 
 ## Features
@@ -15,43 +13,9 @@ The `accesslog` middleware automatically logs every service call with detailed i
 - **Automatic Logging**: Logs service handler executions (see [What Is Logged](#what-is-logged))
 - **Multiple Formats**: Text and JSON output formats
 - **Performance Metrics**: Measures request duration and message sizes
-- **Request ID Integration**: Automatically includes request IDs if available
+- **Request ID Integration**: Includes request IDs if available
 - **Configurable Output**: Write to a file or any `io.Writer`
 - **Field Selection**: Choose which fields appear in each entry
-
-## Installation
-
-Import the package:
-
-```go
-import "github.com/go-monolith/mono/middleware/accesslog"
-```
-
-## Signatures
-
-### New
-
-```go
-func New(opts ...Option) (*AccessLogModule, error)
-```
-
-Creates a new access log middleware instance with the given options. `WithOutput` is required: without it `New` returns the error `access log module requires WithOutput option`.
-
-### WithOutput
-
-```go
-func WithOutput(w io.Writer) Option
-```
-
-Sets the output destination for logs (required). The module syncs and closes the writer on `Stop` when it implements `Sync()` / `io.Closer`.
-
-### WithFormat
-
-```go
-func WithFormat(format Format) Option
-```
-
-Sets the log format (Text or JSON).
 
 ## Basic Usage
 
@@ -59,8 +23,9 @@ Sets the log format (Text or JSON).
 package main
 
 import (
-    "os"
     "context"
+    "os"
+
     "github.com/go-monolith/mono"
     "github.com/go-monolith/mono/middleware/accesslog"
 )
@@ -81,24 +46,20 @@ func main() {
         panic(err)
     }
 
-    // Create application
     app, _ := mono.NewMonoApplication()
 
     // Register middleware (any position relative to modules)
     app.Register(accessModule)
-
-    // Register your modules
     app.Register(&OrderModule{})
     app.Register(&PaymentModule{})
 
-    // Start application
     app.Start(context.Background())
 }
 ```
 
 ## Configuration Options
 
-All configuration is done through functional options passed to `New()`:
+`func New(opts ...Option) (*AccessLogModule, error)` takes these options:
 
 | Option | Type | Description | Default |
 |--------|------|-------------|---------|
@@ -107,21 +68,16 @@ All configuration is done through functional options passed to `New()`:
 | `WithFields` | `[]Field` | Fields to include (nil or empty means all) | `AllFields()` |
 | `WithRequestIDHeader` | `string` | Header the request ID is read from (empty is rejected) | `"X-Request-ID"` |
 
-Field constants: `FieldTimestamp`, `FieldRequestID`, `FieldModule`, `FieldService`, `FieldServiceType`, `FieldDurationMS`, `FieldStatus`, `FieldRequestSize`, `FieldResponseSize`; `AllFields()` returns all of them and `FieldName(f)` returns the key used in the output. If you change the request ID header with `requestid.WithHeaderName`, pass the same name to `WithRequestIDHeader`.
+- `WithOutput` is required: without it `New` returns the error `access log module requires WithOutput option`.
+- Field constants: `FieldTimestamp`, `FieldRequestID`, `FieldModule`, `FieldService`, `FieldServiceType`, `FieldDurationMS`, `FieldStatus`, `FieldRequestSize`, `FieldResponseSize`. `AllFields()` returns all of them and `FieldName(f)` returns the key used in the output.
+- If you change the request ID header with `requestid.WithHeaderName`, pass the same name to `WithRequestIDHeader`.
 
 {% hint style="warning" %}
-**The module closes the writer on `Stop`.** Do not close it yourself, and do not pass `os.Stdout` if the process keeps writing to it after `Stop`.
+**The module closes the writer on `Stop`** (it calls `Sync()` and `Close()` when the writer implements them). Do not close it yourself, and do not pass `os.Stdout` if the process keeps writing to it after `Stop`.
 {% endhint %}
 
-### WithOutput
-
-Write to file:
-```go
-file, _ := os.OpenFile("access.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-accesslog.New(accesslog.WithOutput(file))
-```
-
 Select fields:
+
 ```go
 accesslog.New(
     accesslog.WithOutput(file),
@@ -134,38 +90,30 @@ accesslog.New(
 )
 ```
 
-### WithFormat
-
-Text format (default, human-readable):
-```go
-accesslog.New(accesslog.WithOutput(file), accesslog.WithFormat(accesslog.FormatText))
-// Output: ts=2025-01-15T10:30:00Z request_id=550e8400-e29b-41d4-a716-446655440000 module=payment service=process-payment service_type=request_reply status=success duration_ms=1 request_size=256 response_size=512
-```
-
-JSON format (machine-readable):
-```go
-accesslog.New(accesslog.WithOutput(file), accesslog.WithFormat(accesslog.FormatJSON))
-// Output: {"duration_ms":1,"module":"payment","request_id":"550e8400-e29b-41d4-a716-446655440000","request_size":256,"response_size":512,"service":"process-payment","service_type":"request_reply","status":"success","ts":"2025-01-15T10:30:00Z"}
-```
-
-## Default Config
-
-```go
-accesslog.New(accesslog.WithOutput(file))  // Defaults: text format, all fields, X-Request-ID header
-```
-
 ## Log Entry Format
 
-### Text Format Fields
+### Text Format
+
+`accesslog.WithFormat(accesslog.FormatText)` (the default, human-readable):
 
 ```
-ts=TIMESTAMP request_id=ID module=MODULE service=SERVICE service_type=TYPE status=STATUS duration_ms=MS request_size=BYTES response_size=BYTES
+ts=2025-01-15T10:30:00Z request_id=550e8400-e29b-41d4-a716-446655440000 module=payment service=process-payment service_type=request_reply status=success duration_ms=1 request_size=256 response_size=512
 ```
+
+### JSON Format
+
+`accesslog.WithFormat(accesslog.FormatJSON)` (machine-readable) uses the same keys, sorted alphabetically:
+
+```json
+{"duration_ms":1,"module":"payment","request_id":"550e8400-e29b-41d4-a716-446655440000","request_size":256,"response_size":512,"service":"process-payment","service_type":"request_reply","status":"success","ts":"2025-01-15T10:30:00Z"}
+```
+
+### Fields
 
 | Field | Description |
 |-------|-------------|
 | `ts` | UTC start time of the call (RFC 3339) |
-| `request_id` | Request ID from the header (or from the context, see the ordering note); always present, empty when unknown |
+| `request_id` | Request ID from the header (or from the context, see [Ordering](README.md#ordering)); always present, empty when unknown |
 | `module` | Name of the module providing the service |
 | `service` | Service name (event name for event consumers) |
 | `service_type` | `request_reply`, `queue_group`, `stream_consumer`, `event_consumer`, `event_stream_consumer` or `channel` |
@@ -174,34 +122,16 @@ ts=TIMESTAMP request_id=ID module=MODULE service=SERVICE service_type=TYPE statu
 | `request_size` | Size of request in bytes (sum of the batch for stream consumers) |
 | `response_size` | Size of response in bytes (0 except for request-reply and channel responses) |
 
-### JSON Format Fields
-
-The JSON format uses the same keys, sorted alphabetically:
-
-```json
-{
-  "duration_ms": 1,
-  "module": "payment",
-  "request_id": "550e8400-e29b-41d4-a716-446655440000",
-  "request_size": 256,
-  "response_size": 512,
-  "service": "process-payment",
-  "service_type": "request_reply",
-  "status": "success",
-  "ts": "2025-01-15T10:30:00Z"
-}
-```
-
 ### What Is Logged
 
-- **Request-reply, queue group, stream consumer, event consumer, event stream consumer**: one entry per handler call; batch handlers get one entry per batch, with the request ID of the first message.
+- **Request-reply, queue group, stream consumer, event consumer, event stream consumer**: one entry per handler call. Batch handlers get one entry per batch, with the request ID of the first message.
 - **Channel services**: separate entries for the inbound request and the outbound response, each with `duration_ms` 0.
 - **Not logged**: cron handlers and plugin services.
-- Write failures do not affect handlers; they are reported on stderr as `CRITICAL: Failed to write access log entry: <error>`.
+- **Write failures** do not affect handlers; they are reported on stderr as `CRITICAL: Failed to write access log entry: <error>`.
 
 ## Integration with Request ID Middleware
 
-The access log middleware automatically includes request IDs when using the Request ID middleware:
+Register `requestid` after `accesslog` (see [Ordering](README.md#ordering)):
 
 ```go
 accessModule, err := accesslog.New(accesslog.WithOutput(file))
@@ -218,13 +148,14 @@ app.Register(requestIDModule) // second: requestid runs before accesslog
 ```
 
 Sample output:
+
 ```
 ts=2025-01-15T10:30:00Z request_id=550e8400-e29b-41d4-a716-446655440000 module=order service=create-order service_type=request_reply status=success duration_ms=2 request_size=128 response_size=256
 ```
 
 ## Practical Examples
 
-### Log to File with Rotation
+### Log to a File in JSON
 
 ```go
 file, _ := os.OpenFile(
@@ -257,68 +188,20 @@ accessModule, _ := accesslog.New(
 )
 ```
 
-### Multiple Middleware
+## Performance
 
-```go
-app, _ := mono.NewMonoApplication()
+Each entry is one unbuffered write, serialized by a mutex. Writing synchronously to slow I/O (network storage, slow disk) adds latency to every request. For high-throughput applications:
 
-// Register access logging first
-accessModule, err := accesslog.New(
-    accesslog.WithOutput(accessFile),
-    accesslog.WithFormat(accesslog.FormatJSON),
-)
-if err != nil {
-    return err
-}
-app.Register(accessModule)
-
-// Register request ID second, so it runs first and access logs include generated IDs
-requestIDModule, err := requestid.New()
-if err != nil {
-    return err
-}
-app.Register(requestIDModule)
-
-// Register application modules (any position)
-app.Register(&OrderModule{})
-```
-
-## Performance Characteristics
-
-- **I/O**: one unbuffered write per entry, serialized by a mutex
-
-{% hint style="warning" %}
-**Performance Note:** Writing logs synchronously to slow I/O (network storage, slow disk) can impact request latency. Consider using buffered writers or async logging for high-throughput applications.
-{% endhint %}
-
-For high-performance applications, consider:
-- Buffering log writes (for example a `bufio.Writer`)
-- Separating access logs from application logs
+- Buffer log writes (for example a `bufio.Writer`)
+- Write to local fast storage and ship the logs asynchronously (fluentd, filebeat, etc.) instead of writing to network storage
+- Keep access logs separate from application logs
+- Reduce output with `WithFields`
 
 ## Common Pitfalls
 
-### Registration order
-
-Generated request IDs only appear in the access log when `requestid` is registered **after** `accesslog` (see the ordering note at the top). The position relative to application modules does not matter.
-
-### Writing to slow destinations
-
-Writing access logs to network storage or slow disks can add latency to every request. For production:
-
-```go
-// ❌ AVOID: Direct network writes
-networkFile, _ := os.OpenFile("/mnt/nfs/access.log", ...)
-accesslog.New(accesslog.WithOutput(networkFile))
-
-// ✅ BETTER: Local fast storage with async shipping
-localFile, _ := os.OpenFile("/var/log/access.log", ...)
-accesslog.New(accesslog.WithOutput(localFile))
-// Ship logs async with fluentd, filebeat, etc.
-```
-
-### Logging sensitive data in request IDs
-
-If your request IDs contain user information or tokens, they'll appear in access logs. Use opaque UUIDs instead.
+- **Request IDs missing**: `requestid` must be registered **after** `accesslog` (see [Ordering](README.md#ordering)).
+- **Sensitive data in request IDs**: if your request IDs contain user information or tokens, they appear in access logs. Use opaque UUIDs instead.
+- **Closing the writer yourself**: the module already closes it on `Stop`.
 
 ## Troubleshooting
 
@@ -329,19 +212,9 @@ If your request IDs contain user information or tokens, they'll appear in access
 3. Ensure the module/service names match what you expect
 4. Cron handlers and plugin services are not logged
 
-### Performance degradation
-
-- Reduce output verbosity if possible (`WithFields`)
-- Consider writing to a fast storage medium
-- Profile to identify bottlenecks
-
 ## Related Documentation
 
 - [Request ID Middleware](requestid.md)
 - [Audit Middleware](audit.md)
 - [Middleware System](README.md)
 - [Core Concepts - Modules](../core-concepts/modules.md)
-
----
-
-For security logging, see [Audit Middleware](audit.md).
