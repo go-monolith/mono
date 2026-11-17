@@ -235,7 +235,7 @@ lifecycle:
       seconds: 5
 ```
 
-The sleep counts toward `terminationGracePeriodSeconds`, so the grace period must cover the sleep plus `WithShutdownTimeout`. With 3 servers and 3 replicas, a rolling update keeps JetStream available: one server restarts at a time and the other two keep the quorum.
+The sleep counts toward `terminationGracePeriodSeconds`, so the grace period must cover the sleep plus `WithShutdownTimeout`. With 3 servers and 3 replicas, a rolling update keeps JetStream available: one server restarts at a time and the other two keep the quorum. For canaries, rollbacks, node drains and blue-green cutovers, with measured results, see [Kubernetes Deployment Strategies](../extra/kubernetes-deployment.md).
 
 ## Checklist
 
@@ -254,3 +254,4 @@ The sleep counts toward `terminationGracePeriodSeconds`, so the grace period mus
 - [Service Container API](../api/container.md) - stream consumer and cron services
 - [Upgrading to v0.2.0](upgrading.md#upgrading-to-v020)
 - [Kubernetes cluster example](../../../examples/k8s-cluster/README.md)
+- [Kubernetes Deployment Strategies](../extra/kubernetes-deployment.md) - rolling, canary and blue-green deployments, measured

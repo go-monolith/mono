@@ -14,6 +14,10 @@ The [FAQ section](faq.md) addresses common questions developers ask when working
 - **Project Setup**: Recommended structures and best practices
 - **Testing and Error Handling**: Common patterns and approaches
 
+### Kubernetes Deployment Strategies
+
+[Kubernetes Deployment Strategies](kubernetes-deployment.md) covers changing a running JetStream cluster on Kubernetes: rolling updates, canaries, bad releases and rollback, node drains, and blue-green cutovers, with measured results and a cutover runbook.
+
 ## Quick Links
 
 ### Get Answers to Common Questions
@@ -41,6 +45,7 @@ Common questions covered:
 ## Organization
 
 - **[Frequently Asked Questions](faq.md)** - Answers to the most common developer questions
+- **[Kubernetes Deployment Strategies](kubernetes-deployment.md)** - Rolling, canary and blue-green deployments of a JetStream cluster, measured
 - **[Code Coverage](code-coverage.md)** - Test coverage statistics and quality metrics
 
 ## Related Documentation

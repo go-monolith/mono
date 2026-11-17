@@ -208,6 +208,8 @@ Measured with 5 requests per second through the Service, every visit tracked:
 
 Memory per pod: about 10–20 MiB (limit 192 MiB).
 
+For canaries, rollbacks, node drains and blue-green cutovers, see [Kubernetes Deployment Strategies](../../docs/official/extra/kubernetes-deployment.md).
+
 To scale further, raise `replicas`, add every pod to `NATS_ROUTES`, and keep an
 odd number of servers. `JS_REPLICAS` stays at 3 (at most 5, and at most the
 number of servers).
