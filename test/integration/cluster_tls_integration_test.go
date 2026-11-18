@@ -192,7 +192,7 @@ func TestClusterTLS_Validation(t *testing.T) {
 			mono.WithNATSPort(freeTCPPort(t)),
 			mono.WithNATSClustering("c", "127.0.0.1", freeTCPPort(t), []string{"nats://127.0.0.1:1"}),
 			mono.WithNATSClusterTLS(oCert, oKey, ca.file))
-		if err == nil || !strings.Contains(err.Error(), "not signed by the route CA") {
+		if err == nil || !strings.Contains(err.Error(), "with the route CA") {
 			t.Fatalf("err = %v", err)
 		}
 	})

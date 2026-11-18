@@ -159,12 +159,20 @@ func (r *certReloader) parse(certPEM, keyPEM []byte) (*tls.Certificate, error) {
 		}
 	}
 	if r.roots != nil {
-		if _, err := leaf.Verify(x509.VerifyOptions{
-			Roots:         r.roots,
-			Intermediates: intermediates,
-			KeyUsages:     []x509.ExtKeyUsage{x509.ExtKeyUsageAny},
-		}); err != nil {
-			return nil, fmt.Errorf("certificate is not signed by the route CA: %w", err)
+		// Each server is TLS server on the routes it accepts and TLS client on
+		// the routes it opens, and peers verify both uses: a certificate
+		// without one of them would make half of the routes fail.
+		for _, use := range []struct {
+			usage x509.ExtKeyUsage
+			name  string
+		}{{x509.ExtKeyUsageServerAuth, "server"}, {x509.ExtKeyUsageClientAuth, "client"}} {
+			if _, err := leaf.Verify(x509.VerifyOptions{
+				Roots:         r.roots,
+				Intermediates: intermediates,
+				KeyUsages:     []x509.ExtKeyUsage{use.usage},
+			}); err != nil {
+				return nil, fmt.Errorf("certificate is not valid for TLS %s use with the route CA: %w", use.name, err)
+			}
 		}
 	}
 	return &pair, nil

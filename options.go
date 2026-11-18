@@ -690,8 +690,9 @@ func WithNATSClusterAuth(username, password string) MonoFrameworkOption {
 // Requires clustering (WithNATSClustering or a config file); none of the
 // paths may be empty. It cannot be combined with a cluster { tls {} } block in
 // a NATS config file. Unreadable or invalid files, or a certificate not
-// signed by the CA in caFile, make NewMonoApplication fail when the embedded
-// server starts. The client listener is not affected
+// signed by the CA in caFile for both TLS server and client use, make
+// NewMonoApplication fail when the embedded server starts. Any certificate
+// the CA signs can join the cluster: use a CA dedicated to the routes. The client listener is not affected
 // (see WithNATSAutoTLS).
 //
 // Example:

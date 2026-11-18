@@ -533,7 +533,7 @@ Makes the routes between the servers of a cluster use mutual TLS: each server pr
 | Type | `string`, `string`, `string` (PEM files: certificate, key, CA) |
 | Default | (empty: routes use no TLS unless the config file has a `cluster { tls {} }` block) |
 | Constraints | None empty; requires clustering; not combined with a `cluster { tls {} }` block in a NATS config file |
-| Error | Unreadable or invalid files, or a certificate not signed by the CA in `caFile`, make `NewMonoApplication` fail when the embedded server starts |
+| Error | Unreadable or invalid files, or a certificate not signed by the CA in `caFile` for both TLS server and client use, make `NewMonoApplication` fail when the embedded server starts |
 
 **Example:**
 ```go

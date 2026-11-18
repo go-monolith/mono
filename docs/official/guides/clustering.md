@@ -113,6 +113,7 @@ mono.WithNATSClusterTLS("/etc/nats-route-tls/tls.crt", "/etc/nats-route-tls/tls.
 ```
 
 - **Certificate.** A server checks that a peer it dials presents a certificate for the route URL's host, so give the certificate a DNS name for every route host. In Kubernetes one wildcard certificate for `*.<headless-service>.<namespace>.svc.cluster.local` covers every pod. It must allow both TLS server and client use, since each server is both on routes.
+- **A dedicated CA.** Any certificate the route CA signs (for both server and client use) can join the cluster, so use a CA only for these routes, not a shared internal CA.
 - **Issuing it.** Use a private CA: cert-manager (a CA `Issuer` and a `Certificate` with the `server auth` and `client auth` usages), or a script with `openssl`. The [Kubernetes cluster example](../../../examples/k8s-cluster/README.md) has both.
 - **Renewal.** A renewed certificate is picked up for new routes without a restart (the files are checked at most every 10 seconds); a new CA needs a restart of every server.
 - **Turning it on.** Servers with and without route TLS cannot route to each other. Switch every server at once (a brief loss of JetStream while they restart), or move to a TLS cluster with a blue-green cutover.

@@ -62,6 +62,11 @@ func (ca *testCA) issue(t *testing.T, dir, name string, serial int64) (string, s
 // "localhost" only, which does not match a route URL with 127.0.0.1).
 func (ca *testCA) issueFor(t *testing.T, dir, name string, serial int64, ips []net.IP) (string, string) {
 	t.Helper()
+	return ca.issueWith(t, dir, name, serial, ips, []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth, x509.ExtKeyUsageClientAuth})
+}
+
+func (ca *testCA) issueWith(t *testing.T, dir, name string, serial int64, ips []net.IP, usages []x509.ExtKeyUsage) (string, string) {
+	t.Helper()
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		t.Fatal(err)
@@ -72,7 +77,7 @@ func (ca *testCA) issueFor(t *testing.T, dir, name string, serial int64, ips []n
 		NotBefore:    time.Now().Add(-time.Hour),
 		NotAfter:     time.Now().Add(24 * time.Hour),
 		KeyUsage:     x509.KeyUsageDigitalSignature,
-		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth, x509.ExtKeyUsageClientAuth},
+		ExtKeyUsage:  usages,
 		DNSNames:     []string{"localhost"},
 		IPAddresses:  ips,
 	}
@@ -229,9 +234,16 @@ func TestCertReloader(t *testing.T) {
 		t.Errorf("serial = %d, want 12 after the update completed", s)
 	}
 
+	// A certificate for server use only is refused: the routes this server
+	// opens would fail, since peers verify client certificates.
+	sc, sk := ca.issueWith(t, t.TempDir(), "server-only", 6, []net.IP{net.ParseIP("127.0.0.1")}, []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth})
+	if _, err := newCertReloader(sc, sk, roots, nil); err == nil || !strings.Contains(err.Error(), "TLS client use") {
+		t.Errorf("server-only certificate: err = %v, want a client use error", err)
+	}
+
 	// At start, a certificate from another CA is an error.
 	oc, ok := other.issue(t, t.TempDir(), "node", 5)
-	if _, err := newCertReloader(oc, ok, roots, nil); err == nil || !strings.Contains(err.Error(), "not signed by the route CA") {
+	if _, err := newCertReloader(oc, ok, roots, nil); err == nil || !strings.Contains(err.Error(), "with the route CA") {
 		t.Errorf("err = %v, want a route CA error", err)
 	}
 }
