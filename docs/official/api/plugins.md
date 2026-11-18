@@ -8,7 +8,7 @@ Plugins are special modules designed for shared infrastructure that other module
 
 - **Start first, stop last** - Guaranteed initialization order
 - **Excluded from dependency graph** - Don't participate in circular dependency checks
-- **Have their own ServiceContainer** - Services registered in it are not currently served over NATS; expose plugin functionality through Go methods
+- **Have their own ServiceContainer** - Services registered in it are served over NATS at `services.<plugin name>.<service>`, after every module has started
 - **Excluded from middleware hooks** - Raw access without interception
 - **Registered with aliases** - Multiple instances of the same plugin type supported
 
@@ -71,7 +71,7 @@ func (p *StoragePlugin) SetContainer(container mono.ServiceContainer) {
 Container() ServiceContainer
 ```
 
-Returns the plugin's ServiceContainer. Services registered in a plugin's container are not currently served over NATS (no subscription is created for them), so calls to them get no responder; expose plugin functionality through Go methods on the plugin type instead.
+Returns the plugin's ServiceContainer. Request-reply, queue group, stream consumer and cron services registered in it are served over NATS at `services.<plugin name>.<service>` (the plugin's `Name()`, not its alias), and the routers of its channel services run, like a module's. They are subscribed after every module has started, so a module cannot call them from its own `Start()`. A plugin that registers services must not share its `Name()` with a module or with another plugin that registers services (two instances of one plugin type, for example): both would answer on the same subjects, so `app.Start()` fails. Modules reach these services through the plugin's container (`Container()`), and may list their contracts in `ConsumeServices()`.
 
 **Returns:**
 - `ServiceContainer` - The plugin's service container
@@ -202,6 +202,8 @@ Plugins start first and stop last, so shared infrastructure (storage, caches) is
    - SetPlugin() for every registered plugin, if it implements UsePluginModule
    - SetDependencyServiceContainer(), SetEventBus(), RegisterServices()
    - Start()
+5. Channel routers start, then NATS subscriptions are created for the
+   services of every module and every plugin
 ```
 
 If a plugin's `Start()` fails, the plugins already started are stopped in reverse order and `app.Start()` returns the error.
@@ -216,7 +218,7 @@ If a plugin's `Start()` fails, the plugins already started are stopped in revers
 4. NATS connection closes
 ```
 
-If a regular module fails to start, the modules started before it are rolled back, but plugins (and middleware) that already started are not stopped: their `Stop()` is not called.
+If `app.Start()` fails after the plugins started (a middleware or module `Start()` fails, the dependencies do not resolve, an event definition is rejected, or a subscription cannot be set up), nothing is left running: the modules started so far stop in reverse order, then the middleware that started in reverse order, then every plugin, so a plugin is never left running or started twice without a `Stop()` in between.
 
 ## Built-in Plugins
 

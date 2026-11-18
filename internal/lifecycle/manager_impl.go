@@ -728,8 +728,11 @@ func (lm *lifecycleManager) detectMiddlewareModules() {
 	}
 }
 
-// Start starts all modules in dependency order
-func (lm *lifecycleManager) Start(ctx context.Context) error {
+// Start starts all modules in dependency order. A failure after the plugins
+// started leaves nothing running: the started modules are stopped in reverse
+// order (rollback), then the started middleware in reverse order, then the
+// plugins (rollbackStartedInfrastructure).
+func (lm *lifecycleManager) Start(ctx context.Context) (err error) {
 	// Step -1: wait until JetStream answers, so that plugins and modules that
 	// use it in Start, and the JetStream setup after them, find it ready even
 	// while the servers of a cluster are still electing leaders.
@@ -751,6 +754,17 @@ func (lm *lifecycleManager) Start(ctx context.Context) error {
 		return fmt.Errorf("failed to start plugins: %w", err)
 	}
 
+	// From here on every error return stops what was started: the plugins,
+	// and the middleware whose Start succeeded. Modules are rolled back
+	// before this runs (see rollback), so the order is modules, middleware,
+	// plugins, as in Stop.
+	var startedMiddleware []types.MiddlewareModule
+	defer func() {
+		if err != nil {
+			lm.rollbackStartedInfrastructure(ctx, startedMiddleware)
+		}
+	}()
+
 	// Step 1: Detect and build middleware chain
 	lm.detectMiddlewareModules()
 
@@ -766,6 +780,7 @@ func (lm *lifecycleManager) Start(ctx context.Context) error {
 			if err := mw.Start(ctx); err != nil {
 				return fmt.Errorf("failed to start middleware module %s: %w", mw.Name(), err)
 			}
+			startedMiddleware = append(startedMiddleware, mw)
 		}
 	}
 
@@ -809,11 +824,18 @@ func (lm *lifecycleManager) Start(ctx context.Context) error {
 		started = append(started, module.Name())
 	}
 
-	// Step 4.5: Start channel service routers
+	// Step 4.5: Start channel service routers, of the modules and of the
+	// plugins (whose containers are kept by alias)
 	for moduleName, container := range lm.containers {
 		if container != nil {
 			container.StartChannelRouters(lm.runtimeCtx)
 			lm.logger.Debug("Started channel routers", "module", moduleName)
+		}
+	}
+	for alias, container := range lm.pluginContainers {
+		if container != nil {
+			container.StartChannelRouters(lm.runtimeCtx)
+			lm.logger.Debug("Started channel routers", "plugin", alias)
 		}
 	}
 
@@ -993,12 +1015,10 @@ func (lm *lifecycleManager) startModule(ctx context.Context, module types.Module
 func (lm *lifecycleManager) setupNATSSubscriptions(ctx context.Context) error {
 	lm.logger.Debug("Setting up NATS subscriptions")
 
-	lm.mu.RLock()
-	containers := make(map[string]types.ServiceContainer, len(lm.containers))
-	for k, v := range lm.containers {
-		containers[k] = v
+	containers, err := lm.serviceOwners()
+	if err != nil {
+		return err
 	}
-	lm.mu.RUnlock()
 
 	// Track cron stream names registered this boot for best-effort orphan
 	// detection after all services are set up.
@@ -1730,6 +1750,71 @@ func (lm *lifecycleManager) rollback(ctx context.Context, started []string, orig
 	}
 
 	return fmt.Errorf("module startup failed, rolled back %d modules: %w", len(started), originalErr)
+}
+
+// rollbackStartedInfrastructure stops, after a failed Start, the middleware
+// whose Start succeeded (in reverse order) and then every plugin (all of them
+// started, or startPlugins would have rolled them back and failed first), and
+// forgets the plugin containers, so nothing is left running and a retried
+// Start does not start a plugin twice without a Stop in between.
+func (lm *lifecycleManager) rollbackStartedInfrastructure(ctx context.Context, startedMiddleware []types.MiddlewareModule) {
+	for i := len(startedMiddleware) - 1; i >= 0; i-- {
+		mw := startedMiddleware[i]
+		if err := lm.stopMiddlewareModule(ctx, mw); err != nil {
+			lm.logger.Error("Failed to stop middleware module during rollback", "module", mw.Name(), "error", err)
+		}
+	}
+	lm.rollbackPlugins(ctx, lm.pluginRegistry.List())
+}
+
+// servesOverNATS reports whether c holds a service that is subscribed over
+// NATS: anything but a channel service, which is in-process and has no
+// subject.
+func servesOverNATS(c types.ServiceContainer) bool {
+	for _, e := range c.Entries() {
+		if e.Type != types.ServiceTypeChannel {
+			return true
+		}
+	}
+	return false
+}
+
+// serviceOwners returns the containers whose services are served over NATS,
+// keyed by the name their subjects use (services.<name>.<service>): every
+// started module and every started plugin (by its Name(), not its alias).
+// A plugin that registers services must not share that name with a module
+// or with another plugin that registers services, since both would answer on
+// the same subjects and queue groups; that fails Start.
+func (lm *lifecycleManager) serviceOwners() (map[string]types.ServiceContainer, error) {
+	lm.mu.RLock()
+	defer lm.mu.RUnlock()
+	owners := make(map[string]types.ServiceContainer, len(lm.containers)+len(lm.pluginContainers))
+	for k, v := range lm.containers {
+		owners[k] = v
+	}
+	if len(lm.pluginContainers) == 0 {
+		return owners, nil
+	}
+	plugins := lm.pluginRegistry.All()
+	pluginOwner := make(map[string]string, len(lm.pluginContainers)) // name -> alias
+	for _, alias := range lm.pluginRegistry.List() {
+		c, ok := lm.pluginContainers[alias]
+		if !ok || c == nil || !servesOverNATS(c) {
+			continue
+		}
+		name := plugins[alias].Name()
+		if other, dup := pluginOwner[name]; dup {
+			return nil, fmt.Errorf("plugins %q and %q both register services as %q: their subjects (services.%s.<service>) would collide; give the plugins distinct names",
+				other, alias, name, name)
+		}
+		if _, dup := owners[name]; dup {
+			return nil, fmt.Errorf("plugin %q registers services as %q, the name of a module: their subjects (services.%s.<service>) would collide; give the plugin a distinct name",
+				alias, name, name)
+		}
+		pluginOwner[name] = alias
+		owners[name] = c
+	}
+	return owners, nil
 }
 
 // WaitForShutdown blocks until shutdown signal or context cancellation

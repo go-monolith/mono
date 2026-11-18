@@ -52,7 +52,7 @@ func (app MonoApplication) Start(ctx context.Context) error
 Starts plugins, middleware and all registered modules in dependency order (the embedded NATS server is already running: `NewMonoApplication` starts it). With JetStream it first waits for JetStream (see [`WithJetStreamReadyTimeout`](#withjetstreamreadytimeout)).
 
 **Errors:**
-- A module fails to start: the previously started modules are rolled back and the state returns to `StateCreated`.
+- A module fails to start: the previously started modules are rolled back, then the started middleware and the plugins are stopped, and the state returns to `StateCreated`. Any other failure after the plugins started stops them the same way.
 - `application already running` when the application is running.
 - `application already stopped, cannot restart` after `Stop`.
 

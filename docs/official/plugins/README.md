@@ -227,7 +227,7 @@ _ = app.Register(&AppModule{})             // Module: receives "storage" via Set
 
 ### With Services
 
-A plugin receives its own ServiceContainer, and `RegisterServices()` is called on plugins that implement `ServiceProviderModule`. However, services registered in a plugin's container are not currently served over NATS (no subscription is created for them), so a call to them gets no responder. Expose plugin functionality through Go methods on the plugin type instead, as the built-in plugins do with `Bucket()`:
+A plugin receives its own ServiceContainer, and `RegisterServices()` is called on plugins that implement `ServiceProviderModule`. The services registered there are served over NATS at `services.<plugin name>.<service>` once every module has started, so modules call them through the plugin's `Container()` (not from their own `Start()`); see [Container](../api/plugins.md#container) for the naming rule. For in-process functionality, Go methods on the plugin type are simpler, as the built-in plugins do with `Bucket()`:
 
 ```go
 func (p *StoragePlugin) Bucket(name string) Bucket {

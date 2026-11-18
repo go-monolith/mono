@@ -183,10 +183,10 @@ Then, for each module in dependency order:
 6. Call RegisterServices()
 7. Call RegisterEventConsumers(registry)
 8. Call Start()
-   └─ An error rolls back the modules already started
+   └─ An error rolls back the modules already started, then the started middleware, then the plugins
 ```
 
-After all modules have started, the framework starts the channel routers, then creates the NATS subscriptions, worker pools and JetStream consumers for every registered service and event consumer.
+After all modules have started, the framework starts the channel routers, then creates the NATS subscriptions, worker pools and JetStream consumers for every registered service (of the modules and the plugins) and event consumer. A failure of any step after the plugins started stops the started modules, middleware and plugins, in that order.
 
 ## Subject Naming Conventions
 

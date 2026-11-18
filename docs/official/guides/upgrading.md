@@ -70,6 +70,13 @@ These need no code change, but you may notice them.
 
 This includes non-durable consumers your application creates itself. The server now removes an abandoned one 1h after its last pull instead of 5s. On an interest-retention stream it keeps its messages for that hour; on a work-queue stream it can block a new consumer with an overlapping filter. If you create a fresh non-durable consumer at every start, delete the old one or set `InactiveThreshold` explicitly. A consumer with any other threshold is left alone.
 
+### Plugin services are served, and a failed `Start` stops plugins
+
+*v0.2.6.* Two fixes to plugins:
+
+- **Plugin services are served over NATS.** Request-reply, queue group, stream consumer and cron services registered in a plugin's container are subscribed at `services.<plugin name>.<service>`, and its channel routers run. Before, they were never subscribed and calls got no responder. A plugin that registers such services and shares its `Name()` with a module, or with another plugin that registers such services, now fails `Start`.
+- **A failed `Start` stops the plugins and middleware.** When a middleware or module fails to start, or a later step fails, the started middleware and the plugins are stopped too, after the modules. Before, their `Stop()` was never called, not by the rollback and not by `app.Stop()`.
+
 ### Health reports JetStream
 
 *v0.2.0.* `FrameworkHealth.JetStream` (`Available`, `Clustered`, `MetaLeader`, `ClusterSize`, `Message`; JSON key `jetstream`) reports this server's JetStream state, and is nil when JetStream is disabled. It is not part of `Healthy`: use `JetStream.Available` in a readiness probe if you need it, never in a liveness probe. See [Health and Status](../api/framework.md#health-and-status).

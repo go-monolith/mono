@@ -74,7 +74,11 @@ type PluginModule interface {
 
 	// Container returns the plugin's ServiceContainer.
 	// This allows other modules to access the plugin's registered services
-	// via the plugin instance they receive through SetPlugin().
+	// via the plugin instance they receive through SetPlugin(). Those services
+	// are served at services.<Name()>.<service> once every module has started,
+	// so a module calls them after its own Start. A plugin that registers
+	// services must not share its Name() with a module or with another plugin
+	// that registers services: Start fails.
 	Container() ServiceContainer
 }
 
