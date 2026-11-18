@@ -9,6 +9,7 @@ import (
 
 	"github.com/go-monolith/mono"
 	monoerrors "github.com/go-monolith/mono/pkg/errors"
+	"github.com/go-monolith/mono/pkg/types"
 )
 
 func TestWithNATSServerName(t *testing.T) {
@@ -213,6 +214,23 @@ func TestWithNATSClusterTLS(t *testing.T) {
 		err := mono.WithNATSClusterTLS(tc.cert, tc.key, tc.ca)(mono.DefaultConfig())
 		if err == nil || !strings.Contains(err.Error(), tc.want) {
 			t.Errorf("(%q, %q, %q): err = %v, want %q", tc.cert, tc.key, tc.ca, err, tc.want)
+		}
+	}
+}
+
+func TestWithNATSClientTLS(t *testing.T) {
+	cfg := mono.DefaultConfig()
+	in := types.ClientTLSConfig{CertFile: "s.crt", KeyFile: "s.key", ClientCAFile: "clients.crt"}
+	if err := mono.WithNATSClientTLS(in)(cfg); err != nil {
+		t.Fatal(err)
+	}
+	if got := cfg.NATSOptions.ClientTLS; got == nil || *got != in {
+		t.Errorf("ClientTLS = %+v", got)
+	}
+	for _, tc := range []types.ClientTLSConfig{{KeyFile: "k"}, {CertFile: "c"}} {
+		err := mono.WithNATSClientTLS(tc)(mono.DefaultConfig())
+		if err == nil || !strings.Contains(err.Error(), "needs a certificate file and a key file") {
+			t.Errorf("%+v: err = %v", tc, err)
 		}
 	}
 }

@@ -257,6 +257,7 @@ All framework configuration is done through functional options passed to `NewMon
 | [`WithNATSClientName`](#withnatsclientname) | Name of the framework's client connection | `"mono"` |
 | [`WithNATSClientOptions`](#withnatsclientoptions) | Extra nats.go client options | none |
 | [`WithNATSConfigFile`](#withnatsconfigfile) | NATS server config file | none |
+| [`WithNATSClientTLS`](#withnatsclienttls) | TLS (optionally mutual) on the client listener, certificate from files | disabled |
 | [`WithNATSAutoTLS`](#withnatsautotls) | Let's Encrypt certificates for the client listener | disabled |
 | **JetStream** | | |
 | [`WithJetStreamDomain`](#withjetstreamdomain) | JetStream domain | empty |
@@ -331,7 +332,7 @@ Prevents the NATS server from listening on TCP. Useful for embedded servers.
 |----------|-------|
 | Type | none (flag) |
 | Default | `false` |
-| Constraints | Requires `WithNATSInProcessConn()`, otherwise `NewMonoApplication` fails; cannot be combined with [`WithNATSAutoTLS`](#withnatsautotls) |
+| Constraints | Requires `WithNATSInProcessConn()`, otherwise `NewMonoApplication` fails; cannot be combined with [`WithNATSAutoTLS`](#withnatsautotls) or [`WithNATSClientTLS`](#withnatsclienttls) |
 
 **Example:**
 ```go
@@ -547,7 +548,7 @@ mono.WithNATSClusterTLS("/etc/nats-route-tls/tls.crt", "/etc/nats-route-tls/tls.
 - **Expiry monitoring.** nats-server's `/varz` cannot report the expiry of a certificate served this way (`cluster.tls_cert_not_after` is absent). The framework logs it instead: `Cluster TLS enabled` at start and `Reloaded the cluster TLS certificate` on renewal, both with `not_after`.
 - **With route credentials.** It combines with [`WithNATSClusterAuth`](#withnatsclusterauth): TLS encrypts the routes and authenticates peers by certificate, and the password is checked on top.
 - **All servers must agree.** A server with route TLS and one without cannot route to each other, so turning it on (or off) for a running cluster takes a restart of every server at once, or a blue-green cutover.
-- The client listener is not affected; see [`WithNATSAutoTLS`](#withnatsautotls). The startup log line `NATS server started` carries `cluster_tls=true`.
+- The client listener is not affected; see [`WithNATSClientTLS`](#withnatsclienttls) and [`WithNATSAutoTLS`](#withnatsautotls). The startup log line `NATS server started` carries `cluster_tls=true`.
 
 #### WithNATSSystemAccount
 
@@ -659,6 +660,75 @@ mono.NewMonoApplication(
 
 For NATS configuration file format and options, see the [NATS Server Configuration documentation](https://docs.nats.io/running-a-nats-service/configuration).
 
+#### WithNATSClientTLS
+
+```go
+func WithNATSClientTLS(clientTLS types.ClientTLSConfig) MonoFrameworkOption
+```
+
+Makes the embedded NATS server's **client listener** require TLS with a certificate from files, and optionally a certificate from every client (mutual TLS). For clients on a private network, such as other services in the same Kubernetes cluster, with a private CA. For public host names, see [`WithNATSAutoTLS`](#withnatsautotls).
+
+| Property | Value |
+|----------|-------|
+| Type | `types.ClientTLSConfig` |
+| Default | (disabled: the client listener uses no TLS unless the config file has a `tls {}` block) |
+| Constraints | `CertFile` and `KeyFile` required; not combined with [`WithNATSAutoTLS`](#withnatsautotls), [`WithNATSDontListen`](#withnatsdontlisten), or a NATS config file with a top-level `tls {}` block, `allow_non_tls` or `ocsp`; `ClientCAFile` must not share a CA with the routes |
+| Error | Unreadable or invalid files, or a certificate that has expired or does not allow TLS server use, make `NewMonoApplication` fail when the embedded server starts |
+
+**Example:**
+```go
+mono.NewMonoApplication(
+    mono.WithNATSHost("0.0.0.0"),
+    mono.WithNATSClientTLS(types.ClientTLSConfig{
+        CertFile:     "/etc/nats-client-tls/tls.crt",
+        KeyFile:      "/etc/nats-client-tls/tls.key",
+        ClientCAFile: "/etc/nats-client-tls/ca.crt", // omit for TLS without client certificates
+    }),
+)
+```
+
+`types.ClientTLSConfig` (package `github.com/go-monolith/mono/pkg/types`, no root alias):
+
+| Field | Description |
+|-------|-------------|
+| `CertFile`, `KeyFile` | Required. PEM certificate (intermediates after the leaf) and key. The certificate must allow TLS server use and name the host clients dial |
+| `ClientCAFile` | Optional. PEM CA bundle client certificates must chain to; set means every client must present one (mutual TLS) |
+
+- **Renewal without a restart.** Like route TLS, the certificate is served through [`pkg/certreload`](https://pkg.go.dev/github.com/go-monolith/mono/pkg/certreload). The files are read again at most every 10 seconds, on the next connection, and reloaded when their contents changed. Connections already established keep their session. The framework logs `Client TLS enabled` at start and `Reloaded the client TLS certificate` on renewal, both with `not_after`. A file that cannot be loaded, or an expired certificate, keeps the previous one and is retried.
+- **The client CA is read once.** To replace it, add the new CA to the file next to the old one, restart the servers (a rolling restart is enough: clients only need either CA), then move the clients to certificates from the new CA, and finally remove the old CA.
+- **A separate CA from the routes.** Every server accepts any certificate from the route CA as a cluster peer, so a client certificate from that CA would be good for joining the cluster. `NewMonoApplication` fails when a CA in `ClientCAFile` is, or is signed by, the route CA (of `WithNATSClusterTLS` or a config file's `cluster { tls {} }` block), or the route CA is signed by a client CA.
+- **Authentication, not authorization.** A client certificate proves who may connect, but every client with a valid certificate gets the permissions of the account it connects to: the global account unless a NATS config file defines users, which includes JetStream and the service discovery subjects (`$SRV.>`). Restrict who can reach the port (a Kubernetes NetworkPolicy, for example) and who gets a client certificate.
+- **Clients.** Clients connect with `tls://` and the host the certificate names. With client certificates, use `helper.NATSClientTLS` (below) so a renewed client certificate is presented on the next reconnect; `nats.ClientCert` reads its files only once. When a client first connected by host name and reconnects to a server of the cluster it discovered by IP address, nats.go verifies that server against the host name, so a certificate for a Kubernetes Service name also covers the pods behind it.
+- **The framework's own client** is switched to an in-process connection, which does not use TLS. Plaintext TCP clients are refused.
+- Routes, gateways, leafnodes, websocket and MQTT listeners are not affected. The startup log line `NATS server started` carries `client_tls=true`.
+
+##### helper.NATSClientTLS
+
+```go
+func NATSClientTLS(cfg helper.NATSClientTLSConfig) (nats.Option, error)
+```
+
+The client side of `WithNATSClientTLS`, for nats.go clients (package `github.com/go-monolith/mono/pkg/helper`). It returns an option that verifies the server against `CAFile` and, with `CertFile` and `KeyFile`, presents a client certificate that is reloaded when its files change.
+
+| Field | Description |
+|-------|-------------|
+| `CAFile` | Required. PEM CA bundle the server certificate must chain to; read once |
+| `CertFile`, `KeyFile` | Both or neither. The client certificate (TLS client use) and key |
+| `Logger` | Receives `Reloaded the NATS client TLS certificate` lines; nil means no logging |
+| `CheckInterval` | Least time between two checks of the files; 0 = 10 seconds |
+
+```go
+tlsOpt, err := helper.NATSClientTLS(helper.NATSClientTLSConfig{
+    CAFile:   "/etc/nats-client-tls/ca.crt",
+    CertFile: "/etc/nats-client-tls/tls.crt",
+    KeyFile:  "/etc/nats-client-tls/tls.key",
+})
+if err != nil {
+    return err
+}
+nc, err := nats.Connect("tls://mono-cluster-client.mono-demo.svc.cluster.local:4222", tlsOpt)
+```
+
 #### WithNATSAutoTLS
 
 ```go
@@ -671,7 +741,7 @@ Enables automatic ACME (Let's Encrypt) TLS certificates for the embedded NATS se
 |----------|-------|
 | Type | `types.AutoTLSConfig` |
 | Default | (disabled) |
-| Constraints | The fields below (checked when the option is applied); not combined with `WithNATSDontListen`; not combined with a config file that has a `tls{}` block |
+| Constraints | The fields below (checked when the option is applied); not combined with `WithNATSDontListen` or [`WithNATSClientTLS`](#withnatsclienttls); not combined with a config file that has a `tls{}` block |
 
 **Example:**
 ```go

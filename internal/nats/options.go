@@ -78,6 +78,10 @@ type NATSConfig struct {
 	// "explicitly set" marker, so no companion AutoTLSSet flag is needed.
 	AutoTLS *types.AutoTLSConfig
 
+	// ClientTLS enables TLS on the client listener with certificate files.
+	// Nil means disabled. See applyClientTLS.
+	ClientTLS *types.ClientTLSConfig
+
 	// ClientName is the connection name reported to the server (nats.Name),
 	// visible in /connz and server logs. Empty selects DefaultClientName.
 	ClientName string
@@ -365,6 +369,19 @@ func WithClientOptions(opts ...natsgo.Option) NATSOption {
 			}
 		}
 		cfg.ClientOptions = append(cfg.ClientOptions, opts...)
+		return nil
+	}
+}
+
+// WithClientTLS enables TLS on the client listener with the certificate and
+// key files of clientTLS, requiring client certificates when its
+// ClientCAFile is set. The configuration is validated and copied.
+func WithClientTLS(clientTLS *types.ClientTLSConfig) NATSOption {
+	return func(cfg *NATSConfig) error {
+		if err := clientTLS.Validate(); err != nil {
+			return err
+		}
+		cfg.ClientTLS = clientTLS.Clone()
 		return nil
 	}
 }

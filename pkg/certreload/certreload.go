@@ -81,7 +81,9 @@ type Config struct {
 	Logger types.Logger
 
 	// CheckInterval is the least time between two checks of the files.
-	// Zero means DefaultCheckInterval; it must not be negative.
+	// Zero means DefaultCheckInterval; it must not be negative. Tests that
+	// renew a certificate can set a very short interval (time.Nanosecond)
+	// instead of waiting.
 	CheckInterval time.Duration
 }
 

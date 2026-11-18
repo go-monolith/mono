@@ -115,6 +115,40 @@ func (ca *testCA) sign(t *testing.T, dir, name string, tmpl *x509.Certificate) (
 	return certFile, keyFile
 }
 
+// pool returns a pool with the CA.
+func (ca *testCA) pool() *x509.CertPool {
+	p := x509.NewCertPool()
+	p.AddCert(ca.cert)
+	return p
+}
+
+// intermediate returns a CA signed by ca.
+func (ca *testCA) intermediate(t *testing.T, cn string) *testCA {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber:          big.NewInt(time.Now().UnixNano()),
+		Subject:               pkix.Name{CommonName: cn},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(24 * time.Hour),
+		IsCA:                  true,
+		KeyUsage:              x509.KeyUsageCertSign,
+		BasicConstraintsValid: true,
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, ca.cert, &key.PublicKey, ca.key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cert, err := x509.ParseCertificate(der)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return &testCA{cert: cert, key: key, pem: pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})}
+}
+
 func (ca *testCA) write(t *testing.T, dir string) string {
 	t.Helper()
 	p := filepath.Join(dir, "ca.crt")

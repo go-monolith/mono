@@ -692,8 +692,9 @@ func WithNATSClusterAuth(username, password string) MonoFrameworkOption {
 // a NATS config file. Unreadable or invalid files, or a certificate not
 // signed by the CA in caFile for both TLS server and client use, make
 // NewMonoApplication fail when the embedded server starts. Any certificate
-// the CA signs can join the cluster: use a CA dedicated to the routes. The client listener is not affected
-// (see WithNATSAutoTLS).
+// the CA signs can join the cluster: use a CA dedicated to the routes. The
+// client listener is not affected (see WithNATSClientTLS and
+// WithNATSAutoTLS).
 //
 // Example:
 //
@@ -712,6 +713,66 @@ func WithNATSClusterTLS(certFile, keyFile, caFile string) MonoFrameworkOption {
 		cfg.NATSOptions.ClusterTLSCertFile = certFile
 		cfg.NATSOptions.ClusterTLSKeyFile = keyFile
 		cfg.NATSOptions.ClusterTLSCAFile = caFile
+		return nil
+	}
+}
+
+// WithNATSClientTLS makes the client listener (client-to-server
+// connections) require TLS with a certificate from files: CertFile/KeyFile
+// (PEM) is presented to clients, and with ClientCAFile set every client must
+// present a certificate signed by a CA in that file (mutual TLS). The
+// certificate must allow TLS server use and name the host clients dial, for
+// example the DNS name of a Kubernetes Service. A client that first connected
+// by host name verifies the servers of a cluster it discovers by IP address
+// against that host name, so the Service name covers the pods behind it.
+//
+// The certificate and key are read again when the files change (checked at
+// most every 10 seconds, on the next connection), so a renewed certificate,
+// such as a Kubernetes Secret updated by cert-manager, is used for new
+// connections without a restart; connections already established keep their
+// session. The client CA is read once: replacing it needs a restart (add the
+// new CA to the file next to the old one first, so clients with either keep
+// connecting). Clients renew their own certificate with
+// helper.NATSClientTLS.
+//
+// A client certificate authenticates a client but does not authorize it:
+// every client with a valid certificate gets the permissions of the account
+// it connects to (the global account unless a NATS config file defines
+// users), including JetStream and the service discovery subjects. Restrict
+// who can reach the port (a Kubernetes NetworkPolicy, for example) and who
+// gets a certificate.
+//
+// ClientCAFile must not share a CA with the routes (NewMonoApplication fails
+// if a client CA is, or chains to, a route CA, or the other way round):
+// every server accepts any certificate from the route CA as a cluster peer,
+// so a client holding one could join the cluster.
+//
+// The framework's own client connects in-process (as with WithNATSAutoTLS),
+// without TLS. Plaintext TCP clients are refused. It cannot be combined with
+// WithNATSAutoTLS, WithNATSDontListen, or a NATS config file with a
+// top-level tls {} block, allow_non_tls (it would let plaintext clients in)
+// or ocsp (stapling needs the certificate in the file's tls {} block). The
+// route CA check covers WithNATSClusterTLS and a config file's
+// cluster { tls {} } block alike. Unreadable or invalid files, a certificate that has expired or
+// does not allow server use make NewMonoApplication fail when the embedded
+// server starts. Routes are not affected (see WithNATSClusterTLS).
+//
+// Example:
+//
+//	mono.NewMonoApplication(
+//	    mono.WithNATSHost("0.0.0.0"),
+//	    mono.WithNATSClientTLS(types.ClientTLSConfig{
+//	        CertFile:     "/etc/nats-client-tls/tls.crt",
+//	        KeyFile:      "/etc/nats-client-tls/tls.key",
+//	        ClientCAFile: "/etc/nats-client-tls/ca.crt",
+//	    }),
+//	)
+func WithNATSClientTLS(clientTLS types.ClientTLSConfig) MonoFrameworkOption {
+	return func(cfg *types.MonoFrameworkConfig) error {
+		if err := clientTLS.Validate(); err != nil {
+			return errors.WrapInvalidConfiguration(0, "WithNATSClientTLS", clientTLS.CertFile, err.Error())
+		}
+		cfg.NATSOptions.ClientTLS = clientTLS.Clone()
 		return nil
 	}
 }

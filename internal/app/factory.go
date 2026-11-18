@@ -112,8 +112,15 @@ func buildNATSOptions(cfg types.NATSOptions) []nats.NATSOption {
 	// address, which cannot satisfy hostname verification against a
 	// public-domain certificate. Doing it here rather than inside the manager
 	// keeps the translated options an honest reflection of behaviour.
-	if cfg.UseInProcessConn || cfg.AutoTLS != nil {
+	// Client TLS forces it on as well: the framework's own client does not
+	// dial the TLS listener (it would need a certificate for the loopback
+	// address and, with client certificates required, one of its own).
+	if cfg.UseInProcessConn || cfg.AutoTLS != nil || cfg.ClientTLS != nil {
 		opts = append(opts, nats.WithInProcessConn())
+	}
+
+	if cfg.ClientTLS != nil {
+		opts = append(opts, nats.WithClientTLS(cfg.ClientTLS))
 	}
 
 	// Add AutoTLS (ACME) configuration if enabled
