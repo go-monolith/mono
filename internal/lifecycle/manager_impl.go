@@ -174,8 +174,8 @@ func (lm *lifecycleManager) forgetBoundaries(moduleName string) {
 	delete(lm.moduleBuses, moduleName)
 }
 
-// logBoundarySummary writes, at Stop, one Warn line per module and violation
-// kind and one Info line per declared dependency, and per consumed contract,
+// logBoundarySummary writes, at Stop, one Warn line per recorded violation
+// (module, kind, dependency and subject) and one Info line per declared dependency, and per consumed contract,
 // that was never looked up. A dependency declared only for start ordering and
 // a contract not called during this run are legitimate, hence Info.
 func (lm *lifecycleManager) logBoundarySummary() {

@@ -337,14 +337,25 @@ func WithShutdownTimeout(timeout time.Duration) MonoFrameworkOption {
 	}
 }
 
-// WithLogger sets a custom logger for the framework.
-// The logger cannot be nil.
+// WithLogger sets a custom logger for the framework, used instead of the
+// built-in one: the level, format, output and source options are then
+// ignored. The logger cannot be nil. WithLogger and WithCustomLogger are
+// equivalent; use either.
+//
+// The logger implements Logger, whose With, WithModule and WithError return a
+// Logger, so a *slog.Logger needs a small adapter.
 //
 // To enable NATS server logging, use WithNATSLogging in addition to this option.
 //
 // Example:
 //
-//	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+//	type slogLogger struct{ *slog.Logger }
+//
+//	func (l slogLogger) With(args ...any) mono.Logger    { return slogLogger{l.Logger.With(args...)} }
+//	func (l slogLogger) WithModule(m string) mono.Logger { return slogLogger{l.Logger.With("module", m)} }
+//	func (l slogLogger) WithError(err error) mono.Logger { return slogLogger{l.Logger.With("error", err)} }
+//
+//	logger := slogLogger{slog.New(slog.NewJSONHandler(os.Stdout, nil))}
 //	mono.NewMonoApplication(mono.WithLogger(logger))
 func WithLogger(logger types.Logger) MonoFrameworkOption {
 	return func(cfg *types.MonoFrameworkConfig) error {
@@ -452,7 +463,8 @@ func WithLogSource(enable bool) MonoFrameworkOption {
 
 // WithCustomLogger allows injection of a custom logger instance.
 // This bypasses the logger factory and uses the provided logger directly.
-// The logger cannot be nil.
+// The logger cannot be nil. It is equivalent to WithLogger, which shows how
+// to adapt a *slog.Logger.
 //
 // Example:
 //
@@ -584,8 +596,9 @@ func WithNATSClustering(clusterName, clusterHost string, clusterPort int, routes
 	}
 }
 
-// WithNATSServerName sets the name of the embedded NATS server (server_name),
-// which overrides server_name in a NATS config file.
+// WithNATSServerName sets the name of the embedded NATS server (server_name).
+// With a NATS config file that also sets server_name, the two must be equal
+// (see below).
 //
 // Clustered JetStream (WithNATSClustering together with JetStream) requires a
 // server name, and it must be:
@@ -609,8 +622,8 @@ func WithNATSClustering(clusterName, clusterHost string, clusterPort int, routes
 //
 // Renaming a JetStream server makes it a new peer, and the cluster removes the
 // local replicas assigned to the old name. When a NATS config file also sets
-// server_name, Start fails unless the two are equal, rather than renaming the
-// server silently.
+// server_name, NewMonoApplication (which starts the embedded server) fails
+// unless the two are equal, rather than renaming the server silently.
 //
 // Example:
 //
@@ -1059,8 +1072,8 @@ func WithDefaultServiceConcurrency(n int) MonoFrameworkOption {
 // complete every ConsumeServices() list (the default mode reports what is
 // missing) before turning the option on.
 //
-// Without it, the default, the call goes through, is warned once per module
-// and kind, and is reported by MonoApplication.ModuleBoundaries() and in the
+// Without it, the default, the call goes through, is warned once per module,
+// kind, dependency and subject, and is reported by MonoApplication.ModuleBoundaries() and in the
 // Stop log, so an existing application keeps working while the report shows
 // where its modules step outside their declared boundaries. Turn the option on
 // once the report is clean, and in tests.
