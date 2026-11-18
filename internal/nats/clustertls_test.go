@@ -9,7 +9,6 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
-	"errors"
 	"fmt"
 	"math/big"
 	"net"
@@ -184,102 +183,59 @@ func TestApplyClusterTLS(t *testing.T) {
 	}
 }
 
-func TestCertReloader(t *testing.T) {
+// TestApplyClusterTLS_CertificateChecks: the route certificate must allow
+// both TLS uses and chain to the route CA, and be valid now (the reloader of
+// pkg/certreload, configured for routes).
+func TestApplyClusterTLS_CertificateChecks(t *testing.T) {
 	dir := t.TempDir()
 	ca := newTestCA(t, "route-ca")
+	caFile := ca.write(t, dir)
 	other := newTestCA(t, "other-ca")
-	roots := x509.NewCertPool()
-	roots.AddCert(ca.cert)
-	certFile, keyFile := ca.issue(t, dir, "node", 10)
+	clustered := func() *server.Options { return &server.Options{Cluster: server.ClusterOpts{Port: 6222}} }
 
-	logger := &mockLogger{}
-	r, err := newCertReloader(certFile, keyFile, roots, logger)
-	if err != nil {
+	serverOnlyCert, serverOnlyKey := ca.issueWith(t, t.TempDir(), "server-only", 6, []net.IP{net.ParseIP("127.0.0.1")}, []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth})
+	otherCert, otherKey := other.issue(t, t.TempDir(), "node", 5)
+	expiredCert, expiredKey := ca.issueExpired(t, t.TempDir(), "node", 7)
+	for _, tt := range []struct {
+		name, cert, key, want string
+	}{
+		{"server use only", serverOnlyCert, serverOnlyKey, "certificate is not valid for TLS client use with the route CA"},
+		{"another CA", otherCert, otherKey, "with the route CA"},
+		{"expired", expiredCert, expiredKey, "certificate has expired"},
+	} {
+		t.Run("rejects "+tt.name, func(t *testing.T) {
+			err := applyClusterTLS(clustered(), tt.cert, tt.key, caFile, nil)
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("err = %v, want %q", err, tt.want)
+			}
+		})
+	}
+
+	// On reload, a certificate from another CA is refused with the route
+	// wording, and the previous one is kept.
+	old := clusterTLSCheckInterval
+	clusterTLSCheckInterval = time.Nanosecond
+	t.Cleanup(func() { clusterTLSCheckInterval = old })
+	certFile, keyFile := ca.issue(t, dir, "node", 10)
+	logger := newMockLogger()
+	opts := clustered()
+	if err := applyClusterTLS(opts, certFile, keyFile, caFile, logger); err != nil {
 		t.Fatal(err)
 	}
-	clock := r.checked
-	r.now = func() time.Time { return clock }
-	serial := func() int64 {
-		t.Helper()
-		c, err := r.current()
-		if err != nil {
-			t.Fatal(err)
-		}
-		return c.Leaf.SerialNumber.Int64()
-	}
-	next := func() { clock = clock.Add(clusterTLSCheckInterval) }
-	if s := serial(); s != 10 {
-		t.Fatalf("serial = %d, want 10", s)
-	}
-
-	// A renewed certificate from the same CA.
-	ca.issue(t, dir, "node", 11)
-	if s := serial(); s != 10 {
-		t.Errorf("within the check interval the old certificate is kept, got %d", s)
-	}
-	next()
-	if s := serial(); s != 11 {
-		t.Errorf("after the interval the renewed certificate is served, got %d", s)
-	}
-
-	// The same content written again (a sync that rewrites files): no reload.
-	reloads := len(logger.infoCalls)
-	data, _ := os.ReadFile(certFile)
-	writeFile(t, certFile, data)
-	next()
-	if s := serial(); s != 11 || len(logger.infoCalls) != reloads {
-		t.Errorf("unchanged content reloaded: serial %d, info lines %d -> %d", s, reloads, len(logger.infoCalls))
-	}
-
-	// A half-written update (key not matching) keeps the previous certificate.
-	writeFile(t, keyFile, []byte("not a key"))
-	next()
-	if s := serial(); s != 11 {
-		t.Errorf("a failed reload must keep the previous certificate, got %d", s)
-	}
-
-	// A certificate from another CA is refused: peers trust only the route CA.
 	other.issue(t, dir, "node", 99)
-	next()
-	if s := serial(); s != 11 {
-		t.Errorf("a certificate from another CA must not be served, got %d", s)
+	cert, err := opts.Cluster.TLSConfig.GetCertificate(&tls.ClientHelloInfo{})
+	if err != nil || cert.Leaf.SerialNumber.Int64() != 10 {
+		t.Fatalf("serial = %v, err = %v; want the previous certificate", cert.Leaf.SerialNumber, err)
 	}
-	if !strings.Contains(strings.Join(logger.warnCalls, "|"), "Could not reload the cluster TLS certificate") {
+	if !logger.hasMessage("WARN", "Could not reload the cluster TLS certificate; keeping the previous one") {
 		t.Errorf("warn lines = %v", logger.warnCalls)
 	}
-
-	// Once a valid certificate is in place again, the next check loads it.
-	ca.issue(t, dir, "node", 12)
-	next()
-	if s := serial(); s != 12 {
-		t.Errorf("serial = %d, want 12 after the update completed", s)
+	ca.issue(t, dir, "node", 11)
+	if cert, _ := opts.Cluster.TLSConfig.GetClientCertificate(&tls.CertificateRequestInfo{}); cert.Leaf.SerialNumber.Int64() != 11 {
+		t.Errorf("serial = %v, want the renewed certificate", cert.Leaf.SerialNumber)
 	}
-
-	// A certificate for server use only is refused: the routes this server
-	// opens would fail, since peers verify client certificates.
-	sc, sk := ca.issueWith(t, t.TempDir(), "server-only", 6, []net.IP{net.ParseIP("127.0.0.1")}, []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth})
-	if _, err := newCertReloader(sc, sk, roots, nil); err == nil || !strings.Contains(err.Error(), "TLS client use") {
-		t.Errorf("server-only certificate: err = %v, want a client use error", err)
-	}
-
-	// An expired certificate (an issuer that stopped renewing) is refused on
-	// reload, keeping the previous one, and at start.
-	warns := len(logger.warnCalls)
-	ca.issueExpired(t, dir, "node", 13)
-	next()
-	if s := serial(); s != 12 || len(logger.warnCalls) != warns+1 {
-		t.Errorf("an expired certificate must not be served: serial %d, warn lines %d -> %d", s, warns, len(logger.warnCalls))
-	}
-	ec, ek := ca.issueExpired(t, t.TempDir(), "node", 7)
-	var invalid x509.CertificateInvalidError
-	if _, err := newCertReloader(ec, ek, roots, nil); !errors.As(err, &invalid) || invalid.Reason != x509.Expired {
-		t.Errorf("expired certificate at start: err = %v, want an expiry error", err)
-	}
-
-	// At start, a certificate from another CA is an error.
-	oc, ok := other.issue(t, t.TempDir(), "node", 5)
-	if _, err := newCertReloader(oc, ok, roots, nil); err == nil || !strings.Contains(err.Error(), "with the route CA") {
-		t.Errorf("err = %v, want a route CA error", err)
+	if !logger.hasMessage("INFO", "Reloaded the cluster TLS certificate") || !logger.hasMessage("INFO", "Cluster TLS enabled") {
+		t.Errorf("info lines = %v", logger.infoCalls)
 	}
 }
 
@@ -288,7 +244,7 @@ func TestCertReloader(t *testing.T) {
 // another CA is refused without breaking the cluster.
 func TestClusterTLS_LiveRenewal(t *testing.T) {
 	old := clusterTLSCheckInterval
-	clusterTLSCheckInterval = 0
+	clusterTLSCheckInterval = time.Nanosecond
 	t.Cleanup(func() { clusterTLSCheckInterval = old })
 
 	dir := t.TempDir()
