@@ -101,8 +101,24 @@ func main() {
 `WithNATSClusterAuth(username, password)` makes every server require the credentials from incoming routes, and adds them to every route URL that has none (nats-server only sends the credentials written in a route URL). It applies to config-file routes as well. Credentials are redacted from the framework's logs and errors.
 
 - Load the password from a secret, never from code.
-- The credentials are only safe on a trusted network unless the routes also use TLS (a `cluster { tls { ... } }` block in a config file).
+- The credentials are only safe on a trusted network unless the routes also use TLS (see [Route TLS](#route-tls)).
 - Limit who can reach the route port at all, for example with a NetworkPolicy.
+
+## Route TLS
+
+`WithNATSClusterTLS(certFile, keyFile, caFile)` makes every route use mutual TLS: each server presents its certificate, requires one from every peer, and accepts only certificates signed by the route CA. Combine it with `WithNATSClusterAuth`: TLS encrypts the routes and authenticates peers by certificate, and the password is checked on top.
+
+```go
+mono.WithNATSClusterTLS("/etc/nats-route-tls/tls.crt", "/etc/nats-route-tls/tls.key", "/etc/nats-route-tls/ca.crt")
+```
+
+- **Certificate.** A server checks that a peer it dials presents a certificate for the route URL's host, so give the certificate a DNS name for every route host. In Kubernetes one wildcard certificate for `*.<headless-service>.<namespace>.svc.cluster.local` covers every pod. It must allow both TLS server and client use, since each server is both on routes.
+- **A dedicated CA.** Any certificate the route CA signs (for both server and client use) can join the cluster, so use a CA only for these routes, not a shared internal CA.
+- **Issuing it.** Use a private CA: cert-manager (a CA `Issuer` and a `Certificate` with the `server auth` and `client auth` usages), or a script with `openssl`. The [Kubernetes cluster example](../../../examples/k8s-cluster/README.md) has both.
+- **Renewal.** A renewed certificate is picked up for new routes without a restart (the files are checked at most every 10 seconds); routes already established keep their session, also past the expiry of the certificate they started with. A new CA needs a restart of every server.
+- **Lifetime.** Since renewal needs no restart, the certificate can be short-lived: the example's cert-manager manifest issues 24-hour certificates renewed every 8 hours. The time left when it is renewed is how long the issuer may be unavailable: a server whose certificate has expired cannot start, and its peers refuse it.
+- **Turning it on.** Servers with and without route TLS cannot route to each other. Switch every server at once (a brief loss of JetStream while they restart), or move to a TLS cluster with a blue-green cutover.
+- **Alternatives.** A `cluster { tls { … } }` block in a NATS config file does the same (it cannot be combined with the option), and a service mesh or an encrypting CNI can encrypt the traffic without either.
 
 ## Operator Access (System Account)
 
@@ -264,6 +280,7 @@ The sleep counts toward `terminationGracePeriodSeconds`, so the grace period mus
 - [ ] A stable, unique server name per server (`WithNATSServerName`, from the StatefulSet pod name)
 - [ ] The same route list on every server, all servers included, with fully qualified names
 - [ ] Route authentication (`WithNATSClusterAuth`) with the password from a Secret
+- [ ] Route TLS (`WithNATSClusterTLS`) unless the network between the servers is trusted
 - [ ] `WithJetStreamDefaultReplicas(3)` (and `Replicas` on streams and cron services that set their own)
 - [ ] An odd number of servers, one per node, with a PodDisruptionBudget
 - [ ] A liveness probe that never depends on JetStream; readiness may include `JetStream.Available`

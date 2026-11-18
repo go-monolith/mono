@@ -195,3 +195,24 @@ func TestWithNATSSystemAccount(t *testing.T) {
 		}
 	}
 }
+
+func TestWithNATSClusterTLS(t *testing.T) {
+	cfg := mono.DefaultConfig()
+	if err := mono.WithNATSClusterTLS("c.crt", "c.key", "ca.crt")(cfg); err != nil {
+		t.Fatal(err)
+	}
+	o := cfg.NATSOptions
+	if o.ClusterTLSCertFile != "c.crt" || o.ClusterTLSKeyFile != "c.key" || o.ClusterTLSCAFile != "ca.crt" {
+		t.Errorf("NATSOptions = %+v", o)
+	}
+	for _, tc := range []struct{ cert, key, ca, want string }{
+		{"", "k", "ca", "certificate file cannot be empty"},
+		{"c", "", "ca", "key file cannot be empty"},
+		{"c", "k", "", "CA file cannot be empty"},
+	} {
+		err := mono.WithNATSClusterTLS(tc.cert, tc.key, tc.ca)(mono.DefaultConfig())
+		if err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("(%q, %q, %q): err = %v, want %q", tc.cert, tc.key, tc.ca, err, tc.want)
+		}
+	}
+}

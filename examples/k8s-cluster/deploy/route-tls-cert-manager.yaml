@@ -1,0 +1,87 @@
+# Route TLS for the k8s-cluster example, issued and renewed by cert-manager
+# (https://cert-manager.io), as an alternative to create-route-tls-secret.sh.
+#
+#   kubectl apply -f examples/k8s-cluster/deploy/route-tls-cert-manager.yaml
+#
+# It creates a private CA for the routes and a certificate for every pod of
+# the StatefulSet in the Secret mono-cluster-route-tls (tls.crt, tls.key and
+# ca.crt), the Secret the StatefulSet mounts. The certificate is short-lived
+# (24 hours) and renewed every 8 hours with a new key; the running servers pick
+# up the renewed certificate for new routes within 10 seconds of the kubelet
+# updating the files, without a restart. A change of CA needs a restart of
+# every pod.
+#
+# Requires cert-manager installed in the cluster. When the Secret already
+# exists (created by create-route-tls-secret.sh), delete it before applying
+# this file: cert-manager adopts a valid existing certificate as it is, and
+# would renew it only shortly before it expires.
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: mono-cluster-selfsigned
+  namespace: mono-demo
+spec:
+  selfSigned: {}
+---
+# The route CA, signed by itself.
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: mono-cluster-route-ca
+  namespace: mono-demo
+spec:
+  isCA: true
+  commonName: mono-cluster route CA
+  secretName: mono-cluster-route-ca
+  duration: 87600h # 10 years
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+    # Keep the CA key when the CA certificate is renewed: running servers
+    # read the CA once and refuse leaf certificates from another CA.
+    rotationPolicy: Never
+  issuerRef:
+    name: mono-cluster-selfsigned
+    kind: Issuer
+---
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: mono-cluster-route-ca
+  namespace: mono-demo
+spec:
+  ca:
+    secretName: mono-cluster-route-ca
+---
+# One certificate for every pod: the route URLs use the pods' fully qualified
+# names under the headless Service, and each server is both TLS server (routes
+# it accepts) and client (routes it opens).
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: mono-cluster-route-tls
+  namespace: mono-demo
+spec:
+  secretName: mono-cluster-route-tls
+  dnsNames:
+    - "*.mono-cluster-nats.mono-demo.svc.cluster.local"
+  usages:
+    - server auth
+    - client auth
+    - digital signature
+  # Short-lived: a stolen key is useful for at most a day. renewBefore is
+  # the time cert-manager may be unavailable before the certificate expires:
+  # a server that starts with an expired certificate fails, and peers refuse
+  # it on every new route (established routes stay up). cert-manager accepts
+  # a duration down to 1h and a renewBefore down to 5m; a renewed Secret
+  # reaches the pods after the kubelet's sync (about a minute) plus at most
+  # 10 seconds.
+  duration: 24h
+  renewBefore: 16h   # renewed every 8 hours
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+    rotationPolicy: Always
+  issuerRef:
+    name: mono-cluster-route-ca
+    kind: Issuer
