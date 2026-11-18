@@ -1,0 +1,36 @@
+# Who may reach the NATS ports of the k8s-cluster example:
+#   6222 (routes)  only the servers (app=mono-cluster)
+#   4222 (clients) only the client pods (app=mono-greeter-client)
+#   8080 (HTTP)    anyone, as before
+# TLS already refuses a peer without a certificate from the right CA; the
+# policy also keeps everyone else from reaching the ports at all, since a
+# client certificate authenticates a client but does not limit what it may do.
+#
+#   kubectl apply -f examples/k8s-cluster/deploy/network-policy.yaml
+#
+# Requires a network plugin that enforces NetworkPolicy.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: mono-cluster
+  namespace: mono-demo
+spec:
+  podSelector:
+    matchLabels:
+      app: mono-cluster
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: mono-cluster
+      ports:
+        - port: 6222
+    - from:
+        - podSelector:
+            matchLabels:
+              app: mono-greeter-client
+      ports:
+        - port: 4222
+    - ports:
+        - port: 8080

@@ -11,10 +11,14 @@ COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
 RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" \
-    -o /out/k8s-cluster ./examples/k8s-cluster
+    -o /out/k8s-cluster ./examples/k8s-cluster && \
+    CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" \
+    -o /out/k8s-cluster-client ./examples/k8s-cluster/client
 
 FROM gcr.io/distroless/static-debian12:nonroot
 COPY --from=build /out/k8s-cluster /k8s-cluster
+# The client of deploy/client.yaml (command: /k8s-cluster-client).
+COPY --from=build /out/k8s-cluster-client /k8s-cluster-client
 # 4222 NATS clients, 6222 NATS cluster routes, 8222 NATS monitoring, 8080 HTTP API
 EXPOSE 4222 6222 8222 8080
 USER nonroot:nonroot
