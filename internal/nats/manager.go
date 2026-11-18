@@ -167,6 +167,20 @@ func (m *natsManager) Start(ctx context.Context) error {
 		if !m.config.PortSet && opts.Port != 0 {
 			m.config.Port = opts.Port
 		}
+
+		// JetStream enabled by a jetstream{} block is treated as if it was
+		// enabled by WithJetStream: the client, the log, the consumer
+		// protection pass, JetStream() and ServerInfo all follow it. The
+		// file's store_dir and domain are kept unless they were given
+		// programmatically (WithJetStream with a directory enables JetStream
+		// itself and overrides store_dir below).
+		if opts.JetStream && !m.config.JetStreamEnabled {
+			m.config.JetStreamEnabled = true
+			m.config.StorageDir = opts.StoreDir
+		}
+		if m.config.JetStreamDomain == "" {
+			m.config.JetStreamDomain = opts.JetStreamDomain
+		}
 	} else {
 		opts = &server.Options{}
 	}
