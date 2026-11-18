@@ -145,7 +145,7 @@ Use it only when the application does not need the JetStream data to move (cache
 
 ### Joined cluster
 
-Green uses the same NATS cluster name and route credentials, and its route list includes every blue and green pod. Blue's servers learn green's routes from the cluster, so blue needs no change.
+Green uses the same NATS cluster name and route credentials (and, with route TLS, a certificate from the same route CA), and its route list includes every blue and green pod. Blue's servers learn green's routes from the cluster, so blue needs no change.
 
 {% hint style="warning" %}
 **Joining moves work, not the Service flip.** As soon as green's servers join, green's instances join the same queue groups, fetch from the same durable consumers and receive cron occurrences. In the test, green answered 20 of 138 `hello` calls before the Service was flipped. The flip only moves HTTP ingress. Treat the overlap like a rolling update: both versions must be compatible.

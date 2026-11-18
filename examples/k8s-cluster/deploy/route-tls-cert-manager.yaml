@@ -1,0 +1,76 @@
+# Route TLS for the k8s-cluster example, issued and renewed by cert-manager
+# (https://cert-manager.io), as an alternative to create-route-tls-secret.sh.
+#
+#   kubectl apply -f examples/k8s-cluster/deploy/route-tls-cert-manager.yaml
+#
+# It creates a private CA for the routes and a certificate for every pod of
+# the StatefulSet in the Secret mono-cluster-route-tls (tls.crt, tls.key and
+# ca.crt), the Secret the StatefulSet mounts. cert-manager renews the
+# certificate before it expires; the running servers pick up the renewed
+# certificate for new routes without a restart. A change of CA needs a
+# restart of every pod.
+#
+# Requires cert-manager installed in the cluster.
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: mono-cluster-selfsigned
+  namespace: mono-demo
+spec:
+  selfSigned: {}
+---
+# The route CA, signed by itself.
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: mono-cluster-route-ca
+  namespace: mono-demo
+spec:
+  isCA: true
+  commonName: mono-cluster route CA
+  secretName: mono-cluster-route-ca
+  duration: 87600h # 10 years
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+    # Keep the CA key when the CA certificate is renewed: running servers
+    # read the CA once and refuse leaf certificates from another CA.
+    rotationPolicy: Never
+  issuerRef:
+    name: mono-cluster-selfsigned
+    kind: Issuer
+---
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: mono-cluster-route-ca
+  namespace: mono-demo
+spec:
+  ca:
+    secretName: mono-cluster-route-ca
+---
+# One certificate for every pod: the route URLs use the pods' fully qualified
+# names under the headless Service, and each server is both TLS server (routes
+# it accepts) and client (routes it opens).
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: mono-cluster-route-tls
+  namespace: mono-demo
+spec:
+  secretName: mono-cluster-route-tls
+  dnsNames:
+    - "*.mono-cluster-nats.mono-demo.svc.cluster.local"
+  usages:
+    - server auth
+    - client auth
+    - digital signature
+  duration: 2160h    # 90 days
+  renewBefore: 360h  # 15 days
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+    rotationPolicy: Always
+  issuerRef:
+    name: mono-cluster-route-ca
+    kind: Issuer

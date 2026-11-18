@@ -156,6 +156,9 @@ func buildNATSOptions(cfg types.NATSOptions) []nats.NATSOption {
 	if cfg.ClusterUsername != "" || cfg.ClusterPassword != "" {
 		opts = append(opts, nats.WithClusterAuth(cfg.ClusterUsername, cfg.ClusterPassword))
 	}
+	if cfg.ClusterTLSCertFile != "" || cfg.ClusterTLSKeyFile != "" || cfg.ClusterTLSCAFile != "" {
+		opts = append(opts, nats.WithClusterTLS(cfg.ClusterTLSCertFile, cfg.ClusterTLSKeyFile, cfg.ClusterTLSCAFile))
+	}
 	if cfg.SystemAccountUsername != "" || cfg.SystemAccountPassword != "" {
 		opts = append(opts, nats.WithSystemAccount(cfg.SystemAccountUsername, cfg.SystemAccountPassword))
 	}

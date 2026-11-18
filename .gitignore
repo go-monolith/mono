@@ -71,3 +71,6 @@ examples/*/analytics
 examples/*/basic
 examples/*/multi-module
 examples/*/cron-scheduler
+
+# Route CA created by examples/k8s-cluster/deploy/create-route-tls-secret.sh (private key)
+route-ca/

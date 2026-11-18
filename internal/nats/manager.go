@@ -251,6 +251,9 @@ func (m *natsManager) Start(ctx context.Context) error {
 	if err := applyClusterAuth(opts, m.config.ClusterUsername, m.config.ClusterPassword); err != nil {
 		return err
 	}
+	if err := applyClusterTLS(opts, m.config.ClusterTLSCertFile, m.config.ClusterTLSKeyFile, m.config.ClusterTLSCAFile, m.logger); err != nil {
+		return err
+	}
 	if m.config.SystemAccountUsername != "" || m.config.SystemAccountPassword != "" {
 		authBlock := false
 		if m.config.ConfigFile != "" {
@@ -325,6 +328,9 @@ func (m *natsManager) Start(ctx context.Context) error {
 			"cluster_port", m.config.ClusterPort,
 			"cluster_routes", redactURLs(m.config.ClusterRoutes),
 		)
+	}
+	if opts.Cluster.TLSConfig != nil {
+		logAttrs = append(logAttrs, "cluster_tls", true)
 	}
 	m.logger.Info("NATS server started", logAttrs...)
 

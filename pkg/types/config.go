@@ -157,8 +157,14 @@ type NATSOptions struct {
 	// account user.
 	SystemAccountUsername string
 	SystemAccountPassword string
-	MaxPayload            int32         // Maximum NATS message payload size
-	StartupReadyTimeout   time.Duration // Maximum time to wait for NATS server readiness (default: 10s)
+	// ClusterTLSCertFile, ClusterTLSKeyFile and ClusterTLSCAFile make the
+	// cluster routes use mutual TLS (WithNATSClusterTLS). Empty means the
+	// routes use no TLS unless the config file says otherwise.
+	ClusterTLSCertFile  string
+	ClusterTLSKeyFile   string
+	ClusterTLSCAFile    string
+	MaxPayload          int32         // Maximum NATS message payload size
+	StartupReadyTimeout time.Duration // Maximum time to wait for NATS server readiness (default: 10s)
 	// NATS server logging flags (passed to SetLoggerV2)
 	LogDebug    bool // If true, enables debug-level NATS server logging
 	LogTrace    bool // If true, enables trace-level NATS server logging

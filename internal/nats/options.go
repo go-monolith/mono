@@ -39,7 +39,12 @@ type NATSConfig struct {
 	// system account ($SYS); empty adds none. See applySystemAccount.
 	SystemAccountUsername string
 	SystemAccountPassword string
-	MaxPayload            int32
+	// ClusterTLSCertFile, ClusterTLSKeyFile and ClusterTLSCAFile make the
+	// routes use mutual TLS; empty adds none. See applyClusterTLS.
+	ClusterTLSCertFile string
+	ClusterTLSKeyFile  string
+	ClusterTLSCAFile   string
+	MaxPayload         int32
 	// StartupReadyTimeout is the maximum time to wait for the NATS server to be ready for connections.
 	// Defaults to 10 seconds.
 	StartupReadyTimeout time.Duration
@@ -253,6 +258,20 @@ func WithSystemAccount(username, password string) NATSOption {
 		}
 		cfg.SystemAccountUsername = username
 		cfg.SystemAccountPassword = password
+		return nil
+	}
+}
+
+// WithClusterTLS makes the cluster routes use mutual TLS with the given
+// certificate, key and CA files. None may be empty.
+func WithClusterTLS(certFile, keyFile, caFile string) NATSOption {
+	return func(cfg *NATSConfig) error {
+		if certFile == "" || keyFile == "" || caFile == "" {
+			return fmt.Errorf("cluster TLS certificate, key and CA files cannot be empty")
+		}
+		cfg.ClusterTLSCertFile = certFile
+		cfg.ClusterTLSKeyFile = keyFile
+		cfg.ClusterTLSCAFile = caFile
 		return nil
 	}
 }

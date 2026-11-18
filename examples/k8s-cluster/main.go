@@ -4,7 +4,8 @@
 //
 // Every replica runs the same configuration: its server name (POD_NAME, unique
 // and stable in a StatefulSet), the routes to all replicas (NATS_ROUTES), the
-// route password (NATS_ROUTE_PASSWORD), the password of the system account
+// route password (NATS_ROUTE_PASSWORD), the directory of the route TLS
+// certificate (NATS_ROUTE_TLS_DIR, optional: tls.crt, tls.key, ca.crt), the password of the system account
 // user "admin" (NATS_SYSTEM_PASSWORD, optional) and the replicas of the framework's
 // streams (JS_REPLICAS). Start waits for the other replicas, so they can start
 // together. An HTTP API on HTTP_ADDR exposes:
@@ -32,6 +33,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -54,6 +56,7 @@ type config struct {
 	routes        []string
 	routePassword string
 	systemPass    string
+	routeTLSDir   string
 	storeDir      string
 	replicas      int
 	readyTimeout  time.Duration
@@ -67,6 +70,7 @@ func loadConfig() (config, error) {
 		clusterName:   envOr("NATS_CLUSTER_NAME", "mono-demo"),
 		routePassword: os.Getenv("NATS_ROUTE_PASSWORD"),
 		systemPass:    os.Getenv("NATS_SYSTEM_PASSWORD"),
+		routeTLSDir:   os.Getenv("NATS_ROUTE_TLS_DIR"),
 		storeDir:      envOr("JS_STORE_DIR", "/data/jetstream"),
 		httpAddr:      envOr("HTTP_ADDR", ":8080"),
 		natsDebug:     os.Getenv("NATS_DEBUG") == "true",
@@ -132,6 +136,16 @@ func run() error {
 	}
 	if cfg.routePassword != "" {
 		opts = append(opts, mono.WithNATSClusterAuth("route", cfg.routePassword))
+	}
+	if cfg.routeTLSDir != "" {
+		// Mutual TLS on the routes: tls.crt/tls.key/ca.crt as a Kubernetes
+		// TLS Secret (or cert-manager) mounts them. A renewed certificate is
+		// picked up without a restart.
+		opts = append(opts, mono.WithNATSClusterTLS(
+			filepath.Join(cfg.routeTLSDir, "tls.crt"),
+			filepath.Join(cfg.routeTLSDir, "tls.key"),
+			filepath.Join(cfg.routeTLSDir, "ca.crt"),
+		))
 	}
 	if cfg.systemPass != "" {
 		// A system account user for operator tooling (nats server report,

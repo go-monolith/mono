@@ -1,7 +1,9 @@
 # Three replicas of the k8s-cluster example, one per node, whose embedded NATS
 # servers form one cluster with clustered JetStream.
 #
-#   examples/k8s-cluster/deploy/create-route-secret.sh      # route password
+#   examples/k8s-cluster/deploy/create-route-secret.sh      # route and system passwords
+#   examples/k8s-cluster/deploy/create-route-tls-secret.sh  # route TLS certificate
+#     (or, with cert-manager: kubectl apply -f examples/k8s-cluster/deploy/route-tls-cert-manager.yaml)
 #   kubectl apply -f examples/k8s-cluster/deploy/k8s.yaml
 #
 # Three servers with JS_REPLICAS=3 keep JetStream available while one pod is
@@ -11,8 +13,9 @@
 # servers.
 #
 # Exposure: the NATS client listener is bound to loopback (the application's
-# own client connects in-process), and routes require the password in the
-# Secret. To restrict who may connect to 6222 at all, add a NetworkPolicy that
+# own client connects in-process). Routes use mutual TLS with the certificate
+# in the Secret mono-cluster-route-tls and require the password in the Secret
+# mono-cluster-routes. To restrict who may connect to 6222 at all, add a NetworkPolicy that
 # allows it only from app=mono-cluster pods.
 apiVersion: v1
 kind: Namespace
@@ -123,6 +126,12 @@ spec:
                   name: mono-cluster-routes
                   key: system-password
                   optional: true
+            # Mutual TLS on the routes (WithNATSClusterTLS): the certificate,
+            # key and CA from the Secret mono-cluster-route-tls, created by
+            # deploy/create-route-tls-secret.sh or by cert-manager
+            # (deploy/route-tls-cert-manager.yaml).
+            - name: NATS_ROUTE_TLS_DIR
+              value: /etc/nats-route-tls
             # Replicas of the framework's streams (visits, cron schedule).
             - name: JS_REPLICAS
               value: "3"
@@ -179,6 +188,18 @@ spec:
           volumeMounts:
             - name: data
               mountPath: /data
+            - name: route-tls
+              mountPath: /etc/nats-route-tls
+              readOnly: true
+      volumes:
+        # tls.crt, tls.key and ca.crt. A renewed certificate is picked up by
+        # the running servers (the kubelet swaps the Secret's files when the
+        # Secret changes). Without the Secret the pods stay in
+        # ContainerCreating: create it first.
+        - name: route-tls
+          secret:
+            secretName: mono-cluster-route-tls
+            defaultMode: 0440
   # JetStream data on a per-pod volume (the cluster's default StorageClass), so a
   # restarted pod rejoins with its stream replicas instead of resyncing them.
   volumeClaimTemplates:

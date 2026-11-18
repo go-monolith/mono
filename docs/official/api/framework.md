@@ -252,6 +252,7 @@ All framework configuration is done through functional options passed to `NewMon
 | [`WithNATSClustering`](#withnatsclustering) | Join a NATS cluster | off |
 | [`WithNATSServerName`](#withnatsservername) | Server name (required for clustered JetStream) | config file or nats-server default |
 | [`WithNATSClusterAuth`](#withnatsclusterauth) | Route credentials | routes not authenticated |
+| [`WithNATSClusterTLS`](#withnatsclustertls) | Mutual TLS on the routes | routes without TLS |
 | [`WithNATSSystemAccount`](#withnatssystemaccount) | System account user for operator tooling | none |
 | [`WithNATSClientName`](#withnatsclientname) | Name of the framework's client connection | `"mono"` |
 | [`WithNATSClientOptions`](#withnatsclientoptions) | Extra nats.go client options | none |
@@ -517,7 +518,35 @@ mono.WithNATSClusterAuth("route", os.Getenv("NATS_ROUTE_PASSWORD"))
 - nats-server only sends the credentials written in a route's URL, so the framework adds them to every route URL that has none, from `WithNATSClustering` and from a config file alike.
 - They replace the user and password of a config file's `cluster.authorization` block.
 - The credentials are redacted from the framework's logs and errors. Load the password from a secret, never from code.
-- The credentials are only safe on a trusted network unless the route listener also uses TLS, which a `cluster{}` block in a NATS config file can configure.
+- The credentials are only safe on a trusted network unless the routes also use TLS: see [`WithNATSClusterTLS`](#withnatsclustertls).
+
+#### WithNATSClusterTLS
+
+```go
+func WithNATSClusterTLS(certFile, keyFile, caFile string) MonoFrameworkOption
+```
+
+Makes the routes between the servers of a cluster use mutual TLS: each server presents its certificate, requires one from every peer, and accepts only peers whose certificate is signed by the CA in `caFile`.
+
+| Property | Value |
+|----------|-------|
+| Type | `string`, `string`, `string` (PEM files: certificate, key, CA) |
+| Default | (empty: routes use no TLS unless the config file has a `cluster { tls {} }` block) |
+| Constraints | None empty; requires clustering; not combined with a `cluster { tls {} }` block in a NATS config file |
+| Error | Unreadable or invalid files, or a certificate not signed by the CA in `caFile`, make `NewMonoApplication` fail when the embedded server starts |
+
+**Example:**
+```go
+mono.WithNATSClustering("orders", "0.0.0.0", 6222, routes)
+mono.WithNATSClusterTLS("/etc/nats-route-tls/tls.crt", "/etc/nats-route-tls/tls.key", "/etc/nats-route-tls/ca.crt")
+```
+
+- **Certificate names.** On a route it opens, a server also checks that the peer's certificate matches the route URL's host. The certificate needs a DNS name (or IP address) for every route host, for example `*.<headless-service>.<namespace>.svc.cluster.local` in Kubernetes. Each server is both TLS server and client on routes, so the certificate must allow both uses (extended key usages `serverAuth` and `clientAuth`, or none).
+- **Renewal without a restart.** The certificate and key are read again when the files change, checked at most every 10 seconds on the next route handshake. A renewed certificate (a Kubernetes Secret updated by cert-manager, for example) is used for new routes, and routes already established keep their session. The framework logs `Reloaded the cluster TLS certificate`. A file that cannot be loaded (for example half-written), or a certificate that is not signed by the route CA, keeps the previous certificate and is retried; a certificate from another CA would otherwise break every route that reconnects. A change of CA needs a restart.
+- **Expiry monitoring.** nats-server's `/varz` cannot report the expiry of a certificate served this way (`cluster.tls_cert_not_after` is absent). The framework logs it instead: `Cluster TLS enabled` at start and `Reloaded the cluster TLS certificate` on renewal, both with `not_after`.
+- **With route credentials.** It combines with [`WithNATSClusterAuth`](#withnatsclusterauth): TLS encrypts the routes and authenticates peers by certificate, and the password is checked on top.
+- **All servers must agree.** A server with route TLS and one without cannot route to each other, so turning it on (or off) for a running cluster takes a restart of every server at once, or a blue-green cutover.
+- The client listener is not affected; see [`WithNATSAutoTLS`](#withnatsautotls). The startup log line `NATS server started` carries `cluster_tls=true`.
 
 #### WithNATSSystemAccount
 

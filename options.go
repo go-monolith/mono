@@ -666,6 +666,55 @@ func WithNATSClusterAuth(username, password string) MonoFrameworkOption {
 	}
 }
 
+// WithNATSClusterTLS makes the routes between the servers of a cluster use
+// mutual TLS. Each server presents certFile/keyFile (PEM), requires a
+// certificate from every peer, and accepts only peers whose certificate is
+// signed by the CA in caFile. On a route it opens, the peer's certificate must
+// also match the route URL's host, so the certificate needs a DNS name (or IP
+// SAN) for every route host, for example the wildcard
+// *.<headless-service>.<namespace>.svc.cluster.local in Kubernetes. Usable as
+// both server and client: include both extended key usages (or none).
+//
+// The certificate and key are read again when the files change (checked at
+// most every 10 seconds, on the next route handshake), so a renewed
+// certificate, such as a Kubernetes Secret updated by cert-manager, is used
+// for new routes without a restart; routes already established keep their
+// session. A change of CA needs a restart.
+//
+// Route TLS and WithNATSClusterAuth combine: TLS encrypts the routes and
+// authenticates peers by certificate, the password is checked on top. All
+// servers of a cluster must agree: a server with TLS and one without cannot
+// route to each other, so turning it on for a running cluster takes a restart
+// of every server (or a blue-green cutover).
+//
+// Requires clustering (WithNATSClustering or a config file); none of the
+// paths may be empty. It cannot be combined with a cluster { tls {} } block in
+// a NATS config file. Unreadable or invalid files, or a certificate not
+// signed by the CA in caFile, make NewMonoApplication fail when the embedded
+// server starts. The client listener is not affected
+// (see WithNATSAutoTLS).
+//
+// Example:
+//
+//	mono.NewMonoApplication(
+//	    mono.WithNATSClustering("orders", "0.0.0.0", 6222, routes),
+//	    mono.WithNATSClusterTLS("/etc/nats-route-tls/tls.crt", "/etc/nats-route-tls/tls.key", "/etc/nats-route-tls/ca.crt"),
+//	)
+func WithNATSClusterTLS(certFile, keyFile, caFile string) MonoFrameworkOption {
+	return func(cfg *types.MonoFrameworkConfig) error {
+		for _, f := range []struct{ name, value string }{{"certificate", certFile}, {"key", keyFile}, {"CA", caFile}} {
+			if f.value == "" {
+				return errors.WrapInvalidConfiguration(0, "WithNATSClusterTLS", "",
+					"cluster TLS "+f.name+" file cannot be empty")
+			}
+		}
+		cfg.NATSOptions.ClusterTLSCertFile = certFile
+		cfg.NATSOptions.ClusterTLSKeyFile = keyFile
+		cfg.NATSOptions.ClusterTLSCAFile = caFile
+		return nil
+	}
+}
+
 // WithNATSSystemAccount adds a user of the NATS system account ($SYS) to the
 // embedded server, for operator tooling: `nats server report jetstream`,
 // `nats server raft peer-remove` (removing a server from the JetStream meta

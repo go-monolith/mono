@@ -40,7 +40,10 @@ docker push $IMAGE
 Set `image:` in `deploy/k8s.yaml` to `$IMAGE`, then:
 
 ```bash
-examples/k8s-cluster/deploy/create-route-secret.sh   # namespace mono-demo
+examples/k8s-cluster/deploy/create-route-secret.sh       # route and system passwords (namespace mono-demo)
+examples/k8s-cluster/deploy/create-route-tls-secret.sh   # route TLS certificate (needs openssl)
+# or, with cert-manager installed instead of the script:
+#   kubectl apply -f examples/k8s-cluster/deploy/route-tls-cert-manager.yaml
 kubectl apply -f examples/k8s-cluster/deploy/k8s.yaml
 kubectl -n mono-demo rollout status sts/mono-cluster
 kubectl -n mono-demo get pods -o wide                # one pod per node
@@ -59,6 +62,8 @@ a node keeps the image it already has.
 | `Dockerfile.dockerignore` | Keeps the build context small |
 | `deploy/k8s.yaml` | Namespace, headless and HTTP Services, StatefulSet, PodDisruptionBudget |
 | `deploy/create-route-secret.sh` | Creates the Secret with a random route password and system account password |
+| `deploy/create-route-tls-secret.sh` | Creates a route CA (in `./route-ca/`, git-ignored) and the Secret `mono-cluster-route-tls` with a certificate for every pod |
+| `deploy/route-tls-cert-manager.yaml` | The same Secret issued and renewed by cert-manager |
 
 ## Framework options
 
@@ -69,6 +74,7 @@ mono.NewMonoApplication(
     mono.WithNATSServerName(podName),                                   // unique and stable
     mono.WithNATSClustering("mono-demo", "0.0.0.0", 6222, routes),      // every pod, itself included
     mono.WithNATSClusterAuth("route", routePassword),                   // from a Secret
+    mono.WithNATSClusterTLS(crt, key, ca),                              // mutual TLS on the routes
     mono.WithJetStreamStorageDir("/data/jetstream"),                    // per-pod volume
     mono.WithJetStreamDefaultReplicas(3),                               // the framework's streams
     mono.WithJetStreamReadyTimeout(10*time.Minute),                     // how long Start waits for the others
@@ -93,6 +99,23 @@ mono.NewMonoApplication(
   from the Secret `mono-cluster-routes` (`deploy/create-route-secret.sh`). The
   NATS client listener is bound to `127.0.0.1`, so only the route port (6222)
   is reachable from outside the pod.
+- **Route TLS.** `WithNATSClusterTLS` makes every route use mutual TLS with the
+  certificate, key and CA in the Secret `mono-cluster-route-tls`, mounted at
+  `NATS_ROUTE_TLS_DIR`. One certificate for
+  `*.mono-cluster-nats.mono-demo.svc.cluster.local` covers every pod; a server
+  without a certificate from the route CA cannot join, even with the password.
+  - **Renewing:** run `create-route-tls-secret.sh` again (it reuses
+    `./route-ca/`), or let cert-manager renew it. The running servers pick up the
+    new certificate for new routes without a restart; they log
+    `Reloaded the cluster TLS certificate`. A certificate from another CA is
+    refused (the servers keep the previous one), so the script refuses to
+    create a new CA while the Secret exists unless `NEW_CA=1` is set.
+  - **Turning it on for a running cluster:** servers with and without route TLS
+    cannot route to each other, and a rolling update would wait forever for the
+    first TLS pod to find a quorum. Switch every pod at once: set the
+    StatefulSet's `updateStrategy` to `OnDelete`, apply the manifest, delete all
+    pods, then restore `RollingUpdate`. JetStream is unavailable until the pods
+    are back (about 20 s in the test below).
 - **Start waits for the cluster.** A three-server JetStream cluster has no
   quorum until two of the servers are routed. The framework's `Start` waits for
   JetStream before it starts the module, and retries creating the streams and
@@ -135,6 +158,7 @@ mono.NewMonoApplication(
 | `POD_NAME` | hostname | instance and NATS server name |
 | `NATS_ROUTES` | (required) | comma-separated route URLs of every replica |
 | `NATS_ROUTE_PASSWORD` | unset | route password (`WithNATSClusterAuth`); unset means routes are not authenticated |
+| `NATS_ROUTE_TLS_DIR` | unset | directory with `tls.crt`, `tls.key` and `ca.crt` for route TLS (`WithNATSClusterTLS`); unset means routes without TLS |
 | `NATS_SYSTEM_PASSWORD` | unset | password of the system account user `admin` (`WithNATSSystemAccount`), for `nats server report` and `nats server raft peer-remove`; unset means no system account user |
 | `NATS_CLUSTER_NAME` | `mono-demo` | NATS cluster name |
 | `NATS_CLUSTER_PORT` | `6222` | route listener port |
@@ -221,6 +245,7 @@ through the Service), every visit tracked:
 | | Requests failed | Visits lost / duplicated / replayed |
 |---|---|---|
 | rolling restart (`kubectl rollout restart`) | 0 of 268 | 0 / 0 / 0 |
+| rolling restart with route TLS | 0 of 443 | 0 / 0 / 0 |
 | one pod down for about 40 s, then back | 0 of 469 | 0 / 0 / 0 |
 | scaling an existing 2-replica deployment to 3 | 1 of 389 | 0 / 0 / 0 |
 

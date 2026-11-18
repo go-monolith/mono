@@ -86,6 +86,10 @@ func validateClusterOptions(o types.NATSOptions) error {
 		return nil
 	}
 	clustered := o.ClusterName != ""
+	if o.ClusterTLSCertFile != "" && !clustered {
+		return errors.WrapInvalidConfiguration(0, "WithNATSClusterTLS", o.ClusterTLSCertFile,
+			"cluster TLS requires WithNATSClustering")
+	}
 	if (o.ClusterUsername != "" || o.ClusterPassword != "") && !clustered {
 		return errors.WrapInvalidConfiguration(0, "WithNATSClusterAuth", o.ClusterUsername,
 			"cluster credentials require WithNATSClustering")
