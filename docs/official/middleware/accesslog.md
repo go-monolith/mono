@@ -73,7 +73,7 @@ func main() {
 - If you change the request ID header with `requestid.WithHeaderName`, pass the same name to `WithRequestIDHeader`.
 
 {% hint style="warning" %}
-**The module closes the writer on `Stop`** (it calls `Sync()` and `Close()` when the writer implements them). Do not close it yourself, and do not pass `os.Stdout` if the process keeps writing to it after `Stop`.
+**The module closes the writer on `Stop`** (it calls `Sync()` and `Close()` when the writer implements them. `os.Stdout` and `os.Stderr` are never closed, and a pipe or terminal, which cannot be synced, does not fail `Stop`). Do not close it yourself.
 {% endhint %}
 
 Select fields:
@@ -179,7 +179,7 @@ if os.Getenv("ENV") == "production" {
     file, _ := os.OpenFile("logs/access.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
     output = file
 } else {
-    output = os.Stderr // stderr: the module closes the writer on Stop
+    output = os.Stderr // stderr stays open after Stop
 }
 
 accessModule, _ := accesslog.New(

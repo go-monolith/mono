@@ -73,7 +73,10 @@ func ComputeEntryHash(entry Entry) string {
 	return hex.EncodeToString(hash[:])
 }
 
-// VerifyChain verifies the integrity of an audit log chain.
+// VerifyChain verifies the integrity of an audit log chain that starts a new
+// chain: its first entry must have an empty prev_hash (a log written with
+// WithHashChaining("")). For a log that continues an earlier one, use
+// VerifyChainFrom with the earlier log's last entry_hash.
 //
 // Returns an error if:
 //   - The chain is broken (prev_hash doesn't match previous entry_hash)
@@ -86,11 +89,31 @@ func ComputeEntryHash(entry Entry) string {
 //	    log.Fatalf("Audit log tampering detected: %v", err)
 //	}
 func VerifyChain(entries []Entry) error {
+	return VerifyChainFrom(entries, "")
+}
+
+// VerifyChainFrom verifies the integrity of an audit log chain whose first
+// entry continues from startHash: a log written with
+// WithHashChaining(startHash), where startHash is the last entry_hash of the
+// previous log. VerifyChainFrom(entries, "") is VerifyChain(entries).
+//
+// It returns the same errors as VerifyChain; the first entry is checked
+// against startHash instead of an empty prev_hash.
+//
+// Example:
+//
+//	previous, _ := parseAuditLogFile("audit-2026-11-17.log")
+//	current, _ := parseAuditLogFile("audit-2026-11-18.log")
+//	last := previous[len(previous)-1].EntryHash
+//	if err := audit.VerifyChainFrom(current, last); err != nil {
+//	    log.Fatalf("Audit log tampering detected: %v", err)
+//	}
+func VerifyChainFrom(entries []Entry, startHash string) error {
 	if len(entries) == 0 {
 		return nil
 	}
 
-	prevHash := ""
+	prevHash := startHash
 	for i, entry := range entries {
 		// Verify prev_hash matches
 		if entry.PrevHash != prevHash {

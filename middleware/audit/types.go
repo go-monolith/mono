@@ -13,6 +13,9 @@ const (
 	EventModuleStopped EventType = "module.stopped"
 
 	// EventConfigurationUpdate indicates a configuration change.
+	//
+	// Deprecated: never written by a running application; it is recorded only
+	// by OnConfigurationChange, which the framework never calls.
 	EventConfigurationUpdate EventType = "configuration.updated"
 
 	// EventServiceRegistered indicates a service was registered.

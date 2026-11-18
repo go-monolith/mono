@@ -54,9 +54,12 @@ func (c *Chain) RunServiceRegistration(ctx context.Context, reg types.ServiceReg
 // RunConfigurationChange runs the configuration event through the middleware chain.
 // Each middleware receives the event and returns a (possibly modified) event.
 // The final event is returned after all middleware have processed it.
+//
+// Deprecated: the framework never calls it, since its configuration does not
+// change at runtime (see types.MiddlewareModule.OnConfigurationChange).
 func (c *Chain) RunConfigurationChange(ctx context.Context, event types.ConfigurationEvent) types.ConfigurationEvent {
 	for _, mw := range c.middlewares {
-		event = mw.OnConfigurationChange(ctx, event)
+		event = mw.OnConfigurationChange(ctx, event) //nolint:staticcheck // SA1019: the deprecated hook is still run for callers of this deprecated method
 	}
 	return event
 }

@@ -81,6 +81,15 @@ This includes non-durable consumers your application creates itself. The server 
 
 *v0.2.7.* JetStream enabled only by a `jetstream{}` block in a `WithNATSConfigFile` file is treated like JetStream enabled by `WithJetStreamStorageDir`. The startup log says `jetstream=true` and `JetStream enabled`, the consumer protection pass runs right after the server starts, and `WithJetStreamDomain` applies; it was silently dropped before. JetStream services already worked.
 
+### Middleware fixes
+
+*v0.2.8.* Fixes to the built-in middleware and to how the framework runs middleware:
+
+- **Middleware services are registered.** A middleware that implements `ServiceProviderModule` gets a container of its own, and `RegisterServices` is called on it before `Start`. A module that depends on it receives that container. The audit `audit-trail` service, and with it `audit.NewAuditAdapter`, now works. Each consumer's adapter receives only the confirmations of its own entries.
+- **`os.Stdout` and `os.Stderr` stay open.** The access log and audit middleware no longer close them at `Stop`. A pipe or terminal no longer makes `Stop` fail with `sync … invalid argument`. Other writers are still synced and closed.
+- **`audit.VerifyChainFrom(entries, startHash)`** verifies a log continued with `WithHashChaining(lastHash)`.
+- **`OnConfigurationChange` is deprecated.** It was never called and stays in the interface. `audit.EventConfigurationUpdate` and `RunConfigurationChange` are deprecated with it.
+
 ### Health reports JetStream
 
 *v0.2.0.* `FrameworkHealth.JetStream` (`Available`, `Clustered`, `MetaLeader`, `ClusterSize`, `Message`; JSON key `jetstream`) reports this server's JetStream state, and is nil when JetStream is disabled. It is not part of `Healthy`: use `JetStream.Available` in a readiness probe if you need it, never in a liveness probe. See [Health and Status](../api/framework.md#health-and-status).

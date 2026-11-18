@@ -95,8 +95,8 @@ The audit middleware is not on the request path: it only records registrations a
    └─ Modules stop (a hook fires for each), then middleware stop (reverse order)
 ```
 
-- The framework calls only `Start`, `Stop` and the hooks on a middleware module. It does not call `Dependencies`, `SetDependencyServiceContainer`, `SetEventBus`, `RegisterServices` or `RegisterEventConsumers`.
-- `OnConfigurationChange` is currently never called.
+- The framework calls `Start`, `Stop`, the hooks and, when the middleware implements `ServiceProviderModule`, `RegisterServices` on a bound container of its own (before `Start`; the middleware's own registrations are not passed through the chain). A module that lists the middleware in `Dependencies()` receives that container in `SetDependencyServiceContainer`, as it would a module's. The framework does not call `SetDependencyServiceContainer`, `SetEventBus` or `RegisterEventConsumers` on a middleware.
+- `OnConfigurationChange` is deprecated and never called: the framework's configuration does not change at runtime. Implement it as a pass-through.
 
 ## Middleware vs Modules
 
@@ -158,7 +158,7 @@ func (m *MyMiddleware) OnServiceRegistration(ctx context.Context, r mono.Service
     return r // wrap r.RequestHandler etc. here
 }
 
-// Currently never called by the framework.
+// Deprecated hook, never called by the framework: pass the event through.
 func (m *MyMiddleware) OnConfigurationChange(ctx context.Context, e mono.ConfigurationEvent) mono.ConfigurationEvent {
     return e
 }

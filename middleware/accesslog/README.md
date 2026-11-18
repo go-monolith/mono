@@ -27,7 +27,7 @@ func main() {
     // Create access log file
     accessFile, _ := os.OpenFile("access.log",
         os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-    defer accessFile.Close()
+    // The module syncs and closes the file on Stop (never os.Stdout/os.Stderr)
 
     // Create access log middleware with default settings
     accessModule, _ := accesslog.New(
