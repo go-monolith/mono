@@ -65,13 +65,15 @@ issue listener "$SVC.$NS.svc.cluster.local" \
 extendedKeyUsage=serverAuth"
 issue client mono-greeter-client "extendedKeyUsage=clientAuth"
 
-kubectl get namespace "$NS" >/dev/null 2>&1 || kubectl create namespace "$NS"
-for s in "mono-cluster-client-tls listener" "mono-greeter-client-tls client"; do
-  set -- $s
+# secret <secret name> <issued name>: a TLS Secret with the client CA as ca.crt.
+secret() {
   kubectl -n "$NS" create secret generic "$1" \
     --type=kubernetes.io/tls \
     --from-file=tls.crt="$WORK/$2.crt" --from-file=tls.key="$WORK/$2.key" \
     --from-file=ca.crt="$CA_DIR/ca.crt" \
     --dry-run=client -o yaml | kubectl apply -f -
-done
+}
+kubectl get namespace "$NS" >/dev/null 2>&1 || kubectl create namespace "$NS"
+secret mono-cluster-client-tls listener
+secret mono-greeter-client-tls client
 echo "Secrets $NS/mono-cluster-client-tls and $NS/mono-greeter-client-tls created (valid ${DAYS} days)."

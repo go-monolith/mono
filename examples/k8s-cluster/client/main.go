@@ -37,6 +37,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -79,6 +80,9 @@ func run() error {
 		nats.MaxReconnects(-1),
 		nats.ReconnectWait(500*time.Millisecond),
 		nats.DisconnectErrHandler(func(_ *nats.Conn, err error) { logger.Warn("NATS disconnected", "error", err) }),
+		// With RetryOnFailedConnect, a failing first connection (a wrong CA,
+		// an expired certificate) is reported only here.
+		nats.ReconnectErrHandler(func(_ *nats.Conn, err error) { logger.Warn("NATS connect failed", "error", err) }),
 		nats.ReconnectHandler(func(c *nats.Conn) { logger.Info("NATS reconnected", "server", c.ConnectedServerName()) }),
 		nats.ErrorHandler(func(_ *nats.Conn, _ *nats.Subscription, err error) { logger.Warn("NATS error", "error", err) }),
 	)
@@ -115,9 +119,9 @@ func run() error {
 	if shutdownErr := srv.Shutdown(ctx); shutdownErr != nil {
 		logger.Warn("HTTP shutdown", "error", shutdownErr)
 	}
-	if drainErr := nc.Drain(); drainErr != nil {
-		logger.Warn("NATS drain", "error", drainErr)
-	}
+	// srv.Shutdown has waited for the requests in flight, and the client has
+	// no subscriptions to drain.
+	nc.Close()
 	logger.Info("stopped")
 	if err != nil {
 		return fmt.Errorf("HTTP server: %w", err)
@@ -177,8 +181,7 @@ func routes(nc *nats.Conn, js jetstream.JetStream, instance string, logger *slog
 }
 
 // hello calls the greeter's request-reply service on its contract subject,
-// with the request deadline in the Mono-Timeout header so the server drops a
-// request the caller has given up on.
+// with the request deadline in the Mono-Deadline and Mono-Timeout headers.
 func hello(ctx context.Context, nc *nats.Conn, name string) (contract.HelloResponse, error) {
 	var resp contract.HelloResponse
 	data, err := json.Marshal(contract.HelloRequest{Name: name})
@@ -188,14 +191,21 @@ func hello(ctx context.Context, nc *nats.Conn, name string) (contract.HelloRespo
 	msg := nats.NewMsg(contract.Hello.ToBase().Subject())
 	msg.Data = data
 	if deadline, ok := ctx.Deadline(); ok {
-		msg.Header.Set("Mono-Timeout", fmt.Sprint(time.Until(deadline).Milliseconds()))
+		// The deadline headers the framework's own clients send: the server
+		// drops a request its caller has given up on.
+		msg.Header.Set(types.HeaderDeadline, strconv.FormatInt(deadline.UnixMilli(), 10))
+		msg.Header.Set(types.HeaderTimeout, strconv.FormatInt(time.Until(deadline).Milliseconds(), 10))
 	}
 	reply, err := nc.RequestMsgWithContext(ctx, msg)
 	if err != nil {
 		return resp, fmt.Errorf("hello: %w", err)
 	}
 	if reply.Header.Get(types.HeaderError) == "true" {
-		return resp, fmt.Errorf("hello: %s: %s", reply.Header.Get(types.HeaderErrorType), reply.Header.Get(types.HeaderErrorMessage))
+		kind, text := reply.Header.Get(types.HeaderErrorType), reply.Header.Get(types.HeaderErrorMessage)
+		if kind == "" && text == "" {
+			text = "unknown error"
+		}
+		return resp, fmt.Errorf("hello: %s %s", kind, text)
 	}
 	if err := json.Unmarshal(reply.Data, &resp); err != nil {
 		return resp, fmt.Errorf("hello: decode reply: %w", err)

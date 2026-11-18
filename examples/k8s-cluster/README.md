@@ -24,7 +24,7 @@ instance serves every service, and the services behave as one application:
         ▲ Service mono-cluster:8080 (load-balanced HTTP API)
         ▲ Service mono-cluster-client:4222 (NATS clients, mutual TLS)
         │
-  ┌─────┴─────────────────────────────────────────┐
+  ┌─────┴───────────────────────────────────────────┐
   │ Deployment mono-greeter-client (2 pods)         │
   │  nats.go client, helper.NATSClientTLS           │
   │  HTTP :8080 ◀── Service mono-greeter-client     │
@@ -102,7 +102,11 @@ mono.NewMonoApplication(
     mono.WithJetStreamStorageDir("/data/jetstream"),                    // per-pod volume
     mono.WithJetStreamDefaultReplicas(3),                               // the framework's streams
     mono.WithJetStreamReadyTimeout(10*time.Minute),                     // how long Start waits for the others
-    mono.WithNATSHost("127.0.0.1"), mono.WithNATSInProcessConn(),       // client listener on loopback
+    mono.WithNATSInProcessConn(),                                       // the application's own client
+    // With NATS_CLIENT_TLS_DIR: the client listener on all interfaces, mutual TLS
+    mono.WithNATSHost("0.0.0.0"),
+    mono.WithNATSClientTLS(types.ClientTLSConfig{CertFile: crt, KeyFile: key, ClientCAFile: clientCA}),
+    // Without it: mono.WithNATSHost("127.0.0.1"), loopback only
 )
 ```
 
@@ -156,9 +160,10 @@ mono.NewMonoApplication(
 - **Client TLS.** `WithNATSClientTLS` makes the client listener (4222) require
   mutual TLS with the certificate and key in the Secret
   `mono-cluster-client-tls`, mounted at `NATS_CLIENT_TLS_DIR`, and a client
-  certificate from the CA in its `ca.crt`. The listener then binds to the pod
-  IP behind the Service `mono-cluster-client`; without `NATS_CLIENT_TLS_DIR` it
-  stays on `127.0.0.1`, never exposed without TLS. The application's own client
+  certificate from the CA in its `ca.crt`. The listener then binds to all
+  interfaces (`0.0.0.0`), reachable on the pod IP behind the Service
+  `mono-cluster-client`; without `NATS_CLIENT_TLS_DIR` it stays on
+  `127.0.0.1`, never exposed without TLS. The application's own client
   connects in-process either way.
   - **Its own CA.** The client CA is never the route CA: every server accepts
     a certificate from the route CA as a cluster peer, so a client holding one
@@ -183,9 +188,11 @@ mono.NewMonoApplication(
     cert-manager manifest issues 24-hour certificates renewed every 8 hours.
     The servers read the client CA once: to replace it, put the old and the new
     CA in `ca.crt` and do a rolling restart.
-  - **Turning it on for a running cluster:** a rolling update is enough (no
-    restart of every pod at once, unlike route TLS), since routes are not
-    affected. Clients must use TLS from then on.
+  - **Turning it on for a running cluster:** create the Secrets first (the
+    StatefulSet mounts `mono-cluster-client-tls`; without it the rolled pods
+    stay in ContainerCreating), then a rolling update is enough (no restart of
+    every pod at once, unlike route TLS), since routes are not affected.
+    Clients must use TLS from then on.
   - **A certificate is not a permission.** Every client with a valid
     certificate gets the global account, JetStream included.
     `deploy/network-policy.yaml` limits port 4222 to the client pods and 6222
@@ -195,11 +202,13 @@ mono.NewMonoApplication(
 
     ```bash
     kubectl -n mono-demo port-forward pod/mono-cluster-0 4222:4222 &
+    SYSTEM_PASSWORD=$(kubectl -n mono-demo get secret mono-cluster-routes -o jsonpath='{.data.system-password}' | base64 -d)
     for k in tls.crt tls.key ca.crt; do
       kubectl -n mono-demo get secret mono-greeter-client-tls -o jsonpath="{.data.${k//./\\.}}" | base64 -d > "op-$k"
     done
     nats -s tls://127.0.0.1:4222 --tlsca op-ca.crt --tlscert op-tls.crt --tlskey op-tls.key \
       --user admin --password "$SYSTEM_PASSWORD" server report jetstream
+    rm op-tls.crt op-tls.key op-ca.crt   # the client's private key: do not leave it around
     ```
 - **Start waits for the cluster.** A three-server JetStream cluster has no
   quorum until two of the servers are routed. The framework's `Start` waits for
