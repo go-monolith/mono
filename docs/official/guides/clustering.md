@@ -120,6 +120,40 @@ mono.WithNATSClusterTLS("/etc/nats-route-tls/tls.crt", "/etc/nats-route-tls/tls.
 - **Turning it on.** Servers with and without route TLS cannot route to each other. Switch every server at once (a brief loss of JetStream while they restart), or move to a TLS cluster with a blue-green cutover.
 - **Alternatives.** A `cluster { tls { … } }` block in a NATS config file does the same (it cannot be combined with the option), and a service mesh or an encrypting CNI can encrypt the traffic without either.
 
+## Client TLS
+
+Clients outside the application, such as other services in the same Kubernetes cluster, connect to the client listener (port 4222). By default the listener is plaintext and is reachable only where `WithNATSHost` binds it. `WithNATSClientTLS` makes it require TLS with a certificate from files, and, with a client CA, a certificate from every client:
+
+```go
+mono.WithNATSHost("0.0.0.0"),
+mono.WithNATSClientTLS(types.ClientTLSConfig{
+    CertFile:     "/etc/nats-client-tls/tls.crt",
+    KeyFile:      "/etc/nats-client-tls/tls.key",
+    ClientCAFile: "/etc/nats-client-tls/ca.crt",
+})
+```
+
+Clients use `helper.NATSClientTLS`, which presents a renewed client certificate on the next reconnect:
+
+```go
+tlsOpt, err := helper.NATSClientTLS(helper.NATSClientTLSConfig{CAFile: caFile, CertFile: certFile, KeyFile: keyFile})
+nc, err := nats.Connect("tls://mono-cluster-client.mono-demo.svc.cluster.local:4222", tlsOpt)
+```
+
+Which TLS option protects what, and with which CA:
+
+| | Listener | Certificate | CA |
+|---|---|---|---|
+| [`WithNATSClusterTLS`](../api/framework.md#withnatsclustertls) | Routes (6222), server to server | Files, renewed without a restart; server and client use | A route CA used for nothing else |
+| [`WithNATSClientTLS`](../api/framework.md#withnatsclienttls) | Client listener (4222), from a private network | Files, renewed without a restart; server use, naming the host clients dial | A client CA, separate from the route CA (enforced) |
+| [`WithNATSAutoTLS`](../api/framework.md#withnatsautotls) | Client listener (4222), from public clients | Let's Encrypt, for public domain names | A public CA; no client certificates |
+
+- **Keep the CAs apart.** Every server accepts any certificate from the route CA as a cluster peer, so a client holding one could join the cluster. `NewMonoApplication` fails if the client CA is, or is signed by, the route CA (or the other way round).
+- **Certificate names.** The listener certificate must name the host clients dial, for example the DNS name of the Service in front of the pods. A client that first connected by host name verifies the other servers of the cluster, discovered by IP address, against that same name.
+- **TLS alone does not authenticate.** Without a client CA the listener encrypts the traffic, but any client that reaches the port connects without credentials, with the global account. Use a client CA (or users in a NATS config file) to decide who connects.
+- **A client certificate is not a permission.** Every client with a valid certificate gets the account it connects to, by default the global account with JetStream. Limit who can reach port 4222 (a NetworkPolicy) and who gets a client certificate.
+- **Renewal.** The listener's and the clients' certificates are renewed without a restart, so both can be short-lived. Connections already established keep their session. The client CA is read once: to replace it, put the old and the new CA in the file and do a rolling restart.
+
 ## Operator Access (System Account)
 
 Since v0.2.2. Some cluster operations need the NATS system account: `nats server report jetstream` lists every server of the meta group, and `nats server raft peer-remove <server>` removes a server from it, which retiring servers for good requires (scaling down for good, or a [blue-green cutover](../extra/kubernetes-deployment.md#joined-cluster)). `WithNATSSystemAccount(username, password)` adds a system account user:
@@ -281,6 +315,7 @@ The sleep counts toward `terminationGracePeriodSeconds`, so the grace period mus
 - [ ] The same route list on every server, all servers included, with fully qualified names
 - [ ] Route authentication (`WithNATSClusterAuth`) with the password from a Secret
 - [ ] Route TLS (`WithNATSClusterTLS`) unless the network between the servers is trusted
+- [ ] Client TLS (`WithNATSClientTLS`, with a client CA separate from the route CA) if clients outside the application connect, and a NetworkPolicy limiting who reaches port 4222
 - [ ] `WithJetStreamDefaultReplicas(3)` (and `Replicas` on streams and cron services that set their own)
 - [ ] An odd number of servers, one per node, with a PodDisruptionBudget
 - [ ] A liveness probe that never depends on JetStream; readiness may include `JetStream.Available`

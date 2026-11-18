@@ -102,6 +102,23 @@ func NewNATSManager(logger types.Logger, opts ...NATSOption) (NATSManager, error
 		return nil, fmt.Errorf("invalid configuration: AutoTLS requires UseInProcessConn: " +
 			"the framework's own client cannot satisfy hostname verification over a loopback TCP dial")
 	}
+	if config.ClientTLS != nil {
+		switch {
+		case config.AutoTLS != nil:
+			return nil, fmt.Errorf("invalid configuration: client TLS (WithNATSClientTLS) cannot be combined with AutoTLS: " +
+				"both configure the client listener's certificate")
+		case config.DontListen:
+			return nil, fmt.Errorf("invalid configuration: client TLS cannot be combined with DontListen: " +
+				"there is no TCP listener for the certificate to protect")
+		case !config.UseInProcessConn:
+			// As for AutoTLS, buildNATSOptions turns UseInProcessConn on: the
+			// framework's own client would need a certificate for the
+			// loopback address and, with client certificates required, one
+			// of its own.
+			return nil, fmt.Errorf("invalid configuration: client TLS requires UseInProcessConn: " +
+				"the framework's own client does not dial the TLS listener")
+		}
+	}
 
 	return &natsManager{
 		config: config,
@@ -254,6 +271,9 @@ func (m *natsManager) Start(ctx context.Context) error {
 	if err := applyClusterTLS(opts, m.config.ClusterTLSCertFile, m.config.ClusterTLSKeyFile, m.config.ClusterTLSCAFile, m.logger); err != nil {
 		return err
 	}
+	if err := applyClientTLS(opts, m.config.ClientTLS, m.config.ClusterTLSCAFile, m.logger); err != nil {
+		return err
+	}
 	if m.config.SystemAccountUsername != "" || m.config.SystemAccountPassword != "" {
 		authBlock := false
 		if m.config.ConfigFile != "" {
@@ -332,6 +352,9 @@ func (m *natsManager) Start(ctx context.Context) error {
 	if opts.Cluster.TLSConfig != nil {
 		logAttrs = append(logAttrs, "cluster_tls", true)
 	}
+	if m.config.ClientTLS != nil {
+		logAttrs = append(logAttrs, "client_tls", true)
+	}
 	m.logger.Info("NATS server started", logAttrs...)
 
 	// Obtain certificates before reporting readiness so that a misconfigured
@@ -361,6 +384,10 @@ func (m *natsManager) Start(ctx context.Context) error {
 		if m.config.AutoTLS != nil {
 			m.logger.Info("AutoTLS enabled: framework NATS client uses the in-process connection " +
 				"(a loopback TCP dial could not satisfy hostname verification against the certificate)")
+		}
+		if m.config.ClientTLS != nil {
+			m.logger.Info("Client TLS enabled: framework NATS client uses the in-process connection " +
+				"(it does not dial the TLS listener)")
 		}
 		m.logger.Info("NATS client connected via in-process connection")
 	} else {
@@ -636,6 +663,9 @@ func (m *natsManager) ServerInfo() ServerInfo {
 	scheme, clientHost := "nats", m.config.Host
 	if m.config.AutoTLS != nil && len(m.config.AutoTLS.Domains) > 0 {
 		scheme, clientHost = "tls", m.config.AutoTLS.Domains[0]
+	}
+	if m.config.ClientTLS != nil {
+		scheme = "tls"
 	}
 
 	info := ServerInfo{

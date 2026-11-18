@@ -179,6 +179,11 @@ type NATSOptions struct {
 	// for the NATS client listener. Nil means disabled.
 	AutoTLS *AutoTLSConfig
 
+	// ClientTLS enables TLS on the NATS client listener with certificate
+	// files (WithNATSClientTLS). Nil means disabled. It cannot be combined
+	// with AutoTLS.
+	ClientTLS *ClientTLSConfig
+
 	// ClientName is the name the framework's client connection reports to the
 	// server (nats.Name), visible in /connz and server logs. Empty means "mono".
 	ClientName string
@@ -187,6 +192,41 @@ type NATSOptions struct {
 	// connection, applied after the framework defaults so they can override
 	// them. See WithNATSClientOptions.
 	ClientOptions []nats.Option
+}
+
+// ClientTLSConfig configures TLS on the embedded NATS server's client
+// listener (client-to-server connections, port 4222 by default) with a
+// certificate from files, optionally requiring a certificate from every
+// client (mutual TLS). See WithNATSClientTLS.
+//
+// The certificate is served through a reloader (pkg/certreload): the files
+// are read again at most every 10 seconds on a new connection and reloaded
+// when their contents changed, so a renewed certificate is used for new
+// connections without a restart. Connections already established keep their
+// session. The client CA is read once.
+//
+// Scope: the client listener only. Routes have their own TLS
+// (WithNATSClusterTLS); websocket, MQTT, leafnode and gateway listeners are
+// unaffected.
+type ClientTLSConfig struct {
+	// CertFile and KeyFile are the PEM files of the server certificate (with
+	// any intermediates after the leaf) and its private key. Required. The
+	// certificate must allow TLS server use and name the host clients dial.
+	CertFile string
+	KeyFile  string
+
+	// ClientCAFile is the PEM file of the CA (or CAs) that client
+	// certificates must chain to. When set, every client must present a
+	// certificate from it (mutual TLS); when empty, clients are not asked
+	// for one. It must not be, or chain to, a route CA (WithNATSClusterTLS or
+	// a config file's cluster { tls {} }), nor the other way round: every
+	// server accepts a certificate from the route CA as a cluster peer.
+	//
+	// A client certificate authenticates the connection but does not
+	// authorize it: any client with a valid certificate gets the permissions
+	// of the account it connects to (the global account unless the NATS
+	// configuration says otherwise).
+	ClientCAFile string
 }
 
 // AutoTLSConfig configures automatic TLS certificate provisioning for the
@@ -199,8 +239,8 @@ type NATSOptions struct {
 // and are unaffected, so traffic between cluster nodes stays plaintext unless
 // it is configured separately. Routes are peer-to-peer and conventionally use
 // mutual TLS, which requires a client certificate autocert does not issue; use
-// an internal CA supplied through a cluster{tls{...}} block in a NATS config
-// file for that.
+// an internal CA with WithNATSClusterTLS for that. For a client listener
+// certificate from files (a private CA), see ClientTLSConfig.
 //
 // When enabled, the framework serves the ACME http-01 challenge from a
 // framework-owned HTTP listener and installs a tls.Config with a lazy

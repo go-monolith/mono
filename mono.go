@@ -51,6 +51,16 @@ func NewMonoApplication(opts ...MonoFrameworkOption) (MonoApplication, error) {
 	if err := validateClusterOptions(cfg.NATSOptions); err != nil {
 		return nil, err
 	}
+	if ct := cfg.NATSOptions.ClientTLS; ct != nil {
+		switch {
+		case cfg.NATSOptions.AutoTLS != nil:
+			return nil, errors.WrapInvalidConfiguration(0, "WithNATSClientTLS", ct.CertFile,
+				"client TLS cannot be combined with WithNATSAutoTLS: both configure the client listener's certificate")
+		case cfg.NATSOptions.DontListen:
+			return nil, errors.WrapInvalidConfiguration(0, "WithNATSClientTLS", ct.CertFile,
+				"client TLS cannot be combined with WithNATSDontListen: there is no client listener to protect")
+		}
+	}
 	if cfg.JetStreamDefaultReplicas > 1 && cfg.NATSOptions.ClusterName == "" && cfg.NATSOptions.ConfigFile == "" {
 		return nil, errors.WrapInvalidConfiguration(0, "WithJetStreamDefaultReplicas", cfg.JetStreamDefaultReplicas,
 			"more than one replica requires clustering (WithNATSClustering or a cluster{} block in a NATS config file)")
