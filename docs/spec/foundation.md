@@ -264,7 +264,7 @@ The core framework provides modular monolith architecture with embedded NATS for
 
 ### Important Behaviors
 
-**Module Start Failure Handling**: If any module fails to start, the framework immediately stops all previously started modules in reverse order, then returns an error with context about which module failed.
+**Module Start Failure Handling**: If any module fails to start, the framework immediately stops all previously started modules in reverse order, then returns an error with context about which module failed. Any failure of `Start` after the plugins started (a middleware or module start, dependency resolution, an event definition, subscription setup) also stops the middleware whose `Start` succeeded, in reverse order, and then every plugin, and forgets the plugin containers, so nothing is left running and a retried `Start` starts the plugins once more. A plugin that fails to start stops the plugins started before it.
 
 **Health Aggregation Logic**: Framework aggregates health from modules implementing HealthAwareModule. Overall health requires: framework running AND NATS responsive AND all health-aware modules healthy. Modules without HealthAwareModule are excluded from calculation (not marked unhealthy).
 
@@ -364,5 +364,5 @@ Modules can implement any combination of these optional interfaces:
 - **EventEmitterModule**: Registers event definitions (extends EventBusAwareModule)
 - **EventConsumerModule**: Registers event consumer handlers
 - **HealthCheckableModule**: Reports health status
-- **PluginModule**: Special modules that start first, stop last, excluded from dependency graph
+- **PluginModule**: Special modules that start first, stop last, excluded from dependency graph. Services registered in a plugin's own container are served at `services.<plugin name>.<service>` like a module's (subscribed in the same step, after every module started; drained after the modules), and its channel routers run. A plugin that registers services must not share its `Name()` with a module or with another plugin that registers services; that fails `Start`.
 - **UsePluginModule**: Allows modules to receive and use plugin instances

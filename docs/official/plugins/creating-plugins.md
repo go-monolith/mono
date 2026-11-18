@@ -343,7 +343,7 @@ func (p *MyPlugin) AdminPort() AdminPort { /* ... */ }
 
 ### Service Registration
 
-A plugin that implements `ServiceProviderModule` has `RegisterServices()` called on its own container before `Start()`. Services registered in a plugin's container are not currently served over NATS (no subscription is created for them), so calls to them get no responder. Expose plugin functionality through Go methods (ports) instead, as shown above.
+A plugin that implements `ServiceProviderModule` has `RegisterServices()` called on its own container before `Start()`. They are served over NATS at `services.<plugin name>.<service>` once every module has started (see [Container](../api/plugins.md#container)). For in-process functionality, Go methods (ports), as shown above, are simpler.
 
 ### Events
 
