@@ -162,7 +162,8 @@ func (m *MyModule) handleSensitiveOperation(ctx context.Context) error {
 
 ## Verifying the Hash Chain
 
-Use the `VerifyChain` function to detect tampering:
+Use `VerifyChain` (a log that starts a new chain) or `VerifyChainFrom` (a log
+written with `WithHashChaining(lastHash)`) to detect tampering:
 
 ```go
 import "github.com/go-monolith/mono/middleware/audit"
@@ -170,19 +171,21 @@ import "github.com/go-monolith/mono/middleware/audit"
 // Read audit log entries
 entries := readEntriesFromFile("audit.log")
 
-// Verify the chain
-valid, err := audit.VerifyChain(entries)
-if err != nil {
-    log.Printf("Chain verification error: %v", err)
+// Verify the chain: an error names the first broken or altered entry
+if err := audit.VerifyChain(entries); err != nil {
+    log.Printf("WARNING: audit log may have been tampered with: %v", err)
 }
-if !valid {
-    log.Printf("WARNING: Audit log may have been tampered with!")
+
+// A log that continues the previous one
+next := readEntriesFromFile("audit-2.log")
+if err := audit.VerifyChainFrom(next, entries[len(entries)-1].EntryHash); err != nil {
+    log.Printf("WARNING: audit log may have been tampered with: %v", err)
 }
 ```
 
 ## Sensitive Value Redaction
 
-Configuration change events automatically redact sensitive values:
+Configuration change events redact sensitive values. These events come only from `OnConfigurationChange`, which is deprecated and never called by the framework, so a running application writes none:
 
 ```go
 // If a configuration option contains sensitive keywords like "password",
@@ -234,11 +237,15 @@ The audit module is an observer - it does not modify events, so it adds minimal 
 // New creates a new audit middleware module
 func New(opts ...Option) (*AuditModule, error)
 
-// NewAdapter creates a client adapter for the audit trail service
-func NewAdapter(container types.ServiceContainer) *Adapter
+// NewAuditAdapter creates a client adapter for the audit-trail service, from
+// the audit container a module receives in SetDependencyServiceContainer
+func NewAuditAdapter(container types.ServiceContainer, consumerModuleName string) (AuditAdapterPort, error)
 
-// VerifyChain verifies the integrity of an audit log hash chain
-func VerifyChain(entries []Entry) (bool, error)
+// VerifyChain verifies an audit log hash chain that starts a new chain
+func VerifyChain(entries []Entry) error
+
+// VerifyChainFrom verifies a chain whose first entry continues from startHash
+func VerifyChainFrom(entries []Entry, startHash string) error
 ```
 
 ### Options

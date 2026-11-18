@@ -773,10 +773,16 @@ func (lm *lifecycleManager) Start(ctx context.Context) (err error) {
 		lm.eventRegistry.SetMiddlewareChain(lm.middlewareChain)
 	}
 
-	// Step 2: Start middleware modules FIRST (in registration order)
+	// Step 2: Start middleware modules FIRST (in registration order). Each
+	// gets its own bound container first, with RegisterServices called on
+	// it, so that the modules depending on a middleware (audit's
+	// "audit-trail" channel service) find its services.
 	if lm.middlewareChain != nil {
 		for _, mw := range lm.middlewareChain.Middlewares() {
 			lm.logger.Info("Starting middleware module", "module", mw.Name())
+			if err := lm.registerMiddlewareServices(mw); err != nil {
+				return fmt.Errorf("failed to register services of middleware module %s: %w", mw.Name(), err)
+			}
 			if err := mw.Start(ctx); err != nil {
 				return fmt.Errorf("failed to start middleware module %s: %w", mw.Name(), err)
 			}
@@ -855,6 +861,34 @@ func (lm *lifecycleManager) Start(ctx context.Context) (err error) {
 	lm.startStatsLog()
 
 	lm.logger.Info("All modules started successfully")
+	return nil
+}
+
+// registerMiddlewareServices binds a container to a middleware module and,
+// when it implements ServiceProviderModule, calls RegisterServices on it. The
+// container is kept with the module containers, so a module that lists the
+// middleware in Dependencies() gets a view of it, its channel routers start
+// with the modules' and its NATS services are subscribed with theirs. The
+// middleware chain is not set on it: a middleware's own registrations are
+// not intercepted, as for plugins.
+func (lm *lifecycleManager) registerMiddlewareServices(mw types.MiddlewareModule) error {
+	name := mw.Name()
+	c := container.New(lm.logger.WithModule(name))
+	if err := c.BindModule(mw); err != nil {
+		return err
+	}
+	c.SetEventBus(lm.eventBus)
+	if lm.queueGroupOptimisticWindow > 0 {
+		c.SetQueueGroupOptimisticWindow(lm.queueGroupOptimisticWindow)
+	}
+	lm.mu.Lock()
+	lm.containers[name] = c
+	lm.mu.Unlock()
+	if provider, ok := mw.(types.ServiceProviderModule); ok {
+		if err := provider.RegisterServices(c); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 

@@ -54,7 +54,8 @@ func WithOutput(w io.Writer) Option {
 //   - prev_hash: SHA-256 hash of previous entry
 //   - entry_hash: SHA-256 hash of current entry
 //
-// This creates a tamper-evident chain that can be verified using audit.VerifyChain().
+// This creates a tamper-evident chain that can be verified using audit.VerifyChain()
+// (a new chain) or audit.VerifyChainFrom(entries, lastSavedHash) (a continued one).
 //
 // The lastSavedHash parameter allows resuming an existing audit chain:
 //   - Empty string: starts a new chain (first entry has empty prev_hash)

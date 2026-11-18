@@ -60,7 +60,7 @@ func main() {
 | `WithUserContext` | `func(context.Context) string` | Fills `user_context` (nil is rejected) | returns `""` |
 
 - `WithOutput` is required: without it `New` returns the error `audit module requires WithOutput option`.
-- **The module closes the writer on `Stop`** (it calls `Sync()` and `Close()` when the writer implements them); do not close it yourself.
+- **The module closes the writer on `Stop`** (it calls `Sync()` and `Close()` when the writer implements them. `os.Stdout` and `os.Stderr` are never closed, and a pipe or terminal, which cannot be synced, does not fail `Stop`); do not close it yourself.
 - **Hash chaining is off by default**: `audit.New(audit.WithOutput(file))` writes `prev_hash` and `entry_hash` empty.
 - The `WithUserContext` function is called with the `Start`/`Stop` context or `context.Background()`, not with a request context.
 
@@ -99,8 +99,8 @@ The `audit.EventType` constants:
 | `module.started` | `EventModuleStarted` | A module started; `details.duration_ms` |
 | `module.stopped` | `EventModuleStopped` | A module stopped; `details.error` when it failed |
 | `service.registered` | `EventServiceRegistered` | A service, event consumer or event stream consumer was registered; `details.service_type` |
-| `configuration.updated` | `EventConfigurationUpdate` | Defined, but currently never emitted (the framework never calls `OnConfigurationChange`) |
-| `custom.audit_trail` | `EventCustomAuditTrail` | Custom entries sent through `audit.NewAuditAdapter`. The `audit-trail` channel service it needs is not registered in a running application (the framework does not call `RegisterServices` on middleware modules), so this path is currently not usable |
+| `configuration.updated` | `EventConfigurationUpdate` | Deprecated, never emitted: the framework's configuration does not change at runtime, so it never calls `OnConfigurationChange` |
+| `custom.audit_trail` | `EventCustomAuditTrail` | Custom entries a module sends through `audit.NewAuditAdapter`: list `"audit"` in its `Dependencies()` and build the adapter from the container passed to `SetDependencyServiceContainer` for it (see the `NewAuditAdapter` godoc). `SaveAuditTrail` waits for the confirmation of each entry, `AsyncSaveAuditTrail` does not |
 
 Not recorded: module registration, middleware modules themselves, plugins, and service calls. Records of access to data or of transactions (PCI DSS, HIPAA, financial systems) need application code.
 
@@ -163,7 +163,7 @@ func verifyAuditLog(filename string) error {
 }
 ```
 
-`VerifyChain` expects the first entry to have an empty `prev_hash`, so a file continued with `WithHashChaining(lastHash)` verifies only when its entries are concatenated after those of its predecessor.
+`VerifyChain` expects the first entry to have an empty `prev_hash`. Verify a file continued with `WithHashChaining(lastHash)` with `audit.VerifyChainFrom(entries, lastHash)`, where `lastHash` is the last `entry_hash` of its predecessor.
 
 For a quick look at the hashes: `jq '.entry_hash, .prev_hash' audit.log`.
 

@@ -31,7 +31,11 @@ type AuditAdapterPort interface {
 type auditAdapter struct {
 	inChan  chan *types.Msg
 	outChan chan *types.Msg
-	mu      sync.Mutex // Protects sync request/response pairs
+	// consumer is the consumer module name, sent as the Reply of a
+	// synchronous request so the channel router delivers the confirmation
+	// to this consumer's out channel only.
+	consumer string
+	mu       sync.Mutex // Protects sync request/response pairs
 }
 
 // NewAuditAdapter creates a new audit adapter from a service container.
@@ -65,8 +69,9 @@ func NewAuditAdapter(container types.ServiceContainer, consumerModuleName string
 	}
 
 	return &auditAdapter{
-		inChan:  inChan,
-		outChan: outChan,
+		inChan:   inChan,
+		outChan:  outChan,
+		consumer: consumerModuleName,
 	}, nil
 }
 
@@ -107,7 +112,7 @@ func (a *auditAdapter) SaveAuditTrail(ctx context.Context, entries []Entry) (int
 
 		messages = append(messages, &types.Msg{
 			Subject: "audit-trail",
-			Reply:   "audit-trail.reply",
+			Reply:   a.consumer,
 			Data:    data,
 		})
 	}

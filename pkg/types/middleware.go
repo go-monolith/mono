@@ -47,14 +47,14 @@ type MiddlewareModule interface {
 	//   - Modifying stream consumer configuration
 	OnServiceRegistration(ctx context.Context, reg ServiceRegistration) ServiceRegistration
 
-	// OnConfigurationChange intercepts configuration updates.
-	// Middleware can observe or modify configuration values before they're applied.
-	// Returns the (possibly modified) event for the next middleware.
+	// OnConfigurationChange was meant to intercept configuration updates.
+	// The framework never calls it: its configuration is fixed by the
+	// options given to NewMonoApplication and never changes at runtime. It
+	// stays in the interface so that existing middleware keeps compiling;
+	// implement it as a pass-through (return event).
 	//
-	// Example uses:
-	//   - Audit logging of config changes
-	//   - Validating configuration values
-	//   - Redacting sensitive values from logs
+	// Deprecated: never called by the framework; it will be removed from the
+	// interface in a future major version.
 	OnConfigurationChange(ctx context.Context, event ConfigurationEvent) ConfigurationEvent
 
 	// OnOutgoingMessage intercepts outgoing messages from service clients.
@@ -196,13 +196,9 @@ const (
 	ConfigurationUpdatedEvent ConfigurationEventType = "configuration.updated"
 )
 
-// ConfigurationEvent contains data for configuration change events.
-//
-// Middleware can observe or modify old/new values before they're applied.
-// This is useful for:
-//   - Audit logging of configuration changes
-//   - Validating configuration values
-//   - Redacting sensitive values
+// ConfigurationEvent contains data for configuration change events. It is
+// only the argument of the deprecated MiddlewareModule.OnConfigurationChange,
+// which the framework never calls.
 type ConfigurationEvent struct {
 	// Type identifies the configuration event type
 	Type ConfigurationEventType

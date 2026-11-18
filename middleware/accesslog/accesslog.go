@@ -26,6 +26,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/go-monolith/mono/internal/output"
 	"github.com/go-monolith/mono/middleware/requestid"
 	"github.com/go-monolith/mono/pkg/types"
 )
@@ -183,21 +184,9 @@ func (m *AccessLogModule) Stop(ctx context.Context) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	// Flush if writer supports Sync
-	if syncer, ok := m.writer.(interface{ Sync() error }); ok {
-		if err := syncer.Sync(); err != nil {
-			return fmt.Errorf("failed to sync access log: %w", err)
-		}
-	}
-
-	// Close if writer supports Close
-	if closer, ok := m.writer.(io.Closer); ok {
-		if err := closer.Close(); err != nil {
-			return fmt.Errorf("failed to close access log: %w", err)
-		}
-	}
-
-	return nil
+	// Flush and close the writer, except os.Stdout and os.Stderr, which the
+	// rest of the process keeps using (see output.FlushAndClose).
+	return output.FlushAndClose(m.writer, "access log")
 }
 
 // OnModuleLifecycle passes through lifecycle events without modification.

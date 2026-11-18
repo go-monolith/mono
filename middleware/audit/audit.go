@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/go-monolith/mono/internal/logger"
+	"github.com/go-monolith/mono/internal/output"
 	"github.com/go-monolith/mono/pkg/types"
 )
 
@@ -165,21 +166,9 @@ func (m *AuditModule) Stop(_ context.Context) error {
 		m.mu.Lock()
 		defer m.mu.Unlock()
 
-		// Flush if writer supports Sync
-		if syncer, ok := m.writer.(interface{ Sync() error }); ok {
-			if err := syncer.Sync(); err != nil {
-				stopErr = fmt.Errorf("failed to sync audit log: %w", err)
-				return
-			}
-		}
-
-		// Close if writer supports Close
-		if closer, ok := m.writer.(io.Closer); ok {
-			if err := closer.Close(); err != nil {
-				stopErr = fmt.Errorf("failed to close audit log: %w", err)
-				return
-			}
-		}
+		// Flush and close the writer, except os.Stdout and os.Stderr, which
+		// the rest of the process keeps using (see output.FlushAndClose).
+		stopErr = output.FlushAndClose(m.writer, "audit log")
 	})
 
 	return stopErr
@@ -244,8 +233,10 @@ func (m *AuditModule) OnServiceRegistration(ctx context.Context, reg types.Servi
 	return reg // Pass through unchanged
 }
 
-// OnConfigurationChange intercepts configuration change events and logs them.
-// The event is passed through unchanged (observer pattern).
+// OnConfigurationChange records a configuration change event and passes it
+// through unchanged (observer pattern). The framework never calls it (see
+// types.MiddlewareModule.OnConfigurationChange), so a running application
+// writes no configuration.updated entries.
 func (m *AuditModule) OnConfigurationChange(ctx context.Context, event types.ConfigurationEvent) types.ConfigurationEvent {
 	entry := Entry{
 		Timestamp: time.Now().UTC(),
@@ -431,8 +422,11 @@ func (m *AuditModule) processAuditTrailEntry(msg *types.Msg) *types.Msg {
 		return m.createEntryErrorResponse(msg, fmt.Sprintf("failed to marshal response: %v", err))
 	}
 
+	// Reply carries the consumer module name the request came from, so the
+	// channel router delivers the response to that consumer only.
 	return &types.Msg{
 		Subject: msg.Reply,
+		Reply:   msg.Reply,
 		Data:    responseData,
 	}
 }
@@ -450,8 +444,11 @@ func (m *AuditModule) createEntryErrorResponse(msg *types.Msg, errorMsg string) 
 		responseData = []byte(`{"success":false,"error":"internal error"}`)
 	}
 
+	// Reply carries the consumer module name the request came from, so the
+	// channel router delivers the response to that consumer only.
 	return &types.Msg{
 		Subject: msg.Reply,
+		Reply:   msg.Reply,
 		Data:    responseData,
 	}
 }
