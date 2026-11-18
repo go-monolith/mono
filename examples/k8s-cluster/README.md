@@ -351,6 +351,8 @@ through the Service), every visit tracked:
 | rolling restart (`kubectl rollout restart`) | 0 of 268 | 0 / 0 / 0 |
 | rolling restart with route TLS | 0 of 443 | 0 / 0 / 0 |
 | route TLS with cert-manager at 1-hour certificates renewed every 15 minutes, for 69 minutes: four renewals, a pod deleted in the second of a renewal, routes outliving their certificate's expiry, then a rolling restart | 0 of 19,993 | 0 / 0 / 0 |
+| turning client TLS on (rolling update of the servers) | 0 of 365 | 0 / 0 / 0 |
+| client mutual TLS, through the client Deployment, with cert-manager at 1-hour certificates renewed every 15 minutes, for 74 minutes: four renewals, a client pod and a server pod each deleted in the second of a renewal, rolling restarts of the servers and of the clients, a client reconnecting after a renewal (it presented the renewed certificate) | 0 of 21,523 | 0 / 0 / 0 |
 | one pod down for about 40 s, then back | 0 of 469 | 0 / 0 / 0 |
 | scaling an existing 2-replica deployment to 3 | 1 of 389 | 0 / 0 / 0 |
 
