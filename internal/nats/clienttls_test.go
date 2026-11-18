@@ -68,6 +68,9 @@ func TestApplyClientTLS(t *testing.T) {
 	writeFile(t, bundle, append(append([]byte{}, clientCA.pem...), routeCA.pem...))
 	underRouteFile := routeCA.intermediate(t, "under-route").write(t, t.TempDir())
 	underClientFile := clientCA.intermediate(t, "under-client").write(t, t.TempDir())
+	// An expired intermediate under the route CA is still the route's
+	// authority: the check is about the signature chain, not the time.
+	expiredUnderRouteFile := routeCA.intermediateAt(t, "expired-under-route", time.Now().Add(-3*time.Hour), time.Now().Add(-2*time.Hour)).write(t, t.TempDir())
 	notPEM := filepath.Join(t.TempDir(), "not.pem")
 	writeFile(t, notPEM, []byte("not a certificate"))
 	for _, tt := range []struct {
@@ -86,6 +89,7 @@ func TestApplyClientTLS(t *testing.T) {
 		{"expired", &server.Options{}, &types.ClientTLSConfig{CertFile: expiredCert, KeyFile: expiredKey}, "", "has expired"},
 		{"client CA is the route CA", &server.Options{}, &types.ClientTLSConfig{CertFile: certFile, KeyFile: keyFile, ClientCAFile: routeCAFile}, routeCAFile, "is, or is signed by, the route CA"},
 		{"client CA is an intermediate under the route CA", &server.Options{}, &types.ClientTLSConfig{CertFile: certFile, KeyFile: keyFile, ClientCAFile: underRouteFile}, routeCAFile, "CN=under-route"},
+		{"client CA is an expired intermediate under the route CA", &server.Options{}, &types.ClientTLSConfig{CertFile: certFile, KeyFile: keyFile, ClientCAFile: expiredUnderRouteFile}, routeCAFile, "CN=expired-under-route"},
 		{"route CA is an intermediate under the client CA", &server.Options{}, &types.ClientTLSConfig{CertFile: certFile, KeyFile: keyFile, ClientCAFile: clientCAFile}, underClientFile, "is signed by, the client CA"},
 		{"client CA is the route CA of a config file cluster tls block", &server.Options{Cluster: server.ClusterOpts{TLSConfig: &tls.Config{ClientCAs: routeCA.pool()}}}, &types.ClientTLSConfig{CertFile: certFile, KeyFile: keyFile, ClientCAFile: routeCAFile}, "", "the route CA"},
 		{"config file allow_non_tls", &server.Options{AllowNonTLS: true}, &types.ClientTLSConfig{CertFile: certFile, KeyFile: keyFile}, "", "allow_non_tls"},

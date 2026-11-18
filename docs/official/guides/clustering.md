@@ -150,6 +150,7 @@ Which TLS option protects what, and with which CA:
 
 - **Keep the CAs apart.** Every server accepts any certificate from the route CA as a cluster peer, so a client holding one could join the cluster. `NewMonoApplication` fails if the client CA is, or is signed by, the route CA (or the other way round).
 - **Certificate names.** The listener certificate must name the host clients dial, for example the DNS name of the Service in front of the pods. A client that first connected by host name verifies the other servers of the cluster, discovered by IP address, against that same name.
+- **TLS alone does not authenticate.** Without a client CA the listener encrypts the traffic, but any client that reaches the port connects without credentials, with the global account. Use a client CA (or users in a NATS config file) to decide who connects.
 - **A client certificate is not a permission.** Every client with a valid certificate gets the account it connects to, by default the global account with JetStream. Limit who can reach port 4222 (a NetworkPolicy) and who gets a client certificate.
 - **Renewal.** The listener's and the clients' certificates are renewed without a restart, so both can be short-lived. Connections already established keep their session. The client CA is read once: to replace it, put the old and the new CA in the file and do a rolling restart.
 

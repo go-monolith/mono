@@ -735,7 +735,10 @@ func WithNATSClusterTLS(certFile, keyFile, caFile string) MonoFrameworkOption {
 // connecting). Clients renew their own certificate with
 // helper.NATSClientTLS.
 //
-// A client certificate authenticates a client but does not authorize it:
+// Without ClientCAFile the listener encrypts but does not authenticate: any
+// client that reaches the port connects without credentials, with the
+// global account, as without TLS. A client certificate authenticates a client
+// but does not authorize it:
 // every client with a valid certificate gets the permissions of the account
 // it connects to (the global account unless a NATS config file defines
 // users), including JetStream and the service discovery subjects. Restrict

@@ -122,8 +122,14 @@ func (ca *testCA) pool() *x509.CertPool {
 	return p
 }
 
-// intermediate returns a CA signed by ca.
+// intermediate returns a CA signed by ca, valid from an hour ago for a day.
 func (ca *testCA) intermediate(t *testing.T, cn string) *testCA {
+	t.Helper()
+	return ca.intermediateAt(t, cn, time.Now().Add(-time.Hour), time.Now().Add(24*time.Hour))
+}
+
+// intermediateAt returns a CA signed by ca with the given validity.
+func (ca *testCA) intermediateAt(t *testing.T, cn string, notBefore, notAfter time.Time) *testCA {
 	t.Helper()
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
@@ -132,8 +138,8 @@ func (ca *testCA) intermediate(t *testing.T, cn string) *testCA {
 	tmpl := &x509.Certificate{
 		SerialNumber:          big.NewInt(time.Now().UnixNano()),
 		Subject:               pkix.Name{CommonName: cn},
-		NotBefore:             time.Now().Add(-time.Hour),
-		NotAfter:              time.Now().Add(24 * time.Hour),
+		NotBefore:             notBefore,
+		NotAfter:              notAfter,
 		IsCA:                  true,
 		KeyUsage:              x509.KeyUsageCertSign,
 		BasicConstraintsValid: true,

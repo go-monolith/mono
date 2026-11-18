@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/nats-io/nats-server/v2/server"
 
@@ -142,7 +143,7 @@ func checkSeparateCAs(clientCAFile, routeCAFile string, routePool *x509.CertPool
 				return shared(c)
 			}
 		}
-		if _, err := c.Verify(x509.VerifyOptions{Roots: routePool, KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageAny}}); err == nil {
+		if chains(c, routePool, routeCAs) {
 			return shared(c)
 		}
 	}
@@ -151,13 +152,32 @@ func checkSeparateCAs(clientCAFile, routeCAFile string, routePool *x509.CertPool
 		clientPool.AddCert(c)
 	}
 	for _, r := range routeCAs {
-		if _, err := r.Verify(x509.VerifyOptions{Roots: clientPool, KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageAny}}); err == nil {
+		if chains(r, clientPool, clientCAs) {
 			return fmt.Errorf("the route CA %q is, or is signed by, the client CA: "+
 				"a route certificate from it would be accepted as a client; use a separate CA for clients",
 				r.Subject.String())
 		}
 	}
 	return nil
+}
+
+// chains reports whether c is signed by one of the CA certificates of other
+// or chains to roots. The validity period is not what is asked: a CA
+// certificate that has expired or is not valid yet is still the same
+// authority, so the direct signatures are checked without regard to time,
+// and the chain is tried at times inside c's own validity as well as now.
+func chains(c *x509.Certificate, roots *x509.CertPool, other []*x509.Certificate) bool {
+	for _, o := range other {
+		if bytes.Equal(c.RawIssuer, o.RawSubject) && c.CheckSignatureFrom(o) == nil {
+			return true
+		}
+	}
+	for _, at := range []time.Time{time.Now(), c.NotBefore.Add(time.Second), c.NotBefore.Add(c.NotAfter.Sub(c.NotBefore) / 2)} {
+		if _, err := c.Verify(x509.VerifyOptions{Roots: roots, CurrentTime: at, KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageAny}}); err == nil {
+			return true
+		}
+	}
+	return false
 }
 
 // readCertificates parses every CERTIFICATE block of a PEM file.
