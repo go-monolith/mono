@@ -1,0 +1,104 @@
+# A NATS client of the k8s-cluster example that runs outside the application:
+# two replicas of the client program (client/main.go, /k8s-cluster-client in
+# the same image) that connect to the servers' client listener through the
+# Service mono-cluster-client with mutual TLS, call the greeter's hello
+# service and record visits in its stream.
+#
+#   examples/k8s-cluster/deploy/create-client-tls-secret.sh   # or client-tls-cert-manager.yaml
+#   kubectl apply -f examples/k8s-cluster/deploy/client.yaml
+#   kubectl -n mono-demo port-forward svc/mono-greeter-client 8081:8080
+#   curl 'localhost:8081/hello?name=world'
+#
+# The client certificate is in the Secret mono-greeter-client-tls (tls.crt,
+# tls.key, and ca.crt, the CA of the listener certificate). A renewed
+# certificate is presented on the next reconnect without a restart.
+apiVersion: v1
+kind: Service
+metadata:
+  name: mono-greeter-client
+  namespace: mono-demo
+spec:
+  selector:
+    app: mono-greeter-client
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mono-greeter-client
+  namespace: mono-demo
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: mono-greeter-client
+  template:
+    metadata:
+      labels:
+        app: mono-greeter-client
+    spec:
+      terminationGracePeriodSeconds: 15
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+      containers:
+        - name: client
+          image: mono-k8s-cluster:0.2.0
+          imagePullPolicy: IfNotPresent
+          command: ["/k8s-cluster-client"]
+          env:
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            # The Service name, which the listener certificate names.
+            - name: NATS_URL
+              value: tls://mono-cluster-client.mono-demo.svc.cluster.local:4222
+            - name: NATS_CLIENT_TLS_DIR
+              value: /etc/nats-client-tls
+            - name: HTTP_ADDR
+              value: ":8080"
+          ports:
+            - name: http
+              containerPort: 8080
+          lifecycle:
+            preStop:
+              sleep:
+                seconds: 5
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            periodSeconds: 5
+            failureThreshold: 2
+          resources:
+            requests:
+              cpu: 20m
+              memory: 32Mi
+            limits:
+              cpu: 500m
+              memory: 96Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: client-tls
+              mountPath: /etc/nats-client-tls
+              readOnly: true
+      volumes:
+        - name: client-tls
+          secret:
+            secretName: mono-greeter-client-tls
+            defaultMode: 0440

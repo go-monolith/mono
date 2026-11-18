@@ -1,0 +1,108 @@
+# Client TLS for the k8s-cluster example, issued and renewed by cert-manager,
+# as an alternative to create-client-tls-secret.sh.
+#
+#   kubectl apply -f examples/k8s-cluster/deploy/client-tls-cert-manager.yaml
+#
+# A client CA of its own, never the route CA: every server accepts a
+# certificate from the route CA as a cluster peer, so a client holding one
+# could join the cluster (the servers refuse to start with a client CA that is,
+# or is signed by, the route CA). The client CA issues:
+#   - the listener certificate of the servers (Secret mono-cluster-client-tls),
+#     for the Service name mono-cluster-client, and for localhost and 127.0.0.1
+#     so operators can reach a pod through kubectl port-forward;
+#   - the certificate of the client Deployment (Secret mono-greeter-client-tls).
+# Each Secret's ca.crt is the client CA: the servers verify client
+# certificates against it, and the clients verify the listener against it.
+#
+# Both leaf certificates are short-lived (24 hours) and renewed every 8 hours
+# with a new key; the servers and the clients pick them up without a restart.
+# renewBefore (16 hours) is how long cert-manager may be down before they
+# expire. When the Secrets already exist (created by the script), delete them
+# first: cert-manager adopts a valid existing certificate as it is.
+#
+# Requires cert-manager installed in the cluster.
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: mono-client-selfsigned
+  namespace: mono-demo
+spec:
+  selfSigned: {}
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: mono-client-ca
+  namespace: mono-demo
+spec:
+  isCA: true
+  commonName: mono-cluster client CA
+  secretName: mono-client-ca
+  duration: 87600h # 10 years
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+    # Keep the CA key when the CA certificate is renewed: the servers read the
+    # client CA once.
+    rotationPolicy: Never
+  issuerRef:
+    name: mono-client-selfsigned
+    kind: Issuer
+---
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: mono-client-ca
+  namespace: mono-demo
+spec:
+  ca:
+    secretName: mono-client-ca
+---
+# The servers' client listener: TLS server use, for the names clients dial.
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: mono-cluster-client-tls
+  namespace: mono-demo
+spec:
+  secretName: mono-cluster-client-tls
+  dnsNames:
+    - mono-cluster-client.mono-demo.svc.cluster.local
+    - mono-cluster-client.mono-demo.svc
+    - localhost
+  ipAddresses:
+    - 127.0.0.1
+  usages:
+    - server auth
+    - digital signature
+  duration: 24h
+  renewBefore: 16h   # renewed every 8 hours
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+    rotationPolicy: Always
+  issuerRef:
+    name: mono-client-ca
+    kind: Issuer
+---
+# The client Deployment's identity: TLS client use only.
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: mono-greeter-client-tls
+  namespace: mono-demo
+spec:
+  secretName: mono-greeter-client-tls
+  commonName: mono-greeter-client
+  usages:
+    - client auth
+    - digital signature
+  duration: 24h
+  renewBefore: 16h
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+    rotationPolicy: Always
+  issuerRef:
+    name: mono-client-ca
+    kind: Issuer

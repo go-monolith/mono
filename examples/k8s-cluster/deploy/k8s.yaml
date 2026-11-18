@@ -1,10 +1,14 @@
 # Three replicas of the k8s-cluster example, one per node, whose embedded NATS
 # servers form one cluster with clustered JetStream.
 #
-#   examples/k8s-cluster/deploy/create-route-secret.sh      # route and system passwords
-#   examples/k8s-cluster/deploy/create-route-tls-secret.sh  # route TLS certificate
-#     (or, with cert-manager: kubectl apply -f examples/k8s-cluster/deploy/route-tls-cert-manager.yaml)
+#   examples/k8s-cluster/deploy/create-route-secret.sh       # route and system passwords
+#   examples/k8s-cluster/deploy/create-route-tls-secret.sh   # route TLS certificate
+#   examples/k8s-cluster/deploy/create-client-tls-secret.sh  # client TLS certificates
+#     (or, with cert-manager: kubectl apply -f examples/k8s-cluster/deploy/route-tls-cert-manager.yaml
+#      -f examples/k8s-cluster/deploy/client-tls-cert-manager.yaml)
 #   kubectl apply -f examples/k8s-cluster/deploy/k8s.yaml
+#   kubectl apply -f examples/k8s-cluster/deploy/client.yaml          # the NATS client Deployment
+#   kubectl apply -f examples/k8s-cluster/deploy/network-policy.yaml  # optional
 #
 # Three servers with JS_REPLICAS=3 keep JetStream available while one pod is
 # down (a restart, a rolling update, a node drain); two servers would not. To
@@ -12,11 +16,14 @@
 # an odd number of servers; JS_REPLICAS is at most 5 and at most the number of
 # servers.
 #
-# Exposure: the NATS client listener is bound to loopback (the application's
-# own client connects in-process). Routes use mutual TLS with the certificate
-# in the Secret mono-cluster-route-tls and require the password in the Secret
-# mono-cluster-routes. To restrict who may connect to 6222 at all, add a NetworkPolicy that
-# allows it only from app=mono-cluster pods.
+# Exposure: routes (6222) use mutual TLS with the certificate in the Secret
+# mono-cluster-route-tls and require the password in the Secret
+# mono-cluster-routes. The NATS client listener (4222) requires mutual TLS
+# with the certificate in the Secret mono-cluster-client-tls, issued by a
+# client CA separate from the route CA; the clients of deploy/client.yaml
+# reach it through the Service mono-cluster-client. The application's own
+# client connects in-process. deploy/network-policy.yaml restricts 6222 to the
+# servers and 4222 to the client pods.
 apiVersion: v1
 kind: Namespace
 metadata:
@@ -52,6 +59,23 @@ spec:
     - name: http
       port: 8080
       targetPort: http
+---
+# The NATS client listener, for clients outside the application
+# (deploy/client.yaml). The listener certificate names this Service; a client
+# that reconnects to another pod it discovered by IP address verifies it
+# against the same name.
+apiVersion: v1
+kind: Service
+metadata:
+  name: mono-cluster-client
+  namespace: mono-demo
+spec:
+  selector:
+    app: mono-cluster
+  ports:
+    - name: nats
+      port: 4222
+      targetPort: nats
 ---
 apiVersion: apps/v1
 kind: StatefulSet
@@ -132,6 +156,14 @@ spec:
             # (deploy/route-tls-cert-manager.yaml).
             - name: NATS_ROUTE_TLS_DIR
               value: /etc/nats-route-tls
+            # Mutual TLS on the client listener (WithNATSClientTLS): the
+            # listener certificate and key, and the client CA (ca.crt), from
+            # the Secret mono-cluster-client-tls, created by
+            # deploy/create-client-tls-secret.sh or by cert-manager
+            # (deploy/client-tls-cert-manager.yaml). Without it the listener
+            # stays on loopback.
+            - name: NATS_CLIENT_TLS_DIR
+              value: /etc/nats-client-tls
             # Replicas of the framework's streams (visits, cron schedule).
             - name: JS_REPLICAS
               value: "3"
@@ -149,6 +181,8 @@ spec:
               containerPort: 8080
             - name: cluster
               containerPort: 6222
+            - name: nats
+              containerPort: 4222
           # Keep serving for a few seconds after the pod starts terminating:
           # the Service and kube-proxy remove the endpoint asynchronously, so
           # without this a request can still reach a pod that has already
@@ -191,6 +225,9 @@ spec:
             - name: route-tls
               mountPath: /etc/nats-route-tls
               readOnly: true
+            - name: client-tls
+              mountPath: /etc/nats-client-tls
+              readOnly: true
       volumes:
         # tls.crt, tls.key and ca.crt. A renewed certificate is picked up by
         # the running servers (the kubelet swaps the Secret's files when the
@@ -199,6 +236,12 @@ spec:
         - name: route-tls
           secret:
             secretName: mono-cluster-route-tls
+            defaultMode: 0440
+        # The client listener's tls.crt and tls.key, and ca.crt, the client
+        # CA. Renewed like the route certificate.
+        - name: client-tls
+          secret:
+            secretName: mono-cluster-client-tls
             defaultMode: 0440
   # JetStream data on a per-pod volume (the cluster's default StorageClass), so a
   # restarted pod rejoins with its stream replicas instead of resyncing them.

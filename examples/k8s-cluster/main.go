@@ -5,8 +5,11 @@
 // Every replica runs the same configuration: its server name (POD_NAME, unique
 // and stable in a StatefulSet), the routes to all replicas (NATS_ROUTES), the
 // route password (NATS_ROUTE_PASSWORD), the directory of the route TLS
-// certificate (NATS_ROUTE_TLS_DIR, optional: tls.crt, tls.key, ca.crt), the password of the system account
-// user "admin" (NATS_SYSTEM_PASSWORD, optional) and the replicas of the framework's
+// certificate (NATS_ROUTE_TLS_DIR, optional: tls.crt, tls.key, ca.crt), the
+// directory of the client listener certificate (NATS_CLIENT_TLS_DIR,
+// optional: tls.crt, tls.key, and ca.crt, the CA client certificates must
+// chain to), the password of the system account user "admin"
+// (NATS_SYSTEM_PASSWORD, optional) and the replicas of the framework's
 // streams (JS_REPLICAS). Start waits for the other replicas, so they can start
 // together. An HTTP API on HTTP_ADDR exposes:
 //
@@ -45,6 +48,7 @@ import (
 	"github.com/go-monolith/mono/examples/k8s-cluster/greeter"
 	"github.com/go-monolith/mono/examples/k8s-cluster/greeter/contract"
 	"github.com/go-monolith/mono/pkg/helper"
+	"github.com/go-monolith/mono/pkg/types"
 )
 
 // config is read from the environment; every value but the routes has a
@@ -57,6 +61,7 @@ type config struct {
 	routePassword string
 	systemPass    string
 	routeTLSDir   string
+	clientTLSDir  string
 	storeDir      string
 	replicas      int
 	readyTimeout  time.Duration
@@ -71,6 +76,7 @@ func loadConfig() (config, error) {
 		routePassword: os.Getenv("NATS_ROUTE_PASSWORD"),
 		systemPass:    os.Getenv("NATS_SYSTEM_PASSWORD"),
 		routeTLSDir:   os.Getenv("NATS_ROUTE_TLS_DIR"),
+		clientTLSDir:  os.Getenv("NATS_CLIENT_TLS_DIR"),
 		storeDir:      envOr("JS_STORE_DIR", "/data/jetstream"),
 		httpAddr:      envOr("HTTP_ADDR", ":8080"),
 		natsDebug:     os.Getenv("NATS_DEBUG") == "true",
@@ -122,9 +128,7 @@ func run() error {
 		mono.WithJetStreamDefaultReplicas(cfg.replicas),
 		// How long Start waits for the other replicas.
 		mono.WithJetStreamReadyTimeout(cfg.readyTimeout),
-		// The client listener stays on loopback: only the application's own
-		// client uses it, and it connects in-process.
-		mono.WithNATSHost("127.0.0.1"),
+		// The application's own client connects in-process.
 		mono.WithNATSInProcessConn(),
 		mono.WithServiceDiscovery(mono.ServiceDiscoveryConfig{
 			Version:     "1.0.0",
@@ -147,10 +151,27 @@ func run() error {
 			filepath.Join(cfg.routeTLSDir, "ca.crt"),
 		))
 	}
+	if cfg.clientTLSDir != "" {
+		// Clients outside the application (deploy/client.yaml) connect to
+		// the client listener on the pod IP, with mutual TLS: a certificate
+		// from the client CA in ca.crt is required. The listener leaves
+		// loopback only together with TLS.
+		opts = append(opts,
+			mono.WithNATSHost("0.0.0.0"),
+			mono.WithNATSClientTLS(types.ClientTLSConfig{
+				CertFile:     filepath.Join(cfg.clientTLSDir, "tls.crt"),
+				KeyFile:      filepath.Join(cfg.clientTLSDir, "tls.key"),
+				ClientCAFile: filepath.Join(cfg.clientTLSDir, "ca.crt"),
+			}))
+	} else {
+		// Without client TLS the client listener stays on loopback: only the
+		// application's own client uses it.
+		opts = append(opts, mono.WithNATSHost("127.0.0.1"))
+	}
 	if cfg.systemPass != "" {
 		// A system account user for operator tooling (nats server report,
-		// nats server raft peer-remove), reachable through the loopback
-		// client listener only, so through kubectl port-forward.
+		// nats server raft peer-remove), through kubectl port-forward (with
+		// client TLS, also with a client certificate).
 		opts = append(opts, mono.WithNATSSystemAccount("admin", cfg.systemPass))
 	}
 	if cfg.natsDebug {

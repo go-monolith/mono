@@ -19,10 +19,22 @@ instance serves every service, and the services behave as one application:
   │  JetStream (PVC)  │   │  JetStream (PVC)  │   │  JetStream (PVC)  │
   │  HTTP :8080       │   │  HTTP :8080       │   │  HTTP :8080       │
   └───────────────────┘   └───────────────────┘   └───────────────────┘
-     embedded NATS servers, routes on 6222 in a full mesh,
+     embedded NATS servers, routes on 6222 in a full mesh (route TLS),
      server_name = pod name
         ▲ Service mono-cluster:8080 (load-balanced HTTP API)
+        ▲ Service mono-cluster-client:4222 (NATS clients, mutual TLS)
+        │
+  ┌─────┴─────────────────────────────────────────┐
+  │ Deployment mono-greeter-client (2 pods)         │
+  │  nats.go client, helper.NATSClientTLS           │
+  │  HTTP :8080 ◀── Service mono-greeter-client     │
+  └─────────────────────────────────────────────────┘
 ```
+
+The servers' own HTTP API reaches the greeter in-process. The client
+Deployment is a separate program (`client/main.go`) that reaches it the way an
+application outside the cluster's servers would: over NATS, through the client
+listener, with a certificate from a client CA.
 
 ## Build and deploy
 
@@ -42,12 +54,19 @@ Set `image:` in `deploy/k8s.yaml` to `$IMAGE`, then:
 ```bash
 examples/k8s-cluster/deploy/create-route-secret.sh       # route and system passwords (namespace mono-demo)
 examples/k8s-cluster/deploy/create-route-tls-secret.sh   # route TLS certificate (needs openssl)
-# or, with cert-manager installed instead of the script:
-#   kubectl apply -f examples/k8s-cluster/deploy/route-tls-cert-manager.yaml
+examples/k8s-cluster/deploy/create-client-tls-secret.sh  # client TLS certificates (needs openssl)
+# or, with cert-manager installed instead of the scripts:
+#   kubectl apply -f examples/k8s-cluster/deploy/route-tls-cert-manager.yaml \
+#                 -f examples/k8s-cluster/deploy/client-tls-cert-manager.yaml
 kubectl apply -f examples/k8s-cluster/deploy/k8s.yaml
 kubectl -n mono-demo rollout status sts/mono-cluster
 kubectl -n mono-demo get pods -o wide                # one pod per node
+kubectl apply -f examples/k8s-cluster/deploy/client.yaml           # the NATS client Deployment
+kubectl apply -f examples/k8s-cluster/deploy/network-policy.yaml   # optional, see Client TLS
 ```
+
+Set `image:` in `deploy/client.yaml` to `$IMAGE` as well: the image holds both
+programs.
 
 When you change the code, use a new tag: with `imagePullPolicy: IfNotPresent`,
 a node keeps the image it already has.
@@ -57,13 +76,18 @@ a node keeps the image it already has.
 | File | Purpose |
 |---|---|
 | `main.go` | Host program: configuration from the environment, the application, the HTTP API |
+| `client/main.go` | NATS client outside the application: mutual TLS to the client listener, the greeter's services over NATS, an HTTP API |
 | `greeter/` | The module (`module.go`) and its contract (`contract/`) |
-| `Dockerfile` | Static binary on `gcr.io/distroless/static-debian12:nonroot`; build context is the repository root |
+| `Dockerfile` | Static binaries (`/k8s-cluster`, `/k8s-cluster-client`) on `gcr.io/distroless/static-debian12:nonroot`; build context is the repository root |
 | `Dockerfile.dockerignore` | Keeps the build context small |
-| `deploy/k8s.yaml` | Namespace, headless and HTTP Services, StatefulSet, PodDisruptionBudget |
+| `deploy/k8s.yaml` | Namespace, headless, HTTP and NATS client Services, StatefulSet, PodDisruptionBudget |
+| `deploy/client.yaml` | The client's Deployment and HTTP Service |
+| `deploy/network-policy.yaml` | Allows 6222 only between the servers and 4222 only from the client pods |
 | `deploy/create-route-secret.sh` | Creates the Secret with a random route password and system account password |
 | `deploy/create-route-tls-secret.sh` | Creates a route CA (in `./route-ca/`, git-ignored) and the Secret `mono-cluster-route-tls` with a certificate for every pod |
 | `deploy/route-tls-cert-manager.yaml` | The same Secret issued by cert-manager: a 24-hour certificate renewed every 8 hours |
+| `deploy/create-client-tls-secret.sh` | Creates a client CA (in `./client-ca/`, git-ignored), the listener certificate (Secret `mono-cluster-client-tls`) and the client's certificate (Secret `mono-greeter-client-tls`) |
+| `deploy/client-tls-cert-manager.yaml` | The same Secrets issued by cert-manager, with their own CA: 24-hour certificates renewed every 8 hours |
 
 ## Framework options
 
@@ -96,9 +120,7 @@ mono.NewMonoApplication(
   deploy to another namespace, change `NATS_ROUTES`.
 - **Route authentication.** `WithNATSClusterAuth` requires the password from
   every route and adds it to the routes this server opens. The password comes
-  from the Secret `mono-cluster-routes` (`deploy/create-route-secret.sh`). The
-  NATS client listener is bound to `127.0.0.1`, so only the route port (6222)
-  is reachable from outside the pod.
+  from the Secret `mono-cluster-routes` (`deploy/create-route-secret.sh`).
 - **Route TLS.** `WithNATSClusterTLS` makes every route use mutual TLS with the
   certificate, key and CA in the Secret `mono-cluster-route-tls`, mounted at
   `NATS_ROUTE_TLS_DIR`. One certificate for
@@ -131,6 +153,54 @@ mono.NewMonoApplication(
     StatefulSet's `updateStrategy` to `OnDelete`, apply the manifest, delete all
     pods, then restore `RollingUpdate`. JetStream is unavailable until the pods
     are back (about 20 s in the test below).
+- **Client TLS.** `WithNATSClientTLS` makes the client listener (4222) require
+  mutual TLS with the certificate and key in the Secret
+  `mono-cluster-client-tls`, mounted at `NATS_CLIENT_TLS_DIR`, and a client
+  certificate from the CA in its `ca.crt`. The listener then binds to the pod
+  IP behind the Service `mono-cluster-client`; without `NATS_CLIENT_TLS_DIR` it
+  stays on `127.0.0.1`, never exposed without TLS. The application's own client
+  connects in-process either way.
+  - **Its own CA.** The client CA is never the route CA: every server accepts
+    a certificate from the route CA as a cluster peer, so a client holding one
+    could join the cluster. The servers refuse to start with a client CA that
+    is, or is signed by, the route CA. One client CA issues both the listener
+    certificate (for `mono-cluster-client.mono-demo.svc.cluster.local`, and
+    `localhost`/`127.0.0.1` for `kubectl port-forward`) and the clients'
+    certificates, so each Secret's `ca.crt` serves both directions.
+  - **The client** (`client/main.go`, `deploy/client.yaml`) connects to
+    `tls://mono-cluster-client.mono-demo.svc.cluster.local:4222` with
+    `helper.NATSClientTLS`, which presents its certificate from the Secret
+    `mono-greeter-client-tls` and reloads it when the Secret is renewed, so a
+    renewed certificate is used on the next reconnect. It calls the greeter
+    on its contract's subjects (`services.greeter.hello`, a JetStream publish
+    to `services.greeter.visits`), answers `/hello` like the servers' API, and
+    reconnects to another pod when its server goes away. It verifies the pods
+    it discovers by IP address against the Service name it first dialed.
+  - **Renewing:** as for routes, the servers pick up a renewed listener
+    certificate for new connections, and the clients a renewed client
+    certificate on their next reconnect, without a restart; established
+    connections keep their session, also past their certificates' expiry. The
+    cert-manager manifest issues 24-hour certificates renewed every 8 hours.
+    The servers read the client CA once: to replace it, put the old and the new
+    CA in `ca.crt` and do a rolling restart.
+  - **Turning it on for a running cluster:** a rolling update is enough (no
+    restart of every pod at once, unlike route TLS), since routes are not
+    affected. Clients must use TLS from then on.
+  - **A certificate is not a permission.** Every client with a valid
+    certificate gets the global account, JetStream included.
+    `deploy/network-policy.yaml` limits port 4222 to the client pods and 6222
+    to the servers; it needs a network plugin that enforces NetworkPolicy.
+  - **Operators** reach a pod through `kubectl port-forward`, now with TLS
+    and a client certificate (any certificate from the client CA):
+
+    ```bash
+    kubectl -n mono-demo port-forward pod/mono-cluster-0 4222:4222 &
+    for k in tls.crt tls.key ca.crt; do
+      kubectl -n mono-demo get secret mono-greeter-client-tls -o jsonpath="{.data.${k//./\\.}}" | base64 -d > "op-$k"
+    done
+    nats -s tls://127.0.0.1:4222 --tlsca op-ca.crt --tlscert op-tls.crt --tlskey op-tls.key \
+      --user admin --password "$SYSTEM_PASSWORD" server report jetstream
+    ```
 - **Start waits for the cluster.** A three-server JetStream cluster has no
   quorum until two of the servers are routed. The framework's `Start` waits for
   JetStream before it starts the module, and retries creating the streams and
@@ -174,6 +244,7 @@ mono.NewMonoApplication(
 | `NATS_ROUTES` | (required) | comma-separated route URLs of every replica |
 | `NATS_ROUTE_PASSWORD` | unset | route password (`WithNATSClusterAuth`); unset means routes are not authenticated |
 | `NATS_ROUTE_TLS_DIR` | unset | directory with `tls.crt`, `tls.key` and `ca.crt` for route TLS (`WithNATSClusterTLS`); unset means routes without TLS |
+| `NATS_CLIENT_TLS_DIR` | unset | directory with the listener's `tls.crt` and `tls.key`, and `ca.crt`, the client CA, for client mutual TLS (`WithNATSClientTLS`); the listener then binds to `0.0.0.0`; unset means the listener stays on `127.0.0.1` without TLS |
 | `NATS_SYSTEM_PASSWORD` | unset | password of the system account user `admin` (`WithNATSSystemAccount`), for `nats server report` and `nats server raft peer-remove`; unset means no system account user |
 | `NATS_CLUSTER_NAME` | `mono-demo` | NATS cluster name |
 | `NATS_CLUSTER_PORT` | `6222` | route listener port |
@@ -219,6 +290,15 @@ curl localhost:8080/cluster
   any pod.
 - **`visits_stream`**: the stream's replication: `replicas: 3`, the `leader`,
   and the two other replicas with `"current": true`.
+
+Through the client Deployment, over NATS with mutual TLS:
+
+```bash
+kubectl -n mono-demo port-forward svc/mono-greeter-client 8081:8080 &
+curl 'localhost:8081/hello?name=ada'
+# {"greeting": {"message": "Hello, ada!", "instance": "mono-cluster-2"},
+#  "http_instance": "mono-greeter-client-…", "visit_stored": {"stream": "GREETER_VISITS", "sequence": 3, "duplicate": false}}
+```
 
 Logs:
 
@@ -276,5 +356,5 @@ number of servers).
 ## Clean up
 
 ```bash
-kubectl delete namespace mono-demo     # also deletes the PVCs, their data and the route Secret
+kubectl delete namespace mono-demo     # also deletes the PVCs, their data and the Secrets
 ```
