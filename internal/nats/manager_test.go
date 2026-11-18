@@ -1799,48 +1799,87 @@ max_payload: 524288
 
 // TestNATSManager_ConfigFileWithJetStream tests config file with JetStream settings.
 func TestNATSManager_ConfigFileWithJetStream(t *testing.T) {
-	logger := newMockLogger()
-	tmpDir := t.TempDir()
-	configPath := tmpDir + "/nats.conf"
-	jsDir := tmpDir + "/jetstream"
-
-	// Config file with JetStream enabled
-	configContent := fmt.Sprintf(`
-port: 4333
-jetstream: {
-    store_dir: "%s"
-}
-`, jsDir)
-	if err := writeTestFile(configPath, configContent); err != nil {
-		t.Fatalf("failed to write config file: %v", err)
-	}
-
-	mgr, err := NewNATSManager(logger,
-		WithConfigFile(configPath),
-		WithDontListen(),
-		WithInProcessConn(),
-	)
-	if err != nil {
-		t.Fatalf("failed to create NATS manager: %v", err)
-	}
-
-	ctx := context.Background()
-	if err := mgr.Start(ctx); err != nil {
-		t.Fatalf("failed to start NATS manager: %v", err)
-	}
-	defer func() {
-		if err := mgr.Stop(ctx); err != nil {
-			t.Errorf("failed to stop NATS manager: %v", err)
+	// JetStream enabled only by a jetstream{} block is treated like
+	// JetStream enabled by WithJetStream (issue #54).
+	start := func(t *testing.T, logger *mockLogger, conf string, opts ...NATSOption) *natsManager {
+		t.Helper()
+		configPath := t.TempDir() + "/nats.conf"
+		if err := writeTestFile(configPath, conf); err != nil {
+			t.Fatalf("failed to write config file: %v", err)
 		}
-	}()
+		mgr, err := NewNATSManager(logger, append([]NATSOption{WithConfigFile(configPath), WithDontListen(), WithInProcessConn()}, opts...)...)
+		if err != nil {
+			t.Fatalf("failed to create NATS manager: %v", err)
+		}
+		if err := mgr.Start(context.Background()); err != nil {
+			t.Fatalf("failed to start NATS manager: %v", err)
+		}
+		t.Cleanup(func() {
+			if err := mgr.Stop(context.Background()); err != nil {
+				t.Errorf("failed to stop NATS manager: %v", err)
+			}
+		})
+		return mgr.(*natsManager)
+	}
 
-	// Verify JetStream is available (it was configured in the config file)
-	// Note: JetStream from config file is independent of our JetStreamEnabled flag
-	// The server will have JetStream if the config file enables it
-	info := mgr.ServerInfo()
-	// ServerInfo reflects our internal config, not what was in the file
-	// So we need to verify via actual connection if needed
-	t.Logf("ServerInfo JetStreamEnabled: %v", info.JetStreamEnabled)
+	t.Run("file settings are adopted", func(t *testing.T) {
+		logger := newMockLogger()
+		jsDir := t.TempDir() + "/jetstream"
+		m := start(t, logger, fmt.Sprintf("jetstream: {\n    store_dir: %q\n    domain: \"file-domain\"\n}\n", jsDir))
+
+		if !m.ServerInfo().JetStreamEnabled {
+			t.Error("ServerInfo().JetStreamEnabled = false")
+		}
+		if _, err := m.JetStream(); err != nil {
+			t.Errorf("JetStream() = %v", err)
+		}
+		if !logger.hasMessage("INFO", "JetStream enabled") {
+			t.Error("no \"JetStream enabled\" log line")
+		}
+		m.mu.RLock()
+		protected := m.protectStop != nil
+		m.mu.RUnlock()
+		if !protected {
+			t.Error("the consumer protection pass did not start")
+		}
+		cfg := m.server.JetStreamConfig()
+		if cfg == nil || !strings.HasPrefix(cfg.StoreDir, jsDir) {
+			t.Errorf("store dir = %+v, want the file's %s", cfg, jsDir)
+		}
+		if cfg != nil && cfg.Domain != "file-domain" {
+			t.Errorf("domain = %q, want the file's", cfg.Domain)
+		}
+	})
+
+	t.Run("programmatic options override the file", func(t *testing.T) {
+		logger := newMockLogger()
+		fileDir, optDir := t.TempDir()+"/file", t.TempDir()+"/opt"
+		m := start(t, logger, fmt.Sprintf("jetstream: {\n    store_dir: %q\n    domain: \"file-domain\"\n}\n", fileDir),
+			WithJetStream(optDir), WithJetStreamDomain("opt-domain"))
+
+		cfg := m.server.JetStreamConfig()
+		if cfg == nil || !strings.HasPrefix(cfg.StoreDir, optDir) {
+			t.Errorf("store dir = %+v, want %s", cfg, optDir)
+		}
+		if cfg != nil && cfg.Domain != "opt-domain" {
+			t.Errorf("domain = %q, want opt-domain", cfg.Domain)
+		}
+	})
+
+	t.Run("a domain option applies to file-enabled JetStream", func(t *testing.T) {
+		logger := newMockLogger()
+		m := start(t, logger, fmt.Sprintf("jetstream: {\n    store_dir: %q\n}\n", t.TempDir()), WithJetStreamDomain("opt-domain"))
+		if cfg := m.server.JetStreamConfig(); cfg == nil || cfg.Domain != "opt-domain" {
+			t.Errorf("JetStream config = %+v, want domain opt-domain", cfg)
+		}
+	})
+
+	t.Run("a file without jetstream leaves it off", func(t *testing.T) {
+		m := start(t, newMockLogger(), "max_payload: 2MB\n")
+		if m.ServerInfo().JetStreamEnabled || m.server.JetStreamEnabled() {
+			t.Error("JetStream enabled without a jetstream{} block")
+		}
+	})
 }
 
 // TestNATSManager_InvalidConfigFile tests error when config file has invalid syntax.

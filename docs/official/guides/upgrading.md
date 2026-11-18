@@ -77,6 +77,10 @@ This includes non-durable consumers your application creates itself. The server 
 - **Plugin services are served over NATS.** Request-reply, queue group, stream consumer and cron services registered in a plugin's container are subscribed at `services.<plugin name>.<service>`, and its channel routers run. Before, they were never subscribed and calls got no responder. A plugin that registers such services and shares its `Name()` with a module, or with another plugin that registers such services, now fails `Start`.
 - **A failed `Start` stops the plugins and middleware.** When a middleware or module fails to start, or a later step fails, the started middleware and the plugins are stopped too, after the modules. Before, their `Stop()` was never called, not by the rollback and not by `app.Stop()`.
 
+### JetStream from a config file is recognized
+
+*v0.2.7.* JetStream enabled only by a `jetstream{}` block in a `WithNATSConfigFile` file is treated like JetStream enabled by `WithJetStreamStorageDir`. The startup log says `jetstream=true` and `JetStream enabled`, the consumer protection pass runs right after the server starts, and `WithJetStreamDomain` applies; it was silently dropped before. JetStream services already worked.
+
 ### Health reports JetStream
 
 *v0.2.0.* `FrameworkHealth.JetStream` (`Available`, `Clustered`, `MetaLeader`, `ClusterSize`, `Message`; JSON key `jetstream`) reports this server's JetStream state, and is nil when JetStream is disabled. It is not part of `Healthy`: use `JetStream.Available` in a readiness probe if you need it, never in a liveness probe. See [Health and Status](../api/framework.md#health-and-status).

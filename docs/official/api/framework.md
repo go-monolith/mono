@@ -787,7 +787,7 @@ See the [AutoTLS example](../../../examples/auto-tls/README.md).
 func WithJetStreamDomain(domain string) MonoFrameworkOption
 ```
 
-Sets the JetStream domain for multi-tenancy. It does not enable JetStream: combine it with `WithJetStreamStorageDir`.
+Sets the JetStream domain for multi-tenancy. It does not enable JetStream: combine it with `WithJetStreamStorageDir` or a `jetstream{}` block in a NATS config file. It overrides the file's `domain`.
 
 | Property | Value |
 |----------|-------|
@@ -806,7 +806,7 @@ mono.WithJetStreamDomain("production")
 func WithJetStreamStorageDir(dir string) MonoFrameworkOption
 ```
 
-Enables JetStream with persistent file storage at the specified directory. JetStream is enabled only by this option (or a `jetstream{}` block in a NATS config file).
+Enables JetStream with persistent file storage at the specified directory. JetStream is enabled only by this option (or a `jetstream{}` block in a NATS config file). JetStream enabled by the file is treated the same way, with the file's `store_dir` and `domain`; this option's directory overrides `store_dir`.
 
 | Property | Value |
 |----------|-------|
