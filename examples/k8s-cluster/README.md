@@ -63,7 +63,7 @@ a node keeps the image it already has.
 | `deploy/k8s.yaml` | Namespace, headless and HTTP Services, StatefulSet, PodDisruptionBudget |
 | `deploy/create-route-secret.sh` | Creates the Secret with a random route password and system account password |
 | `deploy/create-route-tls-secret.sh` | Creates a route CA (in `./route-ca/`, git-ignored) and the Secret `mono-cluster-route-tls` with a certificate for every pod |
-| `deploy/route-tls-cert-manager.yaml` | The same Secret issued and renewed by cert-manager |
+| `deploy/route-tls-cert-manager.yaml` | The same Secret issued by cert-manager: a 24-hour certificate renewed every 8 hours |
 
 ## Framework options
 
@@ -104,12 +104,27 @@ mono.NewMonoApplication(
   `NATS_ROUTE_TLS_DIR`. One certificate for
   `*.mono-cluster-nats.mono-demo.svc.cluster.local` covers every pod; a server
   without a certificate from the route CA cannot join, even with the password.
-  - **Renewing:** run `create-route-tls-secret.sh` again (it reuses
-    `./route-ca/`), or let cert-manager renew it. The running servers pick up the
-    new certificate for new routes without a restart; they log
-    `Reloaded the cluster TLS certificate`. A certificate from another CA is
-    refused (the servers keep the previous one), so the script refuses to
-    create a new CA while the Secret exists unless `NEW_CA=1` is set.
+  - **Renewing:** the running servers pick up a renewed certificate for new
+    routes without a restart, within 10 seconds of the kubelet updating the
+    mounted files (about a minute after the Secret changes); they log
+    `Reloaded the cluster TLS certificate`. Routes already established keep
+    their session, also past the expiry of the certificate they started with.
+    A certificate from another CA is refused (the servers keep the previous
+    one), so the script refuses to create a new CA while the Secret exists
+    unless `NEW_CA=1` is set.
+  - **Short-lived certificates:** the cert-manager manifest issues a 24-hour
+    certificate, renewed every 8 hours with a new key, so a leaked key is
+    useful for at most a day. Its `renewBefore` (16 hours) is how long
+    cert-manager may be down before the certificate expires; after that a
+    restarted pod fails to start and cannot rejoin until cert-manager renews it.
+    cert-manager accepts a `duration` down to 1 hour. The script issues a
+    certificate for 365 days by default, since it is renewed by hand; use
+    cert-manager for short lifetimes.
+  - **Moving from the script to cert-manager:** delete the Secret
+    (`kubectl -n mono-demo delete secret mono-cluster-route-tls`) before
+    applying the manifest. cert-manager adopts a valid existing certificate as
+    it is and would renew it only shortly before it expires. The new CA then
+    needs every pod restarted at once, as below.
   - **Turning it on for a running cluster:** servers with and without route TLS
     cannot route to each other, and a rolling update would wait forever for the
     first TLS pod to find a quorum. Switch every pod at once: set the
@@ -246,6 +261,7 @@ through the Service), every visit tracked:
 |---|---|---|
 | rolling restart (`kubectl rollout restart`) | 0 of 268 | 0 / 0 / 0 |
 | rolling restart with route TLS | 0 of 443 | 0 / 0 / 0 |
+| route TLS with cert-manager at 1-hour certificates renewed every 15 minutes, for 69 minutes: four renewals, a pod deleted in the second of a renewal, routes outliving their certificate's expiry, then a rolling restart | 0 of 19,993 | 0 / 0 / 0 |
 | one pod down for about 40 s, then back | 0 of 469 | 0 / 0 / 0 |
 | scaling an existing 2-replica deployment to 3 | 1 of 389 | 0 / 0 / 0 |
 

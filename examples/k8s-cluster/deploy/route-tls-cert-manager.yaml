@@ -5,12 +5,16 @@
 #
 # It creates a private CA for the routes and a certificate for every pod of
 # the StatefulSet in the Secret mono-cluster-route-tls (tls.crt, tls.key and
-# ca.crt), the Secret the StatefulSet mounts. cert-manager renews the
-# certificate before it expires; the running servers pick up the renewed
-# certificate for new routes without a restart. A change of CA needs a
-# restart of every pod.
+# ca.crt), the Secret the StatefulSet mounts. The certificate is short-lived
+# (24 hours) and renewed every 8 hours with a new key; the running servers pick
+# up the renewed certificate for new routes within 10 seconds of the kubelet
+# updating the files, without a restart. A change of CA needs a restart of
+# every pod.
 #
-# Requires cert-manager installed in the cluster.
+# Requires cert-manager installed in the cluster. When the Secret already
+# exists (created by create-route-tls-secret.sh), delete it before applying
+# this file: cert-manager adopts a valid existing certificate as it is, and
+# would renew it only shortly before it expires.
 apiVersion: cert-manager.io/v1
 kind: Issuer
 metadata:
@@ -65,8 +69,15 @@ spec:
     - server auth
     - client auth
     - digital signature
-  duration: 2160h    # 90 days
-  renewBefore: 360h  # 15 days
+  # Short-lived: a stolen key is useful for at most a day. renewBefore is
+  # the time cert-manager may be unavailable before the certificate expires:
+  # a server that starts with an expired certificate fails, and peers refuse
+  # it on every new route (established routes stay up). cert-manager accepts
+  # a duration down to 1h and a renewBefore down to 5m; a renewed Secret
+  # reaches the pods after the kubelet's sync (about a minute) plus at most
+  # 10 seconds.
+  duration: 24h
+  renewBefore: 16h   # renewed every 8 hours
   privateKey:
     algorithm: ECDSA
     size: 256

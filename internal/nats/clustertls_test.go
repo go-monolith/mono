@@ -9,6 +9,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"math/big"
 	"net"
@@ -67,11 +68,7 @@ func (ca *testCA) issueFor(t *testing.T, dir, name string, serial int64, ips []n
 
 func (ca *testCA) issueWith(t *testing.T, dir, name string, serial int64, ips []net.IP, usages []x509.ExtKeyUsage) (string, string) {
 	t.Helper()
-	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		t.Fatal(err)
-	}
-	tmpl := &x509.Certificate{
+	return ca.sign(t, dir, name, &x509.Certificate{
 		SerialNumber: big.NewInt(serial),
 		Subject:      pkix.Name{CommonName: name},
 		NotBefore:    time.Now().Add(-time.Hour),
@@ -80,6 +77,30 @@ func (ca *testCA) issueWith(t *testing.T, dir, name string, serial int64, ips []
 		ExtKeyUsage:  usages,
 		DNSNames:     []string{"localhost"},
 		IPAddresses:  ips,
+	})
+}
+
+// issueExpired issues a route certificate that expired a minute ago.
+func (ca *testCA) issueExpired(t *testing.T, dir, name string, serial int64) (string, string) {
+	t.Helper()
+	return ca.sign(t, dir, name, &x509.Certificate{
+		SerialNumber: big.NewInt(serial),
+		Subject:      pkix.Name{CommonName: name},
+		NotBefore:    time.Now().Add(-2 * time.Hour),
+		NotAfter:     time.Now().Add(-time.Minute),
+		KeyUsage:     x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth, x509.ExtKeyUsageClientAuth},
+		IPAddresses:  []net.IP{net.ParseIP("127.0.0.1")},
+	})
+}
+
+// sign issues tmpl from the CA with a new key and writes the certificate and
+// key files.
+func (ca *testCA) sign(t *testing.T, dir, name string, tmpl *x509.Certificate) (string, string) {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
 	}
 	der, err := x509.CreateCertificate(rand.Reader, tmpl, ca.cert, &key.PublicKey, ca.key)
 	if err != nil {
@@ -239,6 +260,20 @@ func TestCertReloader(t *testing.T) {
 	sc, sk := ca.issueWith(t, t.TempDir(), "server-only", 6, []net.IP{net.ParseIP("127.0.0.1")}, []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth})
 	if _, err := newCertReloader(sc, sk, roots, nil); err == nil || !strings.Contains(err.Error(), "TLS client use") {
 		t.Errorf("server-only certificate: err = %v, want a client use error", err)
+	}
+
+	// An expired certificate (an issuer that stopped renewing) is refused on
+	// reload, keeping the previous one, and at start.
+	warns := len(logger.warnCalls)
+	ca.issueExpired(t, dir, "node", 13)
+	next()
+	if s := serial(); s != 12 || len(logger.warnCalls) != warns+1 {
+		t.Errorf("an expired certificate must not be served: serial %d, warn lines %d -> %d", s, warns, len(logger.warnCalls))
+	}
+	ec, ek := ca.issueExpired(t, t.TempDir(), "node", 7)
+	var invalid x509.CertificateInvalidError
+	if _, err := newCertReloader(ec, ek, roots, nil); !errors.As(err, &invalid) || invalid.Reason != x509.Expired {
+		t.Errorf("expired certificate at start: err = %v, want an expiry error", err)
 	}
 
 	// At start, a certificate from another CA is an error.
