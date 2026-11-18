@@ -202,6 +202,8 @@ Plugins start first and stop last, so shared infrastructure (storage, caches) is
    - SetPlugin() for every registered plugin, if it implements UsePluginModule
    - SetDependencyServiceContainer(), SetEventBus(), RegisterServices()
    - Start()
+5. Channel routers start, then NATS subscriptions are created for the
+   services of every module and every plugin
 ```
 
 If a plugin's `Start()` fails, the plugins already started are stopped in reverse order and `app.Start()` returns the error.
@@ -216,7 +218,7 @@ If a plugin's `Start()` fails, the plugins already started are stopped in revers
 4. NATS connection closes
 ```
 
-If `app.Start()` fails after the plugins started (a middleware or module `Start()` fails, the dependencies do not resolve, an event definition is rejected, or a subscription cannot be set up), nothing is left running: the modules started so far stop in reverse order, then the middleware that started in reverse order, then every plugin. A later `app.Start()` starts the plugins again.
+If `app.Start()` fails after the plugins started (a middleware or module `Start()` fails, the dependencies do not resolve, an event definition is rejected, or a subscription cannot be set up), nothing is left running: the modules started so far stop in reverse order, then the middleware that started in reverse order, then every plugin, so a plugin is never left running or started twice without a `Stop()` in between.
 
 ## Built-in Plugins
 

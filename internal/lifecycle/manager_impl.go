@@ -1755,8 +1755,8 @@ func (lm *lifecycleManager) rollback(ctx context.Context, started []string, orig
 // rollbackStartedInfrastructure stops, after a failed Start, the middleware
 // whose Start succeeded (in reverse order) and then every plugin (all of them
 // started, or startPlugins would have rolled them back and failed first), and
-// forgets the plugin containers, so a retried Start begins from a clean slate
-// and does not start a plugin twice without a Stop in between.
+// forgets the plugin containers, so nothing is left running and a retried
+// Start does not start a plugin twice without a Stop in between.
 func (lm *lifecycleManager) rollbackStartedInfrastructure(ctx context.Context, startedMiddleware []types.MiddlewareModule) {
 	for i := len(startedMiddleware) - 1; i >= 0; i-- {
 		mw := startedMiddleware[i]
@@ -1765,6 +1765,18 @@ func (lm *lifecycleManager) rollbackStartedInfrastructure(ctx context.Context, s
 		}
 	}
 	lm.rollbackPlugins(ctx, lm.pluginRegistry.List())
+}
+
+// servesOverNATS reports whether c holds a service that is subscribed over
+// NATS: anything but a channel service, which is in-process and has no
+// subject.
+func servesOverNATS(c types.ServiceContainer) bool {
+	for _, e := range c.Entries() {
+		if e.Type != types.ServiceTypeChannel {
+			return true
+		}
+	}
+	return false
 }
 
 // serviceOwners returns the containers whose services are served over NATS,
@@ -1787,7 +1799,7 @@ func (lm *lifecycleManager) serviceOwners() (map[string]types.ServiceContainer, 
 	pluginOwner := make(map[string]string, len(lm.pluginContainers)) // name -> alias
 	for _, alias := range lm.pluginRegistry.List() {
 		c, ok := lm.pluginContainers[alias]
-		if !ok || c == nil || len(c.Entries()) == 0 {
+		if !ok || c == nil || !servesOverNATS(c) {
 			continue
 		}
 		name := plugins[alias].Name()

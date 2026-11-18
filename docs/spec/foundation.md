@@ -264,7 +264,7 @@ The core framework provides modular monolith architecture with embedded NATS for
 
 ### Important Behaviors
 
-**Module Start Failure Handling**: If any module fails to start, the framework immediately stops all previously started modules in reverse order, then returns an error with context about which module failed. Any failure of `Start` after the plugins started (a middleware or module start, dependency resolution, an event definition, subscription setup) also stops the middleware whose `Start` succeeded, in reverse order, and then every plugin, and forgets the plugin containers, so nothing is left running and a retried `Start` starts the plugins once more. A plugin that fails to start stops the plugins started before it.
+**Module Start Failure Handling**: If any module fails to start, the framework immediately stops all previously started modules in reverse order, then returns an error with context about which module failed. Any failure of `Start` after the plugins started (a middleware or module start, dependency resolution, an event definition, subscription setup) also stops the middleware whose `Start` succeeded, in reverse order, and then every plugin, and forgets the plugin containers, so nothing is left running and a retried `Start` does not start a plugin twice without a `Stop` in between. A plugin that fails to start stops the plugins started before it.
 
 **Health Aggregation Logic**: Framework aggregates health from modules implementing HealthAwareModule. Overall health requires: framework running AND NATS responsive AND all health-aware modules healthy. Modules without HealthAwareModule are excluded from calculation (not marked unhealthy).
 

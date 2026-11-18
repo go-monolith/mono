@@ -29,6 +29,15 @@ func (p *servicePlugin) RegisterServices(c types.ServiceContainer) error {
 	return c.RegisterChannelService("feed", p.in, p.out)
 }
 
+// channelPlugin registers a channel service only.
+type channelPlugin struct {
+	mockPluginModule
+}
+
+func (p *channelPlugin) RegisterServices(c types.ServiceContainer) error {
+	return c.RegisterChannelService("feed", make(chan *types.Msg, 1), make(chan *types.Msg, 1))
+}
+
 // countingPlugin counts its Start and Stop calls.
 type countingPlugin struct {
 	mockPluginModule
@@ -157,6 +166,18 @@ func TestPluginServiceNameCollisions(t *testing.T) {
 		if err == nil || !strings.Contains(err.Error(), `plugin "echo" registers services as "echo-plugin", the name of a module`) {
 			t.Fatalf("err = %v", err)
 		}
+	})
+	t.Run("plugins with channel services only may share a name", func(t *testing.T) {
+		logger := &mockLogger{}
+		reg := registry.NewModuleRegistry(logger)
+		pluginReg := registry.NewPluginRegistry(logger)
+		_ = pluginReg.Register(&channelPlugin{mockPluginModule: mockPluginModule{name: "feed"}}, "a")
+		_ = pluginReg.Register(&channelPlugin{mockPluginModule: mockPluginModule{name: "feed"}}, "b")
+		lm := NewLifecycleManager(reg, pluginReg, newMockEventBus(), nil, logger, 0)
+		if err := lm.Start(context.Background()); err != nil {
+			t.Fatalf("Start: %v", err)
+		}
+		_ = lm.Stop(context.Background())
 	})
 	t.Run("plugins without services may share a name", func(t *testing.T) {
 		logger := &mockLogger{}

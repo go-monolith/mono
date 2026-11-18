@@ -18,10 +18,17 @@ import (
 type pluginEchoReq struct{ Msg string }
 type pluginEchoResp struct{ Msg string }
 
-var pluginEcho = helper.RequestReplyService[pluginEchoReq, pluginEchoResp]("echo-plugin", "echo")
+var (
+	pluginEcho = helper.RequestReplyService[pluginEchoReq, pluginEchoResp]("echo-plugin", "echo")
+	pluginJobs = helper.QueueGroupService[pluginEchoReq]("echo-plugin", "jobs")
+)
 
-// echoServicePlugin registers a request-reply service in its own container.
-type echoServicePlugin struct{ c mono.ServiceContainer }
+// echoServicePlugin registers a request-reply and a queue group service in
+// its own container.
+type echoServicePlugin struct {
+	c    mono.ServiceContainer
+	jobs chan string
+}
 
 func (p *echoServicePlugin) Name() string                         { return "echo-plugin" }
 func (p *echoServicePlugin) Start(context.Context) error          { return nil }
@@ -29,9 +36,15 @@ func (p *echoServicePlugin) Stop(context.Context) error           { return nil }
 func (p *echoServicePlugin) SetContainer(c mono.ServiceContainer) { p.c = c }
 func (p *echoServicePlugin) Container() mono.ServiceContainer     { return p.c }
 func (p *echoServicePlugin) RegisterServices(c mono.ServiceContainer) error {
-	return pluginEcho.Register(c, func(_ context.Context, r pluginEchoReq, _ *mono.Msg) (pluginEchoResp, error) {
+	if err := pluginEcho.Register(c, func(_ context.Context, r pluginEchoReq, _ *mono.Msg) (pluginEchoResp, error) {
 		return pluginEchoResp{Msg: "echo: " + r.Msg}, nil
-	})
+	}); err != nil {
+		return err
+	}
+	return pluginJobs.Register(c, types.TypedQGHP[pluginEchoReq]{QueueGroup: "workers", Handler: func(_ context.Context, r pluginEchoReq, _ *mono.Msg) error {
+		p.jobs <- r.Msg
+		return nil
+	}})
 }
 
 // pluginCaller declares the plugin's contract and calls it through the
@@ -43,18 +56,20 @@ func (m *pluginCaller) Start(context.Context) error             { return nil }
 func (m *pluginCaller) Stop(context.Context) error              { return nil }
 func (m *pluginCaller) SetPlugin(_ string, p mono.PluginModule) { m.plugin = p }
 func (m *pluginCaller) ConsumeServices() []types.BaseServiceDefinition {
-	return []types.BaseServiceDefinition{pluginEcho.ToBase()}
+	return []types.BaseServiceDefinition{pluginEcho.ToBase(), pluginJobs.ToBase()}
 }
 
 // TestPluginServicesServedOverNATS: a request-reply service registered in a
-// plugin's container answers at services.<plugin>.<service> (issue #52).
+// plugin's container answers at services.<plugin>.<service>, and a queue
+// group service of the plugin handles what is sent to it (issue #52).
 func TestPluginServicesServedOverNATS(t *testing.T) {
 	app, err := mono.NewMonoApplication(mono.WithCustomLogger(&noOpsLogger{}), mono.WithNATSPort(freeTCPPort(t)))
 	if err != nil {
 		t.Fatal(err)
 	}
 	m := &pluginCaller{}
-	if err := app.RegisterPlugin(&echoServicePlugin{}, "echo"); err != nil {
+	plugin := &echoServicePlugin{jobs: make(chan string, 1)}
+	if err := app.RegisterPlugin(plugin, "echo"); err != nil {
 		t.Fatal(err)
 	}
 	if err := app.Register(m); err != nil {
@@ -75,6 +90,18 @@ func TestPluginServicesServedOverNATS(t *testing.T) {
 	reply, err := app.EventBus("").Request("services.echo-plugin.echo", []byte(`{"Msg":"bus"}`), 2*time.Second)
 	if err != nil || string(reply.Data) != `{"Msg":"echo: bus"}` {
 		t.Fatalf("Request = %v, %v", reply, err)
+	}
+
+	if err := pluginJobs.Send(cctx, m.plugin.Container(), pluginEchoReq{Msg: "job"}); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	select {
+	case got := <-plugin.jobs:
+		if got != "job" {
+			t.Fatalf("queue group handler got %q", got)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("the plugin's queue group handler did not run")
 	}
 }
 
