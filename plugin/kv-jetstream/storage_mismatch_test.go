@@ -594,25 +594,6 @@ func TestRecreate_Backup(t *testing.T) {
 	})
 }
 
-func TestSourceSequence(t *testing.T) {
-	for _, tt := range []struct {
-		header string
-		want   uint64
-		ok     bool
-	}{
-		{"KV_locks 12 $KV.locks.> $KV.locks-backup-x.>", 12, true},
-		{"KV_locks:ab12 7", 7, true},
-		{"", 0, false},
-		{"KV_locks", 0, false},
-		{"KV_locks x", 0, false},
-	} {
-		got, ok := sourceSequence(tt.header)
-		if got != tt.want || ok != tt.ok {
-			t.Errorf("sourceSequence(%q) = %d, %v; want %d, %v", tt.header, got, ok, tt.want, tt.ok)
-		}
-	}
-}
-
 func TestNew_RecreateValidation(t *testing.T) {
 	long := strings.Repeat("a", 212)
 	for _, tt := range []struct {

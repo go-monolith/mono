@@ -170,6 +170,10 @@ type Config struct {
 | `Replicas` | `int` | Number of replicas (1-5, default 1) |
 | `Storage` | `StorageType` | `FileStorage` (default) or `MemoryStorage` |
 | `Compression` | `bool` | Enable S2 compression |
+| `RecreateOnStorageMismatch` | `bool` | Recreate the bucket when its stream exists with another storage type, which NATS cannot change in place. **The bucket is emptied** (also when you change `Storage` on purpose), after its objects are copied to a backup bucket `<name>-backup-<UTC time>-<random>`; only for buckets whose contents can be lost. Without it `Start` fails with `ErrStorageMismatch` and nothing is deleted |
+| `SkipBackupOnRecreate` | `bool` | Recreate without a backup (the objects are gone for good) |
+| `RecreateBackupTTL` | `time.Duration` | How long the backup keeps the objects (0 = 7 days, at least 1 hour, negative = until deleted by hand) |
+| `RecreateBackupTimeout` | `time.Duration` | How long the copy into the backup may take (0 = 10 minutes) |
 
 ### StorageType
 

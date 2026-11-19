@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"sync"
 
+	"github.com/go-monolith/mono/internal/jsrecreate"
 	"github.com/go-monolith/mono/pkg/types"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
@@ -21,6 +22,11 @@ type PluginModule struct {
 	eventBus types.EventBus
 	js       jetstream.JetStream
 	logger   *slog.Logger
+	// customLogger is set by WithLogger. Without it the logger is resolved
+	// again at Start, so an application that replaces slog.Default after
+	// constructing the plugin still gets the plugin's lines there, including
+	// the warning of a recreated bucket.
+	customLogger bool
 
 	// Per-bucket adapters (wrapping backends)
 	buckets map[string]*FileStorageAdapter
@@ -53,6 +59,9 @@ func New(config Config, opts ...Option) (*PluginModule, error) {
 			return nil, fmt.Errorf("duplicate bucket name: %s", bucket.Name)
 		}
 		seen[bucket.Name] = true
+		if err := validateRecreate(bucket); err != nil {
+			return nil, err
+		}
 	}
 
 	m := &PluginModule{
@@ -94,7 +103,12 @@ func (m *PluginModule) SetEventBus(bus types.EventBus) {
 	m.eventBus = bus
 }
 
-// Start initializes the module and creates all configured buckets.
+// Start initializes the module and creates or opens all configured buckets.
+//
+// It returns an error wrapping ErrStorageMismatch when a bucket's stream
+// already exists with a different storage type than its BucketConfig.Storage,
+// unless the bucket sets RecreateOnStorageMismatch, in which case the bucket
+// is backed up, deleted (with its objects) and created again.
 func (m *PluginModule) Start(ctx context.Context) error {
 	// Get NATS connection from EventBus using generic interface
 	provider, ok := m.eventBus.(types.EventBusWithConn[*nats.Conn])
@@ -112,10 +126,13 @@ func (m *PluginModule) Start(ctx context.Context) error {
 		return fmt.Errorf("failed to create JetStream context: %w", err)
 	}
 	m.js = js
+	if !m.customLogger {
+		m.logger = slog.Default().With("module", ModuleName)
+	}
 
 	// Create each bucket's ObjectStore, backend, and adapter
 	for _, bucketCfg := range m.config.Buckets {
-		os, err := m.createOrGetObjectStore(ctx, bucketCfg)
+		os, err := m.openBucket(ctx, jsrecreate.StreamAPI{JS: js}, bucketCfg)
 		if err != nil {
 			return fmt.Errorf("failed to create bucket %s: %w", bucketCfg.Name, err)
 		}
@@ -154,11 +171,7 @@ func (m *PluginModule) createOrGetObjectStore(ctx context.Context, cfg BucketCon
 		Compression: cfg.Compression,
 	}
 
-	if cfg.Storage == MemoryStorage {
-		osCfg.Storage = jetstream.MemoryStorage
-	} else {
-		osCfg.Storage = jetstream.FileStorage
-	}
+	osCfg.Storage = jetStreamStorage(cfg.Storage)
 
 	// Set defaults
 	if osCfg.Replicas == 0 {
