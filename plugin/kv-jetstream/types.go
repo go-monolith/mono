@@ -102,23 +102,46 @@ type BucketConfig struct {
 	// stream, so without this option Start fails with ErrStorageMismatch
 	// until the stream is removed by hand.
 	//
-	// Recreating DELETES EVERY KEY IN THE BUCKET, with no backup, including
-	// when Storage is changed on purpose: the next Start wipes the bucket.
-	// Set it only for a bucket whose contents can be lost, such as locks,
-	// presence records or caches that their owners rebuild, never for data
-	// that must be kept. A matching or missing stream is never
-	// touched; only this bucket's own stream is ever deleted, and the delete
-	// is logged at Warn with both storage types and the number of messages
-	// and bytes it held. A stream that is not a plain KV bucket of this name
-	// (a mirror, or other subjects) is never deleted: Start fails instead.
+	// Recreating DELETES EVERY KEY IN THE BUCKET, including when Storage is
+	// changed on purpose: the next Start empties the bucket. Before the
+	// delete, the keys are copied to a backup bucket
+	// <Name>-backup-<UTC time>-<random> (file storage, kept for
+	// RecreateBackupTTL), unless SkipBackupOnRecreate is set or the bucket is
+	// empty; if the backup fails, nothing is deleted and Start fails. The
+	// application reads only the new, empty bucket: restoring from the backup
+	// is manual. Set it only for a bucket whose contents can be lost, such as
+	// locks, presence records or caches that their owners rebuild.
 	//
-	// When several instances start at the same time, keys written in the
-	// first moments after one instance recreated the bucket can be lost to
-	// another instance's repair (JetStream has no conditional delete). Two
+	// A matching or missing stream is never touched; only this bucket's own
+	// stream is ever deleted, and the delete is logged at Warn with both
+	// storage types, the number of messages and bytes it held and the backup
+	// bucket. A stream that is not a plain KV bucket of this name (a mirror,
+	// or other subjects) is never deleted: Start fails instead.
+	//
+	// When several instances start at the same time, an instance that finds
+	// the bucket repaired by another one while it copies (or right before
+	// its delete) drops its backup and opens the repaired bucket. Keys
+	// written to the repaired bucket between that last check and the delete
+	// can still be lost (JetStream has no conditional delete). Two
 	// applications that share a bucket with different Storage values and
 	// both set this option delete each other's bucket on every start: give
 	// every application the same Storage.
 	RecreateOnStorageMismatch bool
+
+	// SkipBackupOnRecreate skips the backup bucket that
+	// RecreateOnStorageMismatch makes before it deletes the bucket, for a
+	// bucket whose contents are worthless once lost. The keys are then gone
+	// for good.
+	SkipBackupOnRecreate bool
+
+	// RecreateBackupTTL is how long the keys of the backup bucket made by
+	// RecreateOnStorageMismatch are kept: 0 means DefaultRecreateBackupTTL
+	// (7 days), a negative value keeps them until the backup bucket is
+	// deleted by hand, and a positive value must be at least
+	// MinRecreateBackupTTL (10 minutes). The empty backup bucket itself is not
+	// removed. Setting it, or SkipBackupOnRecreate, without
+	// RecreateOnStorageMismatch is an error from New.
+	RecreateBackupTTL time.Duration
 }
 
 // KVEntry is an alias to storage.Entry.

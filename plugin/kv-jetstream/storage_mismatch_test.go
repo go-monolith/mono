@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
@@ -352,5 +354,292 @@ func TestOpenBucket_OtherCreateFailureNeverDeletes(t *testing.T) {
 func TestWithLogger_NilRejected(t *testing.T) {
 	if _, err := New(Config{Buckets: []BucketConfig{{Name: "cache"}}}, WithLogger(nil)); err == nil {
 		t.Fatal("New with WithLogger(nil) succeeded")
+	}
+}
+
+// backupBuckets returns the names of the backup buckets of bucket.
+func backupBuckets(t *testing.T, js jetstream.JetStream, bucket string) []string {
+	t.Helper()
+	var names []string
+	lister := js.KeyValueStoreNames(context.Background())
+	for name := range lister.Name() {
+		if strings.HasPrefix(name, bucket+"-backup-") {
+			names = append(names, name)
+		}
+	}
+	if err := lister.Error(); err != nil {
+		t.Fatal(err)
+	}
+	return names
+}
+
+// TestRecreate_Backup: before the bucket is deleted, its keys are copied to
+// a file-storage backup bucket that no longer follows the recreated bucket.
+func TestRecreate_Backup(t *testing.T) {
+	t.Run("the backup holds the old keys and is detached", func(t *testing.T) {
+		conn, js := setupTestNATSWithJetStream(t)
+		createFileBucket(t, js, "locks")
+		var logs bytes.Buffer
+		m, err := startPlugin(t, conn, BucketConfig{Name: "locks", Storage: MemoryStorage, RecreateOnStorageMismatch: true},
+			WithLogger(slog.New(slog.NewTextHandler(&logs, nil))))
+		if err != nil {
+			t.Fatalf("Start: %v", err)
+		}
+		backups := backupBuckets(t, js, "locks")
+		if len(backups) != 1 {
+			t.Fatalf("backup buckets = %v, want one", backups)
+		}
+		if !strings.Contains(logs.String(), "backup_bucket="+backups[0]) {
+			t.Errorf("log %q does not name the backup", logs.String())
+		}
+		backup, err := js.KeyValue(context.Background(), backups[0])
+		if err != nil {
+			t.Fatal(err)
+		}
+		entry, err := backup.Get(context.Background(), "k")
+		if err != nil || string(entry.Value()) != "v" {
+			t.Fatalf("backup key = %v, %v", entry, err)
+		}
+		stream, err := js.Stream(context.Background(), kvStreamPrefix+backups[0])
+		if err != nil {
+			t.Fatal(err)
+		}
+		cfg := stream.CachedInfo().Config
+		if len(cfg.Sources) != 0 || cfg.Storage != jetstream.FileStorage || cfg.MaxAge != DefaultRecreateBackupTTL {
+			t.Fatalf("backup sources=%v storage=%v max_age=%v, want detached, file, %v", cfg.Sources, cfg.Storage, cfg.MaxAge, DefaultRecreateBackupTTL)
+		}
+
+		// Detached (no source, checked above): the recreated bucket works.
+		if err := m.Bucket("locks").Set("new", []byte("x"), 0); err != nil {
+			t.Fatal(err)
+		}
+	})
+
+	t.Run("history and many keys are copied", func(t *testing.T) {
+		conn, js := setupTestNATSWithJetStream(t)
+		ctx := context.Background()
+		kv, err := js.CreateKeyValue(ctx, jetstream.KeyValueConfig{Bucket: "locks", Storage: jetstream.FileStorage, History: 3})
+		if err != nil {
+			t.Fatal(err)
+		}
+		for i := 0; i < 50; i++ {
+			for rev := 0; rev < 4; rev++ {
+				if _, err := kv.Put(ctx, fmt.Sprintf("key%d", i), []byte(fmt.Sprintf("v%d", rev))); err != nil {
+					t.Fatal(err)
+				}
+			}
+		}
+		if _, err := startPlugin(t, conn, BucketConfig{Name: "locks", Storage: MemoryStorage, RecreateOnStorageMismatch: true}); err != nil {
+			t.Fatalf("Start: %v", err)
+		}
+		backups := backupBuckets(t, js, "locks")
+		if len(backups) != 1 {
+			t.Fatalf("backup buckets = %v", backups)
+		}
+		backup, err := js.KeyValue(ctx, backups[0])
+		if err != nil {
+			t.Fatal(err)
+		}
+		status, err := backup.Status(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if status.Values() != 150 || status.History() != 3 {
+			t.Fatalf("backup values=%d history=%d, want 150 and 3", status.Values(), status.History())
+		}
+		entry, err := backup.Get(ctx, "key49")
+		if err != nil || string(entry.Value()) != "v3" {
+			t.Fatalf("backup key49 = %v, %v", entry, err)
+		}
+	})
+
+	t.Run("RecreateBackupTTL below zero keeps the backup", func(t *testing.T) {
+		conn, js := setupTestNATSWithJetStream(t)
+		createFileBucket(t, js, "locks")
+		if _, err := startPlugin(t, conn, BucketConfig{Name: "locks", Storage: MemoryStorage, RecreateOnStorageMismatch: true, RecreateBackupTTL: -1}); err != nil {
+			t.Fatalf("Start: %v", err)
+		}
+		backups := backupBuckets(t, js, "locks")
+		if len(backups) != 1 {
+			t.Fatalf("backup buckets = %v", backups)
+		}
+		stream, err := js.Stream(context.Background(), kvStreamPrefix+backups[0])
+		if err != nil {
+			t.Fatal(err)
+		}
+		if age := stream.CachedInfo().Config.MaxAge; age != 0 {
+			t.Fatalf("max age = %v, want 0 (kept)", age)
+		}
+	})
+
+	for _, tt := range []struct {
+		name  string
+		cfg   BucketConfig
+		empty bool
+	}{
+		{name: "SkipBackupOnRecreate makes none", cfg: BucketConfig{Name: "locks", Storage: MemoryStorage, RecreateOnStorageMismatch: true, SkipBackupOnRecreate: true}},
+		{name: "an empty bucket gets none", cfg: BucketConfig{Name: "locks", Storage: MemoryStorage, RecreateOnStorageMismatch: true}, empty: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			conn, js := setupTestNATSWithJetStream(t)
+			if tt.empty {
+				if _, err := js.CreateKeyValue(context.Background(), jetstream.KeyValueConfig{Bucket: "locks", Storage: jetstream.FileStorage}); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				createFileBucket(t, js, "locks")
+			}
+			if _, err := startPlugin(t, conn, tt.cfg); err != nil {
+				t.Fatalf("Start: %v", err)
+			}
+			if got, _ := streamStorage(t, js, "locks"); got != jetstream.MemoryStorage {
+				t.Fatalf("storage = %v, want memory", got)
+			}
+			if backups := backupBuckets(t, js, "locks"); len(backups) != 0 {
+				t.Fatalf("backup buckets = %v, want none", backups)
+			}
+		})
+	}
+
+	t.Run("keys that expired before they were copied do not block the backup", func(t *testing.T) {
+		cfg := BucketConfig{Name: "locks", Storage: MemoryStorage, RecreateOnStorageMismatch: true}
+		m, js := newMismatchModule(t, cfg)
+		real := streamAPI{js: js}
+		// As read, the stream ended 10 messages later than what is left now.
+		info := func(ctx context.Context, name string) (*jetstream.StreamInfo, error) {
+			info, err := real.StreamInfo(ctx, name)
+			if err != nil {
+				return nil, err
+			}
+			info.State.LastSeq += 10
+			info.State.Msgs += 10
+			return info, nil
+		}
+		if _, err := m.openBucket(context.Background(), fakeStreams{streamAPI: real, info: info}, cfg); err != nil {
+			t.Fatalf("openBucket: %v", err)
+		}
+		if got, _ := streamStorage(t, js, cfg.Name); got != jetstream.MemoryStorage {
+			t.Fatalf("storage = %v, want memory", got)
+		}
+		backups := backupBuckets(t, js, "locks")
+		if len(backups) != 1 {
+			t.Fatalf("backup buckets = %v", backups)
+		}
+	})
+
+	t.Run("a backup that fails deletes nothing", func(t *testing.T) {
+		cfg := BucketConfig{Name: "locks", Storage: MemoryStorage, RecreateOnStorageMismatch: true}
+		m, js := newMismatchModule(t, cfg)
+		real := streamAPI{js: js}
+		deletes, calls := 0, 0
+		// The first lookup works; the re-reads during the copy hang until the
+		// deadline, so the copy cannot be confirmed.
+		info := func(ctx context.Context, name string) (*jetstream.StreamInfo, error) {
+			if calls++; calls == 1 {
+				return real.StreamInfo(ctx, name)
+			}
+			<-ctx.Done()
+			return nil, ctx.Err()
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+		defer cancel()
+		_, err := m.openBucket(ctx, fakeStreams{streamAPI: real, info: info, deletes: &deletes}, cfg)
+		if !errors.Is(err, ErrStorageMismatch) || !strings.Contains(err.Error(), "backup failed") {
+			t.Fatalf("err = %v", err)
+		}
+		if deletes != 0 {
+			t.Fatalf("DeleteStream called %d times", deletes)
+		}
+		if got, msgs := streamStorage(t, js, cfg.Name); got != jetstream.FileStorage || msgs != 1 {
+			t.Fatalf("stream storage=%v msgs=%d, want the original file stream with its key", got, msgs)
+		}
+		if backups := backupBuckets(t, js, "locks"); len(backups) != 0 {
+			t.Fatalf("incomplete backup left behind: %v", backups)
+		}
+	})
+
+	t.Run("a bucket repaired by another instance during the copy is not deleted", func(t *testing.T) {
+		cfg := BucketConfig{Name: "locks", Storage: MemoryStorage, RecreateOnStorageMismatch: true}
+		m, js := newMismatchModule(t, cfg)
+		real := streamAPI{js: js}
+		deletes, calls := 0, 0
+		info := func(ctx context.Context, name string) (*jetstream.StreamInfo, error) {
+			if calls++; calls == 2 { // the first re-read during the copy
+				if err := real.DeleteStream(ctx, name); err != nil {
+					return nil, err
+				}
+				kv, err := js.CreateKeyValue(ctx, jetstream.KeyValueConfig{Bucket: cfg.Name, Storage: jetstream.MemoryStorage})
+				if err != nil {
+					return nil, err
+				}
+				if _, err := kv.Put(ctx, "theirs", []byte("x")); err != nil {
+					return nil, err
+				}
+			}
+			return real.StreamInfo(ctx, name)
+		}
+		kv, err := m.openBucket(context.Background(), fakeStreams{streamAPI: real, info: info, deletes: &deletes}, cfg)
+		if err != nil {
+			t.Fatalf("openBucket: %v", err)
+		}
+		if deletes != 0 {
+			t.Fatalf("DeleteStream called %d times", deletes)
+		}
+		if e, err := kv.Get(context.Background(), "theirs"); err != nil || string(e.Value()) != "x" {
+			t.Fatalf("the other instance's key = %v, %v", e, err)
+		}
+		if backups := backupBuckets(t, js, "locks"); len(backups) != 0 {
+			t.Fatalf("redundant backup left behind: %v", backups)
+		}
+	})
+}
+
+func TestSourceSequence(t *testing.T) {
+	for _, tt := range []struct {
+		header string
+		want   uint64
+		ok     bool
+	}{
+		{"KV_locks 12 $KV.locks.> $KV.locks-backup-x.>", 12, true},
+		{"KV_locks:ab12 7", 7, true},
+		{"", 0, false},
+		{"KV_locks", 0, false},
+		{"KV_locks x", 0, false},
+	} {
+		got, ok := sourceSequence(tt.header)
+		if got != tt.want || ok != tt.ok {
+			t.Errorf("sourceSequence(%q) = %d, %v; want %d, %v", tt.header, got, ok, tt.want, tt.ok)
+		}
+	}
+}
+
+func TestNew_RecreateValidation(t *testing.T) {
+	long := strings.Repeat("a", 212)
+	for _, tt := range []struct {
+		name string
+		b    BucketConfig
+		want string // empty: valid
+	}{
+		{"backup options without the option", BucketConfig{Name: "b", SkipBackupOnRecreate: true}, "require RecreateOnStorageMismatch"},
+		{"TTL without the option", BucketConfig{Name: "b", RecreateBackupTTL: time.Hour}, "require RecreateOnStorageMismatch"},
+		{"TTL with SkipBackup", BucketConfig{Name: "b", RecreateOnStorageMismatch: true, SkipBackupOnRecreate: true, RecreateBackupTTL: time.Hour}, "no effect"},
+		{"TTL too short", BucketConfig{Name: "b", RecreateOnStorageMismatch: true, RecreateBackupTTL: time.Minute}, "at least"},
+		{"name too long for a backup", BucketConfig{Name: long, RecreateOnStorageMismatch: true}, "name too long"},
+		{"long name without a backup", BucketConfig{Name: long, RecreateOnStorageMismatch: true, SkipBackupOnRecreate: true}, ""},
+		{"negative TTL", BucketConfig{Name: "b", RecreateOnStorageMismatch: true, RecreateBackupTTL: -1}, ""},
+		{"defaults", BucketConfig{Name: "b", RecreateOnStorageMismatch: true}, ""},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := New(Config{Buckets: []BucketConfig{tt.b}})
+			if tt.want == "" {
+				if err != nil {
+					t.Fatalf("New: %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("err = %v, want %q", err, tt.want)
+			}
+		})
 	}
 }

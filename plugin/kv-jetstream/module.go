@@ -55,6 +55,9 @@ func New(config Config, opts ...Option) (*PluginModule, error) {
 			return nil, fmt.Errorf("duplicate bucket name: %s", bucket.Name)
 		}
 		seen[bucket.Name] = true
+		if err := validateRecreate(bucket); err != nil {
+			return nil, err
+		}
 	}
 
 	m := &PluginModule{

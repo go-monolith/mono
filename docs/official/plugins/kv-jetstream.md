@@ -158,7 +158,9 @@ The plugin creates or updates every configured bucket in JetStream when it start
 | `Replicas` | `int` | `0` (means 1) | Number of replicas (1-5; 0 means 1). The framework's `WithJetStreamDefaultReplicas` does not apply to plugin buckets; values above 1 need a clustered JetStream |
 | `Storage` | `StorageType` | `FileStorage` | `FileStorage` (default) or `MemoryStorage` |
 | `Compression` | `bool` | `false` | Enable S2 compression |
-| `RecreateOnStorageMismatch` | `bool` | `false` | Delete and recreate the bucket when its stream exists with another storage type (**deletes its keys**); see [Changing a Bucket's Storage Type](#changing-a-buckets-storage-type) |
+| `RecreateOnStorageMismatch` | `bool` | `false` | Recreate the bucket when its stream exists with another storage type: its keys are copied to a backup bucket, then **removed from the bucket**; see [Changing a Bucket's Storage Type](#changing-a-buckets-storage-type) |
+| `SkipBackupOnRecreate` | `bool` | `false` | Recreate without a backup (**the keys are gone for good**) |
+| `RecreateBackupTTL` | `time.Duration` | `0` (7 days) | How long the backup keeps the keys (at least 10 minutes); negative keeps them until you delete the backup |
 
 The minimal configuration is a single bucket with a name:
 
@@ -174,22 +176,41 @@ kvStore, _ := kvjetstream.New(kvjetstream.Config{
 
 NATS cannot change the storage type (file or memory) of an existing stream. If a bucket's stream (`KV_<name>`) already exists with a different storage type than its `Storage`, for example because another client created the bucket first with its default file storage, `Start` fails with `ErrStorageMismatch`. The error names the bucket, both storage types and the stream. The bucket and its keys are left as they are. Because JetStream state survives restarts, the application cannot start until the stream is removed (`nats stream rm KV_<name>`, which deletes the bucket's keys).
 
-For a bucket whose contents can be lost (locks, presence records, caches that their owners rebuild), set `RecreateOnStorageMismatch: true`. `Start` then deletes that bucket's stream and creates the bucket again with the configured storage type:
+For a bucket whose contents can be lost (locks, presence records, caches that their owners rebuild), set `RecreateOnStorageMismatch: true`. `Start` then copies the bucket to a backup bucket, deletes it, and creates it again, empty, with the configured storage type:
 
 ```go
 {Name: "locks", Storage: kvjetstream.MemoryStorage, TTL: time.Minute, RecreateOnStorageMismatch: true}
 ```
 
 {% hint style="danger" %}
-**`RecreateOnStorageMismatch` permanently deletes every key in the bucket, with no backup and no confirmation.** Without the option nothing is ever deleted: `Start` fails with `ErrStorageMismatch` instead. With it, the keys are lost whenever the stored bucket's storage type differs from the configured one. This includes the case where you change `Storage` on purpose: the next deploy wipes the bucket. Set it only on buckets whose contents can be lost and are rebuilt by their owners (locks, presence, caches). Never set it on a bucket that holds data you need. To move such a bucket to another storage type, copy its keys to a new bucket first.
+**`RecreateOnStorageMismatch` empties the bucket: the application loses every key in it, with no confirmation.**
+
+- **Without the option:** nothing is ever deleted. `Start` fails with `ErrStorageMismatch` instead.
+- **With it:** the bucket is emptied whenever its stored storage type differs from the configured one. This includes changing `Storage` on purpose, in which case the next deploy empties the bucket.
+- **The backup:** the old keys are kept in a backup bucket for 7 days by default, but the application doesn't read it, and restoring is manual (see below).
+- **No backup:** with `SkipBackupOnRecreate`, or when the backup expires, the keys are gone for good.
+
+Set the option only on buckets whose contents can be lost and are rebuilt by their owners (locks, presence, caches). Never set it on a bucket the application needs to keep reading. To move such a bucket to another storage type, copy its keys to a new bucket yourself and switch the application over.
 {% endhint %}
+
+**The backup.** Before deleting, `Start` copies the bucket into a new bucket named `<name>-backup-<UTC time>-<random>` (for example `locks-backup-20261119T101500Z-3f2a`):
+
+- **Storage:** file storage, with the bucket's per-key history and replicas.
+- **Retention:** the keys expire after `RecreateBackupTTL` (default 7 days; negative keeps them).
+- **Completeness:** the delete happens only once the backup holds every message the bucket held when it was read (messages that expired before they were copied can't be). The backup is then detached, so it copies nothing the recreated bucket receives. Writes made to the old bucket after it was read, for example by instances of an older version still running during a rolling deploy, may or may not be in the backup.
+- **Failure:** if the backup can't be made or doesn't finish within 2 minutes (a fixed limit whatever the bucket's size, and within the `Start` context), the partial backup is removed, nothing is deleted, and `Start` fails with `ErrStorageMismatch`. A bucket too large to copy in that time keeps failing `Start`: remove its stream by hand, or set `SkipBackupOnRecreate`.
+- **When there's none:** an empty bucket is recreated without a backup, and `SkipBackupOnRecreate` turns it off.
+- **Logged:** the Warn line names the backup bucket (`backup_bucket`).
+- **Cleanup:** the plugin never removes a backup bucket. Its keys expire, but the empty bucket remains until you delete it (`nats kv del <backup>`).
+- **Name length:** a bucket name longer than 211 characters leaves no room for the backup name; `New` rejects it unless `SkipBackupOnRecreate` is set.
+- **Restore:** read the keys from the backup with the `nats` CLI (`nats kv ls <backup>`, `nats kv get <backup> <key>`) or a client, and write back the ones you need.
 
 - **Only on a real mismatch:** the stream is inspected only after the bucket could not be created or opened, so a healthy start makes no extra request, and a bucket whose storage type matches is never touched.
 - **Only that bucket's stream:** `KV_<name>`, never any other stream. A `KV_<name>` stream that isn't a plain bucket of that name (a mirror, or other subjects) is never deleted: `Start` fails instead.
 - **Same `Storage` everywhere:** two applications that share a bucket with different `Storage` values, and both set the option, delete each other's bucket on every start.
-- **Concurrent starts can lose keys:** when several instances start at once, keys written in the first moments after one instance recreated the bucket can be lost to another instance's repair.
-- **Logged:** each delete is logged at Warn, with both storage types and the number of messages and bytes the stream held.
-- **A delete lost to another instance is not an error:** when several instances start at once, a stream another instance already deleted counts as deleted (keys can still be lost, see above).
+- **Concurrent starts:** when several instances start at once, an instance that finds the bucket already repaired by another one, during its copy or right before its delete, drops its backup and opens the repaired bucket. Keys written to the repaired bucket in the moment between that last check and the delete can still be lost: JetStream has no conditional delete.
+- **Logged:** each delete is logged at Warn, with both storage types, the number of messages and bytes the stream held, and the backup bucket.
+- **A delete lost to another instance is not an error:** a stream another instance already deleted counts as deleted.
 - **Only when the storage change was the rejection:** a create that failed for another reason (for example too many replicas for the cluster) fails `Start` with `ErrStorageMismatch` and deletes nothing, since recreating would fail the same way.
 
 ### Keys

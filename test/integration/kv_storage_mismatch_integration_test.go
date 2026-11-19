@@ -6,6 +6,7 @@ package integration_test
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/nats-io/nats.go"
@@ -86,6 +87,24 @@ func TestIntegration_KVJetstreamPlugin_StorageMismatch(t *testing.T) {
 			}
 			if _, err := kv.Bucket("locks").GetEntryWithContext(ctx, "old"); !errors.Is(err, kvjetstream.ErrKeyNotFound) {
 				t.Fatalf("key of the old bucket: err = %v, want ErrKeyNotFound (recreating deletes the keys)", err)
+			}
+			// The old keys are in the backup bucket.
+			var backups []string
+			names := js.KeyValueStoreNames(ctx)
+			for n := range names.Name() {
+				if strings.HasPrefix(n, "locks-backup-") {
+					backups = append(backups, n)
+				}
+			}
+			if len(backups) != 1 {
+				t.Fatalf("backup buckets = %v, want one", backups)
+			}
+			backup, err := js.KeyValue(ctx, backups[0])
+			if err != nil {
+				t.Fatal(err)
+			}
+			if e, err := backup.Get(ctx, "old"); err != nil || string(e.Value()) != "v" {
+				t.Fatalf("backup key = %v, %v", e, err)
 			}
 			if err := kv.Bucket("locks").Set("k", []byte("v"), 0); err != nil {
 				t.Fatalf("Set on the recreated bucket: %v", err)
