@@ -359,6 +359,12 @@ type StreamConfig struct {
 
 	// Retention defines the message retention policy for the stream.
 	// Defaults to LimitsPolicy.
+	//
+	// NATS cannot change the retention policy of an existing stream to or
+	// from WorkQueuePolicy (LimitsPolicy and InterestPolicy can be changed
+	// into each other). For a stream the framework creates for a stream
+	// consumer service or an event stream consumer, such a change fails
+	// Start with errors.ErrStreamConfigImmutable.
 	Retention RetentionPolicy `json:"retention"`
 
 	// MaxConsumers specifies the maximum number of consumers allowed for
@@ -396,6 +402,11 @@ type StreamConfig struct {
 
 	// Storage specifies the type of storage backend used for the stream
 	// (file or memory).
+	//
+	// NATS cannot change the storage type of an existing stream. For a
+	// stream the framework creates for a stream consumer service or an
+	// event stream consumer, a changed storage type fails Start with
+	// errors.ErrStreamConfigImmutable; the stream is never deleted.
 	Storage StorageType `json:"storage"`
 
 	// Replicas is the number of stream replicas in clustered JetStream.

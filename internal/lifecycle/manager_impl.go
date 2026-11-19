@@ -1344,6 +1344,11 @@ func (lm *lifecycleManager) setupNATSSubscriptions(ctx context.Context) error {
 		// durables shared between registrations can be recognized.
 		streamConsumers := lm.eventRegistry.StreamConsumerEntries()
 		if len(streamConsumers) > 0 {
+			// Registrations of one stream must agree on the settings NATS
+			// cannot change afterwards; checked before anything is created.
+			if err := checkEventStreamRegistrations(streamConsumers); err != nil {
+				return fmt.Errorf("failed to plan event stream consumers: %w", err)
+			}
 			var durables []eventStreamDurable
 			if err := lm.retryJetStream(ctx, "plan event stream consumers", func(ctx context.Context) error {
 				var err error
@@ -2072,6 +2077,10 @@ func (lm *lifecycleManager) setupStreamConsumer(ctx context.Context, entry *type
 	streamCfg.Replicas = lm.streamReplicas(streamCfg.Replicas)
 	_, err = es.CreateOrUpdateStream(ctx, streamCfg)
 	if err != nil {
+		// A storage type or work-queue retention that differs from the
+		// existing stream's is reported as ErrStreamConfigImmutable.
+		err = explainImmutableStreamChange(ctx, es, streamCfg,
+			fmt.Sprintf("stream consumer service %s.%s", entry.ModuleName, entry.Name), err)
 		return fmt.Errorf("failed to create stream %s: %w", cfg.Stream.Name, err)
 	}
 
@@ -2429,6 +2438,9 @@ func (lm *lifecycleManager) setupEventStreamConsumer(ctx context.Context, entry 
 	streamCfg.Replicas = lm.streamReplicas(streamCfg.Replicas)
 	_, err = es.CreateOrUpdateStream(ctx, streamCfg)
 	if err != nil {
+		// A storage type or work-queue retention that differs from the
+		// existing stream's is reported as ErrStreamConfigImmutable.
+		err = explainImmutableStreamChange(ctx, es, streamCfg, eventStreamOwner(entry), err)
 		return fmt.Errorf("failed to create stream %s: %w", cfg.Stream.Name, err)
 	}
 

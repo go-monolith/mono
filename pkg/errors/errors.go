@@ -85,6 +85,19 @@ var (
 	// service that is not in its ConsumeServices() list. Without strict mode the operation goes through and is
 	// recorded in the module's ModuleBoundaryReport instead.
 	ErrModuleBoundaryViolation = errors.New("module boundary violation")
+
+	// ErrStreamConfigImmutable is returned by Start when the stream of a
+	// stream consumer service or of an event stream consumer is configured
+	// with a setting that NATS cannot change on an existing stream: another
+	// storage type (StreamConfig.Storage), or a retention policy
+	// (StreamConfig.Retention) changed to or from WorkQueuePolicy. It is also
+	// returned when two event stream consumer registrations name the same
+	// stream and disagree on one of these settings. The error names the
+	// stream, what registered it and both values, and wraps the server's
+	// error when there is one. The framework never deletes the stream to
+	// apply the change: that would lose its messages and the position of
+	// every consumer.
+	ErrStreamConfigImmutable = errors.New("stream configuration cannot be changed in place")
 )
 
 // ModuleError wraps errors with module context.
