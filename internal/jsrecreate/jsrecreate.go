@@ -132,6 +132,25 @@ type Spec[T any] struct {
 	CreateBackup func(ctx context.Context, backup string, info *jetstream.StreamInfo, ttl time.Duration) error
 	// DeleteBackup deletes bucket backup; not found is not an error.
 	DeleteBackup func(ctx context.Context, backup string) error
+	// AfterCopy, optional, finishes the backup once it holds the bucket's
+	// contents and no longer follows the bucket (for example by rewriting
+	// metadata that names the original bucket). An error fails the backup:
+	// it is deleted and nothing else is.
+	AfterCopy func(ctx context.Context, backup string) error
+}
+
+// check reports a Spec missing a required field, so a misconfigured caller
+// gets an error instead of a panic.
+func (s Spec[T]) check() error {
+	switch {
+	case s.JS == nil || s.Streams == nil || s.Logger == nil:
+		return errors.New("jsrecreate: Spec needs JS, Streams and Logger")
+	case s.Create == nil || s.CreateBackup == nil || s.DeleteBackup == nil:
+		return errors.New("jsrecreate: Spec needs Create, CreateBackup and DeleteBackup")
+	case s.ErrMismatch == nil:
+		return errors.New("jsrecreate: Spec needs ErrMismatch")
+	}
+	return nil
 }
 
 // Open creates or opens the bucket. When that fails because its stream exists
@@ -150,6 +169,9 @@ type Spec[T any] struct {
 // configuration (10052), the code the server uses for a storage change.
 func Open[T any](ctx context.Context, s Spec[T]) (T, error) {
 	var zero T
+	if err := s.check(); err != nil {
+		return zero, err
+	}
 	h, createErr := s.Create(ctx)
 	if createErr == nil {
 		return h, nil
@@ -345,6 +367,11 @@ func completeBackup[T any](ctx context.Context, s Spec[T], backup string, info *
 			if updated != nil && len(updated.CachedInfo().Config.Sources) != 0 {
 				return false, fmt.Errorf("backup bucket %q still has a source after it was detached", backup)
 			}
+			if s.AfterCopy != nil {
+				if err := s.AfterCopy(ctx, backup); err != nil {
+					return false, fmt.Errorf("failed to finish backup bucket %q: %w", backup, err)
+				}
+			}
 			return false, nil
 		}
 		select {
@@ -425,7 +452,7 @@ func deleteBackup[T any](ctx context.Context, s Spec[T], backup string) {
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 	defer cancel()
 	if err := s.DeleteBackup(ctx, backup); err != nil && !errors.Is(err, jetstream.ErrBucketNotFound) {
-		s.Logger.Warn("Failed to delete incomplete bucket backup", "backup_bucket", backup, "error", err)
+		s.Logger.Warn("Failed to delete incomplete "+s.Kind+" backup", "backup_bucket", backup, "error", err)
 	}
 }
 

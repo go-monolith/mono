@@ -147,6 +147,10 @@ The plugin creates or updates every configured bucket in JetStream when it start
 | `Replicas` | `int` | `0` (means 1) | Number of replicas for replication (1-5; 0 means 1). The framework's `WithJetStreamDefaultReplicas` does not apply to plugin buckets; values above 1 need a clustered JetStream |
 | `Storage` | `StorageType` | `FileStorage` | `FileStorage` (default) or `MemoryStorage` |
 | `Compression` | `bool` | `false` | Enable S2 compression |
+| `RecreateOnStorageMismatch` | `bool` | `false` | Recreate the bucket when its stream exists with another storage type: its objects are copied to a backup bucket, then **removed from the bucket**; see [Changing a Bucket's Storage Type](#changing-a-buckets-storage-type) |
+| `SkipBackupOnRecreate` | `bool` | `false` | Recreate without a backup (**the objects are gone for good**) |
+| `RecreateBackupTTL` | `time.Duration` | `0` (7 days) | How long the backup keeps the objects (at least 1 hour, and longer than the copy timeout); negative keeps them until you delete the backup |
+| `RecreateBackupTimeout` | `time.Duration` | `0` (10 minutes) | How long the copy into the backup may take |
 
 The minimal configuration is a single bucket with a name:
 
@@ -157,6 +161,53 @@ storage, _ := fsjetstream.New(fsjetstream.Config{
     },
 })
 ```
+
+### Changing a Bucket's Storage Type
+
+NATS cannot change the storage type (file or memory) of an existing stream. A bucket's stream (`OBJ_<name>`) can already exist with a different storage type than its `Storage`, for example because another client created the bucket first with its default file storage. `Start` then fails with `ErrStorageMismatch`:
+
+- **The error:** it names the bucket, both storage types and the stream.
+- **The bucket:** its objects are left as they are.
+- **Recovery:** JetStream state survives restarts, so the application can't start until the stream is removed (`nats stream rm OBJ_<name>`, which deletes the bucket's objects).
+
+For a bucket whose contents can be lost (caches, files their owners can produce again), set `RecreateOnStorageMismatch: true`. `Start` then copies the bucket to a backup bucket, deletes it, and creates it again, empty, with the configured storage type:
+
+```go
+{Name: "thumbnails", Storage: fsjetstream.MemoryStorage, RecreateOnStorageMismatch: true}
+```
+
+{% hint style="danger" %}
+**`RecreateOnStorageMismatch` empties the bucket: the application loses every object in it, with no confirmation.**
+
+- **Without the option:** nothing is ever deleted. `Start` fails with `ErrStorageMismatch` instead.
+- **With it:** the bucket is emptied whenever its stored storage type differs from the configured one. This includes changing `Storage` on purpose, in which case the next deploy empties the bucket.
+- **The backup:** the old objects are kept in a backup bucket for 7 days by default, but the application doesn't read it, and restoring is manual (see below).
+- **No backup:** with `SkipBackupOnRecreate`, or when the backup expires, the objects are gone for good.
+
+Set the option only on buckets whose contents can be lost. Never set it on a bucket that holds files you need: to move such a bucket to another storage type, copy its objects to a new bucket yourself and switch the application over.
+{% endhint %}
+
+**The backup.** Before deleting, `Start` copies the bucket into a new object store bucket named `<name>-backup-<UTC time>-<random>` (for example `thumbnails-backup-20261119T101500Z-3f2a9c01d4e5b6a7`):
+
+- **A bucket of its own:** the backup is a complete object store. Objects are read back with the normal API or the `nats` CLI, with their names, metadata and digests intact. After the copy, each object's metadata is rewritten to name the backup bucket, so deleting or updating an object in the backup never touches the recreated bucket. Links (objects that point to another bucket's object) still point where they did.
+- **Storage:** file storage, with the bucket's replicas, placement and compression.
+- **Space:** it needs as much storage as the bucket itself.
+- **Retention:** the objects expire after `RecreateBackupTTL` (default 7 days; at least 1 hour and longer than the copy timeout; negative keeps them).
+- **Completeness:** the delete happens only once the backup holds every message the bucket held when it was read. Messages that expired before they were copied can't be. The backup is then detached, so it copies nothing the recreated bucket receives. Writes made to the old bucket after it was read, for example by instances of an older version still running during a rolling deploy, may or may not be in the backup.
+- **Copy time:** the copy runs inside `Start` and is bounded by `RecreateBackupTimeout` (default 10 minutes) and the `Start` context. Allow for it in orchestrator startup deadlines, for example a Kubernetes `startupProbe`.
+- **Failure:** if the backup can't be made or doesn't finish in time, the partial backup is removed, nothing is deleted, and `Start` fails with `ErrStorageMismatch`. A bucket too large to copy in that time keeps failing `Start`: raise `RecreateBackupTimeout`, remove its stream by hand, or set `SkipBackupOnRecreate`.
+- **When there's none:** an empty bucket is recreated without a backup, and `SkipBackupOnRecreate` turns it off.
+- **Logged:** the Warn line names the backup bucket (`backup_bucket`).
+- **Cleanup:** the plugin never removes a backup bucket. Its objects expire, but the empty bucket remains until you delete it (`nats object del <backup>`).
+- **Name length:** a bucket name longer than 210 characters leaves no room for the backup name; `New` rejects it unless `SkipBackupOnRecreate` is set.
+- **Restore:** list the backup with `nats object ls <backup>`, fetch objects with `nats object get <backup> <name>` (or the `jetstream.ObjectStore` API), and put back the ones you need.
+
+**Other guarantees:**
+- **Only on a real mismatch:** the stream is inspected only after the bucket could not be created or opened, so a healthy start makes no extra request. A bucket whose storage type matches is never touched.
+- **Only that bucket's stream:** `OBJ_<name>`, never any other stream. A stream that isn't a plain object store of that name (a mirror, or other subjects) is never deleted: `Start` fails instead.
+- **Only when the storage change was the rejection:** a create that failed for another reason (for example too many replicas for the cluster) fails `Start` with `ErrStorageMismatch` and deletes nothing.
+- **Same `Storage` everywhere:** two applications that share a bucket with different `Storage` values, and both set the option, delete each other's bucket on every start.
+- **Concurrent starts:** when several instances start at once, an instance that finds the bucket already repaired by another one, during its copy or right before its delete, drops its backup and opens the repaired bucket. Objects written to the repaired bucket in the moment between that last check and the delete can still be lost: JetStream has no conditional delete.
 
 ### StorageType
 
@@ -174,7 +225,7 @@ const (
 storage, err := fsjetstream.New(config, fsjetstream.WithLogger(myLogger))
 ```
 
-Without `WithLogger` the plugin logs to `slog.Default()`, not to the framework logger.
+Without `WithLogger` the plugin logs to `slog.Default()` as it is when the plugin starts (not when `New` is called), not to the framework logger. `WithLogger(nil)` is rejected by `New`.
 
 ## API Reference
 
