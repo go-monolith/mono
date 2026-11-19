@@ -180,6 +180,10 @@ For a bucket whose contents can be lost (locks, presence records, caches that th
 {Name: "locks", Storage: kvjetstream.MemoryStorage, TTL: time.Minute, RecreateOnStorageMismatch: true}
 ```
 
+{% hint style="danger" %}
+**`RecreateOnStorageMismatch` permanently deletes every key in the bucket, with no backup and no confirmation.** Without the option nothing is ever deleted: `Start` fails with `ErrStorageMismatch` instead. With it, the keys are lost whenever the stored bucket's storage type differs from the configured one. This includes the case where you change `Storage` on purpose: the next deploy wipes the bucket. Set it only on buckets whose contents can be lost and are rebuilt by their owners (locks, presence, caches). Never set it on a bucket that holds data you need. To move such a bucket to another storage type, copy its keys to a new bucket first.
+{% endhint %}
+
 - **Only on a real mismatch:** the stream is inspected only after the bucket could not be created or opened, so a healthy start makes no extra request, and a bucket whose storage type matches is never touched.
 - **Only that bucket's stream:** `KV_<name>`, never any other stream. A `KV_<name>` stream that isn't a plain bucket of that name (a mirror, or other subjects) is never deleted: `Start` fails instead.
 - **Same `Storage` everywhere:** two applications that share a bucket with different `Storage` values, and both set the option, delete each other's bucket on every start.

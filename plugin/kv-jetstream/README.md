@@ -173,7 +173,7 @@ type Config struct {
 | `Replicas` | `int` | Number of replicas (1-5, default 1) |
 | `Storage` | `StorageType` | `FileStorage` (default) or `MemoryStorage` |
 | `Compression` | `bool` | Enable S2 compression |
-| `RecreateOnStorageMismatch` | `bool` | Delete and recreate the bucket when its stream exists with another storage type, which NATS cannot change in place (**deletes its keys**); without it `Start` fails with `ErrStorageMismatch` |
+| `RecreateOnStorageMismatch` | `bool` | Delete and recreate the bucket when its stream exists with another storage type, which NATS cannot change in place (**permanently deletes all its keys**, also when you change `Storage` on purpose; only for buckets whose contents can be lost); without it `Start` fails with `ErrStorageMismatch` and nothing is deleted |
 
 ### StorageType
 

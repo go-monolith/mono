@@ -102,9 +102,11 @@ type BucketConfig struct {
 	// stream, so without this option Start fails with ErrStorageMismatch
 	// until the stream is removed by hand.
 	//
-	// Recreating DELETES EVERY KEY IN THE BUCKET. Set it only for a bucket
-	// whose contents can be lost, such as locks, presence records or caches
-	// that their owners rebuild. A matching or missing stream is never
+	// Recreating DELETES EVERY KEY IN THE BUCKET, with no backup, including
+	// when Storage is changed on purpose: the next Start wipes the bucket.
+	// Set it only for a bucket whose contents can be lost, such as locks,
+	// presence records or caches that their owners rebuild, never for data
+	// that must be kept. A matching or missing stream is never
 	// touched; only this bucket's own stream is ever deleted, and the delete
 	// is logged at Warn with both storage types and the number of messages
 	// and bytes it held. A stream that is not a plain KV bucket of this name
