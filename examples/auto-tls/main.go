@@ -60,6 +60,10 @@ func main() {
 		return
 	}
 
+	// NewMonoApplication starts the embedded server and obtains the
+	// certificate before returning. A misconfigured domain or an unreachable
+	// port 80 surfaces here rather than as a handshake failure on the first
+	// client connection.
 	app, err := mono.NewMonoApplication(
 		// Listen on all interfaces: the certificate authority has to reach
 		// this host from the internet to validate the challenge.
@@ -71,23 +75,20 @@ func main() {
 		mono.WithShutdownTimeout(10*time.Second),
 	)
 	if err != nil {
-		log.Fatalf("Failed to create app: %v", err)
+		log.Fatalf("Failed to create app (certificate issuance failed?): %v", err)
 	}
-	fmt.Println("✓ App created (AutoTLS enabled)")
+	fmt.Printf("✓ App created — certificate obtained for %s\n", domain)
 
 	if err := app.Register(NewEchoModule()); err != nil {
 		log.Fatalf("Failed to register module: %v", err)
 	}
 	fmt.Println("✓ Module registered")
 
-	// Start obtains the certificate before returning. A misconfigured domain or
-	// an unreachable port 80 surfaces here rather than as a handshake failure
-	// on the first client connection.
 	ctx := context.Background()
 	if err := app.Start(ctx); err != nil {
-		log.Fatalf("Failed to start app (certificate issuance failed): %v", err)
+		log.Fatalf("Failed to start app: %v", err)
 	}
-	fmt.Printf("✓ App started — certificate obtained for %s\n", domain)
+	fmt.Println("✓ App started")
 	fmt.Println()
 	fmt.Println("Clients must now connect over TLS, by hostname:")
 	fmt.Printf("  nats://%s:4222  ✗ rejected — AutoTLS makes TLS mandatory\n", domain)

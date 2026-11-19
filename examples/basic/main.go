@@ -22,7 +22,7 @@ func main() {
 	app, err := mono.NewMonoApplication(
 		mono.WithLogLevel(mono.LogLevelInfo),      // Set log level
 		mono.WithLogFormat(mono.LogFormatText),    // Use text format (human-readable)
-		mono.WithNATSLogging(false, false, false), // Also enable logs from NATS server
+		mono.WithNATSLogging(false, false, false), // NATS server logs off (debug, trace, sysTrace)
 		mono.WithShutdownTimeout(10*time.Second),  // 10 second graceful shutdown
 	)
 	if err != nil {

@@ -7,7 +7,7 @@
 //     ConsumeServices() validated by the framework at startup
 //   - RequestReply and QueueGroup service patterns
 //   - EventEmitterModule for event publishing (order module)
-//   - EventRegistryAwareModule for event consuming (notification module)
+//   - EventConsumerModule for event consuming (notification module)
 //   - Request ID tracking and access logging middleware
 package main
 
@@ -33,7 +33,7 @@ import (
 
 func main() {
 	fmt.Println("=== Mono-Framework Multi-Module Example ===")
-	fmt.Println("Demonstrates: Module dependencies, RequestReply, QueueGroup, EventEmitterModule, EventRegistryAwareModule")
+	fmt.Println("Demonstrates: Module dependencies, RequestReply, QueueGroup, EventEmitterModule, EventConsumerModule")
 	fmt.Println()
 
 	// Step 1: Create app with configuration
@@ -69,7 +69,7 @@ func main() {
 		log.Fatalf("Failed to create access log module: %v", err)
 	}
 
-	// Register access log middleware (after requestid, before business modules)
+	// Register access log middleware (before requestid and the business modules)
 	if err := app.Register(accessModule); err != nil {
 		log.Fatalf("Failed to register access log module: %v", err)
 	}
@@ -92,10 +92,10 @@ func main() {
 
 	// Step 4: Register business modules in order (dependencies first, then dependents)
 	// - Order module implements EventEmitterModule to declare events it emits
-	// - Notification module implements EventRegistryAwareModule to consume events
+	// - Notification module implements EventConsumerModule to consume events
 	// During startup, the framework:
 	//   1. Collects event definitions from EventEmitterModules (order.EmitEvents())
-	//   2. Provides EventRegistry to EventRegistryAwareModules (notification.SetEventRegistry())
+	//   2. Calls RegisterEventConsumers(registry) on EventConsumerModules (notification)
 	//   3. Sets up NATS subscriptions for event consumers
 	modules := []mono.Module{
 		inventory.NewModule(),

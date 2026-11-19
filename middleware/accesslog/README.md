@@ -100,15 +100,15 @@ accesslog.New(
 ### Text Format
 
 ```
-ts=2024-01-15T10:30:00Z request_id=abc123 module=order service=place-order method=request_reply status=success duration_ms=45 request_size=1024 response_size=512
+ts=2024-01-15T10:30:00Z request_id=abc123 module=order service=place-order service_type=request_reply status=success duration_ms=45 request_size=1024 response_size=512
 ts=2024-01-15T10:30:01Z request_id=xyz789 module=payment service=process-payment method=queue_group status=success duration_ms=120 request_size=2048 response_size=0
 ```
 
 ### JSON Format
 
 ```json
-{"ts":"2024-01-15T10:30:00Z","request_id":"abc123","module":"order","service":"place-order","method":"request_reply","status":"success","duration_ms":45,"request_size":1024,"response_size":512}
-{"ts":"2024-01-15T10:30:01Z","request_id":"xyz789","module":"payment","service":"process-payment","method":"queue_group","status":"success","duration_ms":120,"request_size":2048,"response_size":0}
+{"duration_ms":45,"module":"order","request_id":"abc123","request_size":1024,"response_size":512,"service":"place-order","service_type":"request_reply","status":"success","ts":"2024-01-15T10:30:00Z"}
+{"duration_ms":120,"module":"payment","request_id":"xyz789","request_size":2048,"response_size":0,"service":"process-payment","service_type":"queue_group","status":"success","ts":"2024-01-15T10:30:01Z"}
 ```
 
 ## Log Fields

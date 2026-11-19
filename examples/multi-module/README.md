@@ -272,7 +272,7 @@ Framework log lines are interleaved and omitted here; the order of the module li
 
 ```
 === Mono-Framework Multi-Module Example ===
-Demonstrates: Module dependencies, RequestReply, QueueGroup, EventEmitterModule, EventRegistryAwareModule
+Demonstrates: Module dependencies, RequestReply, QueueGroup, EventEmitterModule, EventConsumerModule
 
 ✓ App created successfully
 ✓ Access log middleware registered (output: access.log)

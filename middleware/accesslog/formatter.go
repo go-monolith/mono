@@ -17,7 +17,7 @@ type TextFormatter struct{}
 
 // Format formats an entry as key=value pairs.
 //
-// Example output: ts=2024-01-15T10:30:00Z request_id=abc123 module=order service=place-order method=request_reply status=success duration_ms=45 request_size=1024 response_size=512
+// Example output: ts=2024-01-15T10:30:00Z request_id=abc123 module=order service=place-order service_type=request_reply status=success duration_ms=45 request_size=1024 response_size=512
 func (f *TextFormatter) Format(entry Entry, fields []Field) string {
 	fieldSet := make(map[Field]bool)
 	for _, field := range fields {
@@ -62,7 +62,9 @@ type JSONFormatter struct{}
 
 // Format formats an entry as a JSON object.
 //
-// Example output: {"ts":"2024-01-15T10:30:00Z","request_id":"abc123","module":"order","service":"place-order","method":"request_reply","status":"success","duration_ms":45,"request_size":1024,"response_size":512}
+// The keys are written in alphabetical order (encoding/json sorts map keys).
+//
+// Example output: {"duration_ms":45,"module":"order","request_id":"abc123","request_size":1024,"response_size":512,"service":"place-order","service_type":"request_reply","status":"success","ts":"2024-01-15T10:30:00Z"}
 func (f *JSONFormatter) Format(entry Entry, fields []Field) string {
 	fieldSet := make(map[Field]bool)
 	for _, field := range fields {

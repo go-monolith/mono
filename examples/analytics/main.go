@@ -87,37 +87,11 @@ func main() {
 	// Wait for services to be fully ready
 	time.Sleep(500 * time.Millisecond)
 
-	// Step 6: Get channel service
-	// Note: In a real application, you would access services after the app is fully started
+	// Step 6: Get channel service. After a successful Start, Services returns
+	// the container of every started module.
 	services := app.Services("analytics")
 	if services == nil {
-		fmt.Println("⚠ Note: Channel services are registered but Services() API returns nil")
-		fmt.Println("   This is expected behavior - channel services are accessible only within the same process")
-		fmt.Println("   For cross-module communication, use RequestReply or QueueGroup services instead")
-		fmt.Println()
-		fmt.Println("Demonstration: Channel service handler is running in the background")
-		fmt.Println("In production, other modules would access this via the ServiceContainer")
-		fmt.Println()
-
-		// Wait for signal
-		fmt.Println("Press Ctrl+C to shutdown...")
-		sigChan := make(chan os.Signal, 1)
-		signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
-		<-sigChan
-
-		fmt.Println("\n\nShutdown signal received...")
-
-		// Graceful shutdown
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-
-		if err := app.Stop(shutdownCtx); err != nil {
-			log.Fatalf("Failed to stop app: %v", err)
-		}
-
-		fmt.Println("✓ App stopped successfully")
-		fmt.Println("Example completed!")
-		return
+		log.Fatal("analytics module has no service container")
 	}
 
 	inChan, outChan, err := services.GetChannelService("track-event", "example-client")
