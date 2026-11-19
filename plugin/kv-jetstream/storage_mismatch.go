@@ -115,11 +115,6 @@ func (m *PluginModule) createBackupBucket(ctx context.Context, cfg BucketConfig,
 	return err
 }
 
-// sourceSequence parses the source sequence of a Nats-Stream-Source header.
-func sourceSequence(header string) (uint64, bool) {
-	return jsrecreate.SourceSequence(header)
-}
-
 // validateRecreate checks the recreate settings of a bucket.
 func validateRecreate(b BucketConfig) error {
 	return jsrecreate.ValidateOptions(b.Name, kvStreamPrefix, jsrecreate.Options{

@@ -3,6 +3,7 @@ package fsjetstream
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
@@ -28,22 +29,6 @@ const MinRecreateBackupTTL = time.Hour
 // when BucketConfig.RecreateBackupTimeout is 0. It is longer than the KV
 // plugin's: object buckets hold files.
 const DefaultRecreateBackupTimeout = 10 * time.Minute
-
-// streamAPI adapts jetstream.JetStream to jsrecreate.StreamStore.
-type streamAPI struct {
-	js jetstream.JetStream
-}
-
-// StreamInfo returns the info the stream lookup already fetched, without a
-// second request.
-func (s streamAPI) StreamInfo(ctx context.Context, name string) (*jetstream.StreamInfo, error) {
-	return jsrecreate.StreamAPI{JS: s.js}.StreamInfo(ctx, name)
-}
-
-// DeleteStream deletes the named stream.
-func (s streamAPI) DeleteStream(ctx context.Context, name string) error {
-	return s.js.DeleteStream(ctx, name)
-}
 
 // jetStreamStorage maps a bucket's StorageType onto JetStream's: anything
 // other than MemoryStorage is file storage. The bucket is created and
@@ -96,7 +81,9 @@ func (m *PluginModule) openBucket(ctx context.Context, streams jsrecreate.Stream
 		DeleteBackup: func(ctx context.Context, backup string) error {
 			return m.js.DeleteObjectStore(ctx, backup)
 		},
-		AfterCopy: m.renameBackupMeta,
+		AfterCopy: func(ctx context.Context, backup string) error {
+			return m.renameBackupMeta(ctx, cfg.Name, backup)
+		},
 	})
 }
 
@@ -120,11 +107,11 @@ func (m *PluginModule) createBackupBucket(ctx context.Context, cfg BucketConfig,
 		Placement:   info.Config.Placement,
 		Compression: info.Config.Compression != jetstream.NoCompression,
 	}); err != nil {
-		return err
+		return fmt.Errorf("failed to create object store %q: %w", backup, err)
 	}
 	stream, err := m.js.Stream(ctx, objStreamPrefix+backup)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to read stream %s: %w", objStreamPrefix+backup, err)
 	}
 	scfg := stream.CachedInfo().Config
 	scfg.Sources = []*jetstream.StreamSource{{
@@ -145,12 +132,17 @@ func (m *PluginModule) createBackupBucket(ctx context.Context, cfg BucketConfig,
 // so the copied metadata still names the original bucket, and nats.go
 // publishes the metadata of a Delete or UpdateMeta to the bucket the metadata
 // names: deleting an object in the backup would otherwise write a delete
-// marker into the recreated bucket. Each object's latest metadata is
-// republished to its own subject as a rollup, every other field unchanged.
-func (m *PluginModule) renameBackupMeta(ctx context.Context, backup string) error {
-	stream, err := m.js.Stream(ctx, objStreamPrefix+backup)
+// marker into the recreated bucket. A link to an object of bucket itself is
+// pointed at the backup too, since the object it names is copied there and
+// is gone from the recreated bucket; links to other buckets are left as they
+// are. Each object's latest metadata is republished to its own subject as a
+// rollup, every other field unchanged. Reading stops when ctx ends, so the
+// rewrite stays within the copy timeout.
+func (m *PluginModule) renameBackupMeta(ctx context.Context, bucket, backup string) error {
+	backupStream := objStreamPrefix + backup
+	stream, err := m.js.Stream(ctx, backupStream)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to read backup bucket %q: %w", backup, err)
 	}
 	metaSubjects := "$O." + backup + ".M.>"
 	cons, err := stream.OrderedConsumer(ctx, jetstream.OrderedConsumerConfig{
@@ -165,10 +157,6 @@ func (m *PluginModule) renameBackupMeta(ctx context.Context, backup string) erro
 		return fmt.Errorf("failed to read the metadata of backup bucket %q: %w", backup, err)
 	}
 	pending := info.NumPending
-	bucketName, err := json.Marshal(backup)
-	if err != nil {
-		return err
-	}
 	// Read every object's latest metadata first: the rewrites land on the
 	// same subjects, so publishing while reading would feed the reader.
 	type rewrite struct {
@@ -177,35 +165,109 @@ func (m *PluginModule) renameBackupMeta(ctx context.Context, backup string) erro
 	}
 	var rewrites []rewrite
 	for pending > 0 {
-		msg, err := cons.Next(jetstream.FetchMaxWait(5 * time.Second))
+		if err := ctx.Err(); err != nil {
+			return fmt.Errorf("failed to read the metadata of backup bucket %q: %w", backup, err)
+		}
+		msg, err := cons.Next(jetstream.FetchMaxWait(fetchWait(ctx, 5*time.Second)))
 		if err != nil {
 			return fmt.Errorf("failed to read the metadata of backup bucket %q: %w", backup, err)
 		}
 		md, err := msg.Metadata()
 		if err != nil {
-			return err
+			return fmt.Errorf("failed to read the metadata of backup bucket %q: %w", backup, err)
 		}
-		var meta map[string]json.RawMessage
-		if err := json.Unmarshal(msg.Data(), &meta); err != nil {
-			return fmt.Errorf("backup bucket %q: object metadata on %s is not JSON: %w", backup, msg.Subject(), err)
-		}
-		meta["bucket"] = bucketName
-		data, err := json.Marshal(meta)
+		data, err := renameMeta(msg.Data(), bucket, backup)
 		if err != nil {
-			return err
+			return fmt.Errorf("backup bucket %q: object metadata on %s: %w", backup, msg.Subject(), err)
 		}
 		rewrites = append(rewrites, rewrite{subject: msg.Subject(), data: data})
 		pending = md.NumPending
+	}
+	// Publish asynchronously, waiting for the acknowledgements of each batch,
+	// so a bucket of many objects does not pay one round trip per object.
+	const batch = 256
+	futures := make([]jetstream.PubAckFuture, 0, batch)
+	wait := func() error {
+		for _, f := range futures {
+			select {
+			case <-f.Ok():
+			case err := <-f.Err():
+				return fmt.Errorf("failed to rewrite the metadata of %s in backup bucket %q: %w", f.Msg().Subject, backup, err)
+			case <-ctx.Done():
+				return fmt.Errorf("failed to rewrite the metadata of backup bucket %q: %w", backup, ctx.Err())
+			}
+		}
+		futures = futures[:0]
+		return nil
 	}
 	for _, r := range rewrites {
 		out := nats.NewMsg(r.subject)
 		out.Data = r.data
 		out.Header.Set(jetstream.MsgRollup, jetstream.MsgRollupSubject)
-		if _, err := m.js.PublishMsg(ctx, out, jetstream.WithExpectStream(objStreamPrefix+backup)); err != nil {
+		f, err := m.js.PublishMsgAsync(out, jetstream.WithExpectStream(backupStream))
+		if err != nil {
 			return fmt.Errorf("failed to rewrite the metadata of %s in backup bucket %q: %w", r.subject, backup, err)
 		}
+		if futures = append(futures, f); len(futures) == batch {
+			if err := wait(); err != nil {
+				return err
+			}
+		}
 	}
-	return nil
+	return wait()
+}
+
+// fetchWait returns limit, shortened to the time left before the deadline
+// of ctx (at least 1ms, the shortest wait a fetch accepts).
+func fetchWait(ctx context.Context, limit time.Duration) time.Duration {
+	if deadline, ok := ctx.Deadline(); ok {
+		if left := time.Until(deadline); left < limit {
+			return max(left, time.Millisecond)
+		}
+	}
+	return limit
+}
+
+// renameMeta returns the object metadata data with its bucket set to backup
+// and, for a link to an object of bucket, the link's bucket too; every other
+// field is kept as it is.
+func renameMeta(data []byte, bucket, backup string) ([]byte, error) {
+	var meta map[string]json.RawMessage
+	if err := json.Unmarshal(data, &meta); err != nil {
+		return nil, fmt.Errorf("not JSON: %w", err)
+	}
+	if meta == nil {
+		return nil, errors.New("not a JSON object")
+	}
+	backupName, err := json.Marshal(backup)
+	if err != nil {
+		return nil, fmt.Errorf("failed to encode the bucket name: %w", err)
+	}
+	meta["bucket"] = backupName
+
+	if raw, ok := meta["options"]; ok {
+		var opts map[string]json.RawMessage
+		if err := json.Unmarshal(raw, &opts); err == nil && opts != nil {
+			var link map[string]json.RawMessage
+			if err := json.Unmarshal(opts["link"], &link); err == nil && link != nil {
+				var target string
+				if err := json.Unmarshal(link["bucket"], &target); err == nil && target == bucket {
+					link["bucket"] = backupName
+					if opts["link"], err = json.Marshal(link); err != nil {
+						return nil, fmt.Errorf("failed to encode the link: %w", err)
+					}
+					if meta["options"], err = json.Marshal(opts); err != nil {
+						return nil, fmt.Errorf("failed to encode the options: %w", err)
+					}
+				}
+			}
+		}
+	}
+	out, err := json.Marshal(meta)
+	if err != nil {
+		return nil, fmt.Errorf("failed to encode the metadata: %w", err)
+	}
+	return out, nil
 }
 
 // validateRecreate checks the recreate settings of a bucket. A positive

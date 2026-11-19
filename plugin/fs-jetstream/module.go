@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"sync"
 
+	"github.com/go-monolith/mono/internal/jsrecreate"
 	"github.com/go-monolith/mono/pkg/types"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
@@ -131,7 +132,7 @@ func (m *PluginModule) Start(ctx context.Context) error {
 
 	// Create each bucket's ObjectStore, backend, and adapter
 	for _, bucketCfg := range m.config.Buckets {
-		os, err := m.openBucket(ctx, streamAPI{js: js}, bucketCfg)
+		os, err := m.openBucket(ctx, jsrecreate.StreamAPI{JS: js}, bucketCfg)
 		if err != nil {
 			return fmt.Errorf("failed to create bucket %s: %w", bucketCfg.Name, err)
 		}

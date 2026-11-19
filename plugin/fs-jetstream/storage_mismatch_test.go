@@ -4,12 +4,14 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"encoding/json"
 	"errors"
 	"log/slog"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/go-monolith/mono/internal/jsrecreate"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 )
@@ -168,13 +170,13 @@ func TestStart_StorageMismatch(t *testing.T) {
 // failingStreams makes the re-reads of the stream during the copy hang until
 // the deadline, so the copy cannot be confirmed, and counts deletes.
 type failingStreams struct {
-	streamAPI
+	jsrecreate.StreamAPI
 	calls, deletes *int
 }
 
 func (f failingStreams) StreamInfo(ctx context.Context, name string) (*jetstream.StreamInfo, error) {
 	if *f.calls++; *f.calls == 1 {
-		return f.streamAPI.StreamInfo(ctx, name)
+		return f.StreamAPI.StreamInfo(ctx, name)
 	}
 	<-ctx.Done()
 	return nil, ctx.Err()
@@ -182,7 +184,7 @@ func (f failingStreams) StreamInfo(ctx context.Context, name string) (*jetstream
 
 func (f failingStreams) DeleteStream(ctx context.Context, name string) error {
 	*f.deletes++
-	return f.streamAPI.DeleteStream(ctx, name)
+	return f.StreamAPI.DeleteStream(ctx, name)
 }
 
 func TestOpenBucket_BackupTimeoutDeletesNothing(t *testing.T) {
@@ -195,7 +197,7 @@ func TestOpenBucket_BackupTimeoutDeletesNothing(t *testing.T) {
 	}
 	m.js = js
 	calls, deletes := 0, 0
-	_, err = m.openBucket(context.Background(), failingStreams{streamAPI: streamAPI{js: js}, calls: &calls, deletes: &deletes}, cfg)
+	_, err = m.openBucket(context.Background(), failingStreams{StreamAPI: jsrecreate.StreamAPI{JS: js}, calls: &calls, deletes: &deletes}, cfg)
 	if !errors.Is(err, ErrStorageMismatch) || !strings.Contains(err.Error(), "backup failed") {
 		t.Fatalf("err = %v", err)
 	}
@@ -358,5 +360,62 @@ func TestNew_RecreateValidationDefaults(t *testing.T) {
 				t.Fatalf("err = %v, want %q", err, tt.want)
 			}
 		})
+	}
+}
+
+func TestRenameMeta(t *testing.T) {
+	t.Run("bucket and same-bucket link", func(t *testing.T) {
+		in := `{"name":"a","bucket":"files","nuid":"N","options":{"link":{"bucket":"files","name":"b"},"max_chunk_size":8}}`
+		out, err := renameMeta([]byte(in), "files", "files-backup-x")
+		if err != nil {
+			t.Fatal(err)
+		}
+		var info jetstream.ObjectInfo
+		if err := json.Unmarshal(out, &info); err != nil {
+			t.Fatal(err)
+		}
+		if info.Bucket != "files-backup-x" || info.NUID != "N" || info.Opts == nil || info.Opts.ChunkSize != 8 ||
+			info.Opts.Link == nil || info.Opts.Link.Bucket != "files-backup-x" || info.Opts.Link.Name != "b" {
+			t.Fatalf("renamed metadata = %s", out)
+		}
+	})
+	t.Run("link to another bucket is kept", func(t *testing.T) {
+		out, err := renameMeta([]byte(`{"name":"a","bucket":"files","options":{"link":{"bucket":"other"}}}`), "files", "files-backup-x")
+		if err != nil {
+			t.Fatal(err)
+		}
+		var info jetstream.ObjectInfo
+		if err := json.Unmarshal(out, &info); err != nil {
+			t.Fatal(err)
+		}
+		if info.Bucket != "files-backup-x" || info.Opts.Link.Bucket != "other" {
+			t.Fatalf("renamed metadata = %s", out)
+		}
+	})
+	for _, bad := range []string{"null", "[]", "x", ""} {
+		if _, err := renameMeta([]byte(bad), "files", "files-backup-x"); err == nil {
+			t.Errorf("renameMeta(%q) succeeded", bad)
+		}
+	}
+}
+
+// TestCreateBackupBucket_SourceFailure: when the backup store is created but
+// cannot be made to source the bucket, the error is returned (not
+// ErrBucketExists), so the engine deletes the half-made backup.
+func TestCreateBackupBucket_SourceFailure(t *testing.T) {
+	_, js := setupTestNATSWithJetStream(t)
+	m, err := New(Config{Buckets: []BucketConfig{{Name: "b"}}}, WithLogger(slog.New(slog.DiscardHandler)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.js = js
+	// A source subject that is not a valid subject makes the update fail.
+	cfg := BucketConfig{Name: "bad name"}
+	err = m.createBackupBucket(context.Background(), cfg, "files-backup-x", &jetstream.StreamInfo{}, 0)
+	if err == nil || errors.Is(err, jetstream.ErrBucketExists) || !strings.Contains(err.Error(), "failed to make backup bucket") {
+		t.Fatalf("err = %v", err)
+	}
+	if _, err := js.ObjectStore(context.Background(), "files-backup-x"); err != nil {
+		t.Fatalf("the half-made backup store should exist for the engine to delete: %v", err)
 	}
 }
