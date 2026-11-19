@@ -322,3 +322,35 @@ func TestStart_DefaultLoggerResolvedAtStart(t *testing.T) {
 		t.Fatalf("the default logger set after New did not receive the warning: %q", logs.String())
 	}
 }
+
+// TestOpenBucket_OtherCreateFailureNeverDeletes: a create that failed for a
+// reason other than the server's invalid configuration rejection is not
+// fixed by deleting the stream, so nothing is deleted even when the storage
+// types differ and the bucket opted in.
+func TestOpenBucket_OtherCreateFailureNeverDeletes(t *testing.T) {
+	cfg := BucketConfig{Name: "locks", Storage: MemoryStorage, RecreateOnStorageMismatch: true}
+	m, js := newMismatchModule(t, cfg)
+	real := streamAPI{js: js}
+	deletes := 0
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // the create fails with context.Canceled, not an API error
+	info := func(_ context.Context, name string) (*jetstream.StreamInfo, error) {
+		return real.StreamInfo(context.Background(), name)
+	}
+	_, err := m.openBucket(ctx, fakeStreams{streamAPI: real, info: info, deletes: &deletes}, cfg)
+	if !errors.Is(err, ErrStorageMismatch) || !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want ErrStorageMismatch wrapping context.Canceled", err)
+	}
+	if deletes != 0 {
+		t.Fatalf("DeleteStream called %d times", deletes)
+	}
+	if got, msgs := streamStorage(t, js, cfg.Name); got != jetstream.FileStorage || msgs != 1 {
+		t.Fatalf("stream storage=%v msgs=%d, want the original file stream with its key", got, msgs)
+	}
+}
+
+func TestWithLogger_NilRejected(t *testing.T) {
+	if _, err := New(Config{Buckets: []BucketConfig{{Name: "cache"}}}, WithLogger(nil)); err == nil {
+		t.Fatal("New with WithLogger(nil) succeeded")
+	}
+}

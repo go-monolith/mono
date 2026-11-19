@@ -13,6 +13,13 @@ import (
 // constant unexported.
 const kvStreamPrefix = "KV_"
 
+// jsErrCodeStreamInvalidConfig is the JetStream API error code (10052) the
+// server answers a stream update that changes the storage type with. It is
+// the generic invalid configuration code, so it alone does not identify a
+// storage change, but a create that failed with any other code was rejected
+// for another reason, which deleting the stream would not fix.
+const jsErrCodeStreamInvalidConfig jetstream.ErrorCode = 10052
+
 // streamStore is the part of the JetStream API the storage mismatch check
 // needs, so tests can inject lookup and delete outcomes.
 type streamStore interface {
@@ -58,8 +65,11 @@ func jetStreamStorage(s StorageType) jetstream.StorageType {
 // The stream is inspected only after the create failed, so a healthy start
 // makes no extra request. The server's error code for this (10052) is the
 // generic invalid stream configuration code, so the cause is established by
-// comparing the storage types; when the lookup fails or the types match, the
-// original error is returned unchanged.
+// comparing the storage types; when the lookup fails, the original error is
+// returned unchanged, and when the types match or the stream is missing, the
+// create is tried once more and both errors are returned if it fails again.
+// The stream is deleted only when the create was rejected as an invalid
+// configuration (10052), the code the server uses for a storage change.
 func (m *PluginModule) openBucket(ctx context.Context, streams streamStore, cfg BucketConfig) (jetstream.KeyValue, error) {
 	kv, createErr := m.createOrGetKVStore(ctx, cfg)
 	if createErr == nil {
@@ -73,27 +83,37 @@ func (m *PluginModule) openBucket(ctx context.Context, streams streamStore, cfg 
 		// Another instance starting at the same time may have recreated the
 		// bucket (or be about to) between the failed create and this lookup:
 		// try once more before reporting the original failure.
-		if kv, retryErr := m.createOrGetKVStore(ctx, cfg); retryErr == nil {
+		kv, retryErr := m.createOrGetKVStore(ctx, cfg)
+		if retryErr == nil {
 			return kv, nil
 		}
-		return nil, createErr
+		if retryErr.Error() == createErr.Error() {
+			return nil, createErr
+		}
+		return nil, fmt.Errorf("%w (retried after the stream was found missing or matching: %w)", createErr, retryErr)
 	}
 	if err != nil || info == nil {
 		return nil, createErr
 	}
 	have := info.Config.Storage
 
-	if !cfg.RecreateOnStorageMismatch || !isPlainKVStream(info, cfg.Name) {
-		if cfg.RecreateOnStorageMismatch {
-			return nil, fmt.Errorf("%w: bucket %q exists with %s storage but is configured with %s storage, "+
-				"and stream %s is not a plain KV bucket (a mirror or other subjects), so it is not recreated: %w",
-				ErrStorageMismatch, cfg.Name, have, want, streamName, createErr)
-		}
+	if !cfg.RecreateOnStorageMismatch {
 		return nil, fmt.Errorf("%w: bucket %q exists with %s storage but is configured with %s storage, "+
 			"and NATS cannot change the storage type of an existing stream: delete stream %s "+
 			"(nats stream rm %s, which deletes the bucket's keys) or, if its contents can be lost, "+
 			"set BucketConfig.RecreateOnStorageMismatch: %w",
 			ErrStorageMismatch, cfg.Name, have, want, streamName, streamName, createErr)
+	}
+	if !isPlainKVStream(info, cfg.Name) {
+		return nil, fmt.Errorf("%w: bucket %q exists with %s storage but is configured with %s storage, "+
+			"and stream %s is not a plain KV bucket (a mirror or other subjects), so it is not recreated: %w",
+			ErrStorageMismatch, cfg.Name, have, want, streamName, createErr)
+	}
+	var apiErr *jetstream.APIError
+	if !errors.As(createErr, &apiErr) || apiErr.ErrorCode != jsErrCodeStreamInvalidConfig {
+		return nil, fmt.Errorf("%w: bucket %q exists with %s storage but is configured with %s storage, "+
+			"and the create failed for another reason, which deleting stream %s would not fix, so it is not recreated: %w",
+			ErrStorageMismatch, cfg.Name, have, want, streamName, createErr)
 	}
 
 	// The message counts are the record of what the delete destroyed:

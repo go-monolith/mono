@@ -189,7 +189,8 @@ For a bucket whose contents can be lost (locks, presence records, caches that th
 - **Same `Storage` everywhere:** two applications that share a bucket with different `Storage` values, and both set the option, delete each other's bucket on every start.
 - **Concurrent starts can lose keys:** when several instances start at once, keys written in the first moments after one instance recreated the bucket can be lost to another instance's repair.
 - **Logged:** each delete is logged at Warn, with both storage types and the number of messages and bytes the stream held.
-- **Safe with several instances:** when several instances start at once, a stream another instance already deleted counts as deleted.
+- **A delete lost to another instance is not an error:** when several instances start at once, a stream another instance already deleted counts as deleted (keys can still be lost, see above).
+- **Only when the storage change was the rejection:** a create that failed for another reason (for example too many replicas for the cluster) fails `Start` with `ErrStorageMismatch` and deletes nothing, since recreating would fail the same way.
 
 ### Keys
 
