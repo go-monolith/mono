@@ -158,6 +158,7 @@ The plugin creates or updates every configured bucket in JetStream when it start
 | `Replicas` | `int` | `0` (means 1) | Number of replicas (1-5; 0 means 1). The framework's `WithJetStreamDefaultReplicas` does not apply to plugin buckets; values above 1 need a clustered JetStream |
 | `Storage` | `StorageType` | `FileStorage` | `FileStorage` (default) or `MemoryStorage` |
 | `Compression` | `bool` | `false` | Enable S2 compression |
+| `RecreateOnStorageMismatch` | `bool` | `false` | Delete and recreate the bucket when its stream exists with another storage type (**deletes its keys**); see [Changing a Bucket's Storage Type](#changing-a-buckets-storage-type) |
 
 The minimal configuration is a single bucket with a name:
 
@@ -168,6 +169,23 @@ kvStore, _ := kvjetstream.New(kvjetstream.Config{
     },
 })
 ```
+
+### Changing a Bucket's Storage Type
+
+NATS cannot change the storage type (file or memory) of an existing stream. If a bucket's stream (`KV_<name>`) already exists with a different storage type than its `Storage`, for example because another client created the bucket first with its default file storage, `Start` fails with `ErrStorageMismatch`. The error names the bucket, both storage types and the stream. The bucket and its keys are left as they are. Because JetStream state survives restarts, the application cannot start until the stream is removed (`nats stream rm KV_<name>`, which deletes the bucket's keys).
+
+For a bucket whose contents can be lost (locks, presence records, caches that their owners rebuild), set `RecreateOnStorageMismatch: true`. `Start` then deletes that bucket's stream and creates the bucket again with the configured storage type:
+
+```go
+{Name: "locks", Storage: kvjetstream.MemoryStorage, TTL: time.Minute, RecreateOnStorageMismatch: true}
+```
+
+- **Only on a real mismatch:** the stream is inspected only after the bucket could not be created or opened, so a healthy start makes no extra request, and a bucket whose storage type matches is never touched.
+- **Only that bucket's stream:** `KV_<name>`, never any other stream. A `KV_<name>` stream that isn't a plain bucket of that name (a mirror, or other subjects) is never deleted: `Start` fails instead.
+- **Same `Storage` everywhere:** two applications that share a bucket with different `Storage` values, and both set the option, delete each other's bucket on every start.
+- **Concurrent starts can lose keys:** when several instances start at once, keys written in the first moments after one instance recreated the bucket can be lost to another instance's repair.
+- **Logged:** each delete is logged at Warn, with both storage types and the number of messages and bytes the stream held.
+- **Safe with several instances:** when several instances start at once, a stream another instance already deleted counts as deleted.
 
 ### Keys
 
@@ -189,7 +207,7 @@ const (
 kvStore, err := kvjetstream.New(config, kvjetstream.WithLogger(myLogger))
 ```
 
-Without `WithLogger` the plugin logs to `slog.Default()`, not to the framework logger.
+Without `WithLogger` the plugin logs to `slog.Default()` as it is when the plugin starts (not when `New` is called), not to the framework logger.
 
 ## API Reference
 
@@ -327,10 +345,11 @@ var (
     ErrKeyExists        = storage.ErrKeyExists
     ErrRevisionMismatch = storage.ErrRevisionMismatch
     ErrBucketNotFound   = storage.ErrBucketNotFound
+    ErrStorageMismatch  = errors.New("kv bucket storage type mismatch")
 )
 ```
 
-`ErrBucketNotFound` is declared for backends; the plugin never returns it, and `Bucket(name)` returns nil for an unknown bucket.
+`ErrBucketNotFound` is declared for backends; the plugin never returns it, and `Bucket(name)` returns nil for an unknown bucket. `ErrStorageMismatch` is returned by `Start` (see [Changing a Bucket's Storage Type](#changing-a-buckets-storage-type)).
 
 ### Missing Keys
 

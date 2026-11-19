@@ -173,6 +173,7 @@ type Config struct {
 | `Replicas` | `int` | Number of replicas (1-5, default 1) |
 | `Storage` | `StorageType` | `FileStorage` (default) or `MemoryStorage` |
 | `Compression` | `bool` | Enable S2 compression |
+| `RecreateOnStorageMismatch` | `bool` | Delete and recreate the bucket when its stream exists with another storage type, which NATS cannot change in place (**deletes its keys**); without it `Start` fails with `ErrStorageMismatch` |
 
 ### StorageType
 
@@ -274,6 +275,7 @@ var (
     ErrKeyExists        = errors.New("key already exists")
     ErrRevisionMismatch = errors.New("revision mismatch")
     ErrBucketNotFound   = errors.New("bucket not found")
+    ErrStorageMismatch  = errors.New("kv bucket storage type mismatch") // returned by Start
 )
 ```
 

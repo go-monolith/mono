@@ -18,6 +18,11 @@ type PluginModule struct {
 	eventBus types.EventBus
 	js       jetstream.JetStream
 	logger   *slog.Logger
+	// customLogger is set by WithLogger. Without it the logger is resolved
+	// again at Start, so an application that replaces slog.Default after
+	// constructing the plugin (to ship logs elsewhere) still gets the
+	// plugin's lines there, including the warning of a recreated bucket.
+	customLogger bool
 
 	// Per-bucket adapters (wrapping backends)
 	buckets map[string]*KVStorageAdapter
@@ -91,7 +96,12 @@ func (m *PluginModule) SetEventBus(bus types.EventBus) {
 	m.eventBus = bus
 }
 
-// Start initializes the module and creates all configured buckets.
+// Start initializes the module and creates or opens all configured buckets.
+//
+// It returns an error wrapping ErrStorageMismatch when a bucket's stream
+// already exists with a different storage type than its BucketConfig.Storage,
+// unless the bucket sets RecreateOnStorageMismatch, in which case the bucket
+// is deleted (with its keys) and created again.
 func (m *PluginModule) Start(ctx context.Context) error {
 	// Get NATS connection from EventBus using generic interface
 	provider, ok := m.eventBus.(types.EventBusWithConn[*nats.Conn])
@@ -109,10 +119,13 @@ func (m *PluginModule) Start(ctx context.Context) error {
 		return fmt.Errorf("failed to create JetStream context: %w", err)
 	}
 	m.js = js
+	if !m.customLogger {
+		m.logger = slog.Default().With("module", ModuleName)
+	}
 
 	// Create each bucket's KV store, backend, and adapter
 	for _, bucketCfg := range m.config.Buckets {
-		kvStore, err := m.createOrGetKVStore(ctx, bucketCfg)
+		kvStore, err := m.openBucket(ctx, streamAPI{js: js}, bucketCfg)
 		if err != nil {
 			return fmt.Errorf("failed to create bucket %s: %w", bucketCfg.Name, err)
 		}
@@ -153,11 +166,7 @@ func (m *PluginModule) createOrGetKVStore(ctx context.Context, cfg BucketConfig)
 		Replicas:     cfg.Replicas,
 	}
 
-	if cfg.Storage == MemoryStorage {
-		kvCfg.Storage = jetstream.MemoryStorage
-	} else {
-		kvCfg.Storage = jetstream.FileStorage
-	}
+	kvCfg.Storage = jetStreamStorage(cfg.Storage)
 
 	if cfg.Compression {
 		kvCfg.Compression = true

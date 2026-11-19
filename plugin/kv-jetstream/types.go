@@ -95,6 +95,28 @@ type BucketConfig struct {
 
 	// Compression enables S2 compression.
 	Compression bool
+
+	// RecreateOnStorageMismatch lets Start delete and recreate the bucket when
+	// its stream (KV_<Name>) already exists with a different storage type
+	// than Storage. NATS cannot change the storage type of an existing
+	// stream, so without this option Start fails with ErrStorageMismatch
+	// until the stream is removed by hand.
+	//
+	// Recreating DELETES EVERY KEY IN THE BUCKET. Set it only for a bucket
+	// whose contents can be lost, such as locks, presence records or caches
+	// that their owners rebuild. A matching or missing stream is never
+	// touched; only this bucket's own stream is ever deleted, and the delete
+	// is logged at Warn with both storage types and the number of messages
+	// and bytes it held. A stream that is not a plain KV bucket of this name
+	// (a mirror, or other subjects) is never deleted: Start fails instead.
+	//
+	// When several instances start at the same time, keys written in the
+	// first moments after one instance recreated the bucket can be lost to
+	// another instance's repair (JetStream has no conditional delete). Two
+	// applications that share a bucket with different Storage values and
+	// both set this option delete each other's bucket on every start: give
+	// every application the same Storage.
+	RecreateOnStorageMismatch bool
 }
 
 // KVEntry is an alias to storage.Entry.
