@@ -273,7 +273,7 @@ The handler acknowledges each message itself, using `Ack()`, `Nak()`, `NakWithDe
 
 **Configuration:** `StreamConsumerConfig` combines stream, consumer and fetch configuration:
 
-- `Stream` (`mono.StreamConfig`): `Name` is required. `Subjects` default to `services.<module>.<service>` and `services.<module>.<service>.>`; `Retention` defaults to limits and `Storage` to file.
+- `Stream` (`mono.StreamConfig`): `Name` is required. `Subjects` default to `services.<module>.<service>` and `services.<module>.<service>.>`; `Retention` defaults to limits and `Storage` to file. The storage type, and whether the retention is work-queue, cannot be changed once the stream exists: see [Changing a Stream's Storage Type or Retention](#changing-a-streams-storage-type-or-retention).
 - `Consumer` (`mono.ConsumerConfig`): `AckPolicy` defaults to explicit, `AckWait` to 30s and `MaxDeliver` to 3.
 - `Fetch` (`mono.FetchConfig{BatchSize, Timeout}`): defaults 10 messages and 5s.
 
@@ -317,6 +317,61 @@ func (m *AnalyticsModule) handleEventBatch(ctx context.Context, msgs []*mono.Msg
     return nil
 }
 ```
+
+### Changing a Stream's Storage Type or Retention
+
+NATS cannot change two settings of a stream that already exists:
+
+- **`Storage`:** file to memory, or memory to file.
+- **`Retention`:** to or from `WorkQueuePolicy`. Limits and interest can be changed into each other in place.
+
+This applies to the stream of a stream consumer service and to the stream of an [event stream consumer](eventregistry.md#registereventstreamconsumer). Cron service streams are not affected: their storage and retention are fixed.
+
+Since v0.2.12 a configuration that changes one of them fails `Start` with `ErrStreamConfigImmutable` (package `github.com/go-monolith/mono/pkg/errors`). The error names what registered the stream, the stream and both values, and wraps the server's error:
+
+```text
+stream configuration cannot be changed in place: stream ORDERS_INGEST of stream consumer service
+orders.ingest exists with file storage and is configured with memory storage; NATS cannot change
+the storage type of an existing stream, or its retention to or from work-queue; keep the existing
+value, or register a new service name or event version on a new stream and retire the old one once
+it is drained (deleting the stream loses its messages and consumer positions): ... err_code=10052 ...
+```
+
+```go
+if err := app.Start(ctx); err != nil {
+    if errors.Is(err, monoerrors.ErrStreamConfigImmutable) {
+        // the configured storage type or retention differs from the existing stream's
+    }
+    log.Fatalf("start: %v", err)
+}
+```
+
+- **Every restart fails the same way.** JetStream state survives restarts, so restarting or redeploying does not help. Earlier versions failed too, with the server's generic error only.
+- **Nothing is deleted.** The framework never deletes or recreates the stream, so its messages and the position of every consumer are as they were.
+- **Registrations that disagree.** Two event stream consumers that register the same stream with different values fail `Start` with the same error before anything is created. The error names both registrations.
+
+**Option 1: keep the existing value.** Set `Storage` or `Retention` back to what the stream has. Nothing is lost.
+
+**Option 2: move to a new stream, side by side.** This loses no message, because the old and the new stream never share a subject:
+
+1. **Add the new registration and keep the old one.** Register a second service under a new name (for example `ingest-v2`), or a new version of the event (`v2`), on a new stream name with the new settings.
+2. **Deploy.** Both streams exist and both handlers run.
+3. **Switch the publishers** to the new service or event version.
+4. **Wait until the old stream is drained.** `nats consumer info <old stream> <consumer>` reports no unprocessed messages and no outstanding acknowledgements.
+5. **Remove the old registration and deploy.** Then delete the old stream with `nats stream rm <old stream>`, or keep it if its history is still needed.
+
+The new stream must listen on other subjects than the old one, otherwise the server rejects it (`subjects overlap with an existing stream`):
+
+- **Default subjects** follow the service name or the event version, so a new name or version is enough.
+- **Custom subjects** (`Stream.Subjects` of a stream consumer service, or an event defined with its own subject) must be changed as well.
+
+{% hint style="warning" %}
+**Why the framework does not migrate the stream itself.** Changing either setting means deleting the stream and creating it again, and no other stream can hold its subjects in the meantime without a moment in which no stream listens. A message published in that moment without an acknowledgement, such as an event sent with `EventDefinition.Publish` or `EventBus.Publish`, is dropped silently. Other instances and other clients keep publishing while one instance starts, so the framework cannot rule that out.
+{% endhint %}
+
+{% hint style="danger" %}
+**Deleting the stream** (`nats stream rm <stream>`) and restarting also applies the new settings, but it permanently deletes every message in the stream and the position of every consumer on it. Use it only when the stream holds nothing you need, for example in a development environment.
+{% endhint %}
 
 ### RegisterCronService
 

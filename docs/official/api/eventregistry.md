@@ -378,6 +378,10 @@ The framework names the durable JetStream consumer `<consumer-module>-<event-mod
 - If the same module registers the same event on the same stream more than once, the second
   and later registrations get a `-2`, `-3`, ... suffix, in the order that module registers them.
 
+**Storage type and retention of an existing stream:**
+
+NATS cannot change a stream's `Storage`, or change its `Retention` to or from `WorkQueuePolicy`, once the stream exists. Since v0.2.12 such a configuration fails `Start` with `ErrStreamConfigImmutable`, and so do two registrations of the same stream that disagree on one of them. The stream is never deleted. See [Changing a Stream's Storage Type or Retention](container.md#changing-a-streams-storage-type-or-retention) for the way out.
+
 **Upgrading from v0.0.11 or earlier:** see [Upgrading Legacy Consumers](#upgrading-legacy-consumers) at the end of this page.
 
 ## Consumer Inspection Methods
