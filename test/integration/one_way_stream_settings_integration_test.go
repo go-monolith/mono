@@ -161,8 +161,12 @@ func TestIntegration_StreamConsumerService_Sealed(t *testing.T) {
 			cfg := streamConfigOf(t, app, "orders", "ARCHIVE")
 			t.Logf("start %d: Sealed=%v DenyDelete=%v DenyPurge=%v AllowRollup=%v AllowMsgTTL=%v marker=%v",
 				start, cfg.Sealed, cfg.DenyDelete, cfg.DenyPurge, cfg.AllowRollup, cfg.AllowMsgTTL, cfg.SubjectDeleteMarkerTTL)
-			if !cfg.Sealed {
-				t.Errorf("start %d: the stream is not sealed", start)
+			// Pinned against a server upgrade: sealing wins over the marker
+			// TTL, which alone would clear DenyPurge and force roll-ups on.
+			if !cfg.Sealed || !cfg.DenyDelete || !cfg.DenyPurge || cfg.AllowRollup || !cfg.AllowMsgTTL {
+				t.Errorf("start %d: Sealed=%v DenyDelete=%v DenyPurge=%v AllowRollup=%v AllowMsgTTL=%v, "+
+					"want sealed with both denials and per-message TTLs on and roll-ups off",
+					start, cfg.Sealed, cfg.DenyDelete, cfg.DenyPurge, cfg.AllowRollup, cfg.AllowMsgTTL)
 			}
 			stop()
 		}

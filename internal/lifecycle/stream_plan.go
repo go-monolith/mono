@@ -599,6 +599,11 @@ func CheckStreamRegistrations(regs []StreamRegistration) error {
 				// Both set it; for one of them the server switches it off.
 				enables = "keeps DenyPurge enabled (AllowMsgSchedules or SubjectDeleteMarkerTTL of the other switches it off)"
 			}
+			if setting.Name == "AllowMsgTTL" && !other.AllowMsgTTL && !reg.Stream.AllowMsgTTL {
+				// Neither wrote it; one has a marker TTL, for which the
+				// server enables it.
+				enables = "enables AllowMsgTTL (through its SubjectDeleteMarkerTTL)"
+			}
 			return fmt.Errorf("%w: stream %s is registered by the %s and by the %s, of which only one %s; "+
 				"NATS cannot switch it off again on an existing stream, so every registration of a stream must agree on it",
 				monoerrors.ErrStreamConfigImmutable, reg.Stream.Name, regs[j].Owner, reg.Owner, enables)

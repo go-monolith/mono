@@ -400,6 +400,9 @@ func TestOneWayStreamDiff(t *testing.T) {
 			existing: jetstream.StreamConfig{DenyPurge: true},
 			cfg:      types.StreamConfig{DenyPurge: true, AllowMsgSchedules: true},
 			want:     []string{"has DenyPurge enabled and is configured with AllowMsgSchedules or SubjectDeleteMarkerTTL, which switches it off"}},
+		{name: "per-message TTLs the server enabled for a marker TTL that the configuration no longer has",
+			existing: jetstream.StreamConfig{AllowMsgTTL: true, SubjectDeleteMarkerTTL: time.Minute},
+			want:     []string{"has AllowMsgTTL enabled, switched on by its SubjectDeleteMarkerTTL, and is configured without either"}},
 		{name: "a sealed stream kept sealed needs neither denial spelled out",
 			existing: jetstream.StreamConfig{Sealed: true, DenyDelete: true, DenyPurge: true},
 			cfg:      types.StreamConfig{Sealed: true}},
@@ -526,6 +529,9 @@ func TestCheckStreamRegistrations_OneWaySettings(t *testing.T) {
 			first:  func(s *types.StreamConfig) { s.DenyPurge = true },
 			second: func(s *types.StreamConfig) { s.DenyPurge = true; s.SubjectDeleteMarkerTTL = time.Minute },
 			want:   "keeps DenyPurge enabled"},
+		{name: "only one has a subject delete marker TTL",
+			first: func(s *types.StreamConfig) { s.SubjectDeleteMarkerTTL = time.Minute },
+			want:  "enables AllowMsgTTL (through its SubjectDeleteMarkerTTL)"},
 		{name: "sealed agrees with sealed and both denials",
 			first:  func(s *types.StreamConfig) { s.Sealed = true },
 			second: func(s *types.StreamConfig) { s.Sealed = true; s.DenyDelete = true; s.DenyPurge = true }},
@@ -623,8 +629,12 @@ func TestWriteCronStream(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			lm, _ := newMigrationTestManager(tt.es)
+			lm, logger := newMigrationTestManager(tt.es)
 			err := lm.WriteCronStream(context.Background(), tt.es, tt.cfg)
+			if readBackFailed := tt.es.lookupErr != nil || (tt.wantLookup == 1 && tt.es.stream == nil); readBackFailed !=
+				(logger.countEntries("DEBUG: Could not read back the cron stream") == 1) {
+				t.Errorf("read-back failure logged = %v, want %v: %v", !readBackFailed, readBackFailed, logger.entries)
+			}
 			if !errors.Is(err, tt.wantErr) || (tt.wantErr == nil && err != nil) {
 				t.Fatalf("error = %v, want %v", err, tt.wantErr)
 			}

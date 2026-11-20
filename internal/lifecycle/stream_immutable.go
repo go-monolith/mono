@@ -123,7 +123,8 @@ func CheckSealedStream(cfg types.StreamConfig, owner string) error {
 //
 // A configuration that has DenyPurge on but also something that makes the
 // server switch it off (ClearsDenyPurge) is named as such, since the
-// developer did not disable it.
+// developer did not disable it. Likewise AllowMsgTTL that the server enabled
+// for a subject delete marker TTL, which the configuration no longer has.
 func OneWayStreamDiff(existing jetstream.StreamConfig, cfg types.StreamConfig) []string {
 	configuredDenyPurge := cfg.DenyPurge
 	cfg = NormalisedStreamConfig(cfg)
@@ -138,6 +139,12 @@ func OneWayStreamDiff(existing jetstream.StreamConfig, cfg types.StreamConfig) [
 		}
 		if setting.Name == "DenyPurge" && configuredDenyPurge {
 			diffs = append(diffs, "has DenyPurge enabled and is configured with AllowMsgSchedules or SubjectDeleteMarkerTTL, which switches it off")
+			continue
+		}
+		if setting.Name == "AllowMsgTTL" && existing.SubjectDeleteMarkerTTL > 0 {
+			// The server enabled it for the marker TTL; the developer may
+			// never have written AllowMsgTTL.
+			diffs = append(diffs, "has AllowMsgTTL enabled, switched on by its SubjectDeleteMarkerTTL, and is configured without either")
 			continue
 		}
 		diffs = append(diffs, fmt.Sprintf("has %s enabled and is configured with it disabled", setting.Name))

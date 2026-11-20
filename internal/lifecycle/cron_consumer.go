@@ -314,6 +314,9 @@ func (lm *lifecycleManager) WriteCronStream(ctx context.Context, es types.EventS
 	}
 	stream, lookupErr := es.Stream(ctx, cfg.Name)
 	if lookupErr != nil || stream == nil {
+		// The rejection stands; the trace says why it was not looked into.
+		lm.logger.Debug("Could not read back the cron stream after its write was rejected",
+			"stream", cfg.Name, "error", lookupErr)
 		return err
 	}
 	info := stream.CachedInfo()
