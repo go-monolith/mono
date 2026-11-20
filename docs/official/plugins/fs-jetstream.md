@@ -477,6 +477,16 @@ func (m *MediaModule) Start(ctx context.Context) error {
 - Leave temporary uploads without TTL expiration
 - Store sensitive data without encryption (use NATS TLS)
 
+## Uploads That Are Given Up
+
+An object is stored as chunk messages followed by a metadata message. Chunks that no metadata refers to are invisible (`List`, `Delete` and `Reset` do not see them) but count towards `MaxBytes`.
+
+- **A `Put` whose context is cancelled or times out leaves no chunks** (since v0.2.17). The upload is stopped at the next read and what it had written is removed. `Put` then returns the context's error (`context.Canceled`, `context.DeadlineExceeded`). Removing the chunks takes a request of its own, so a `Put` can return shortly after its deadline.
+- **An upload whose data was read completely is finished**, also when its context ends in that moment.
+- **Uploads of one name are serialised** within one application instance. Of several concurrent uploads of one name only the last is kept.
+- **Not covered:** uploads of one name from several instances at once, and an instance that dies during an upload. Both can leave chunks behind.
+- **Chunks left behind earlier are not removed automatically**: they cannot be told from the chunks of an upload another instance is making. Up to v0.2.16 every cancelled or timed-out `Put` left its chunks, and a bucket with `MaxBytes` could fill up with them until every `Put` failed with `maximum bytes exceeded`. To reclaim the space, compare the bucket's stream (`OBJ_<bucket>`) with its objects while nothing is uploading, or move the objects to a new bucket.
+
 ## How It Works
 
 The plugin uses a hexagonal (ports & adapters) architecture:

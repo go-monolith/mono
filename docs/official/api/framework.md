@@ -55,6 +55,10 @@ Starts plugins, middleware and all registered modules in dependency order (the e
 - A module fails to start: the previously started modules are rolled back, then the started middleware and the plugins are stopped, and the state returns to `StateCreated`. Any other failure after the plugins started stops them the same way.
 - `application already running` when the application is running.
 - `application already stopped, cannot restart` after `Stop`.
+- `application is already starting` for a second `Start` while one is running, and `application is stopping, cannot start` during `Stop`. Only one `Start` runs at a time.
+- An error wrapping `context.Canceled` when `Stop` was called while `Start` was running (see [`Stop`](#stop)).
+
+When `Start` fails, what it had started is stopped with a context of its own (bounded by 30 seconds), not with `ctx`: `ctx` has usually ended by then, and a module's `Stop` given an ended context would skip its cleanup.
 
 #### Stop
 
@@ -70,6 +74,14 @@ Gracefully shuts down the application, in this order:
 4. Stops NATS.
 
 The configured shutdown timeout bounds the whole operation when `ctx` has no deadline. See [`WithShutdownTimeout`](#withshutdowntimeout) and [`WithShutdownDrainTimeout`](#withshutdowndraintimeout).
+
+**Calls that overlap** (since v0.2.17; before, each of them ran, see the [upgrade guide](../guides/upgrading.md#start-and-stop-are-guarded-against-each-other-v0217)):
+
+- **`Stop` while `Start` is running** (a termination signal during a slow start) aborts the start: the context the modules are started with is cancelled, `Start` stops what it had started and returns an error wrapping `context.Canceled`, and only then is NATS stopped. This holds also when the modules ignored the cancellation and all of them started. `Stop` waits for `Start` within its own context.
+- **`Stop` while another `Stop` is running** waits for it and returns its result. It does not stop NATS under the handlers the first one is waiting for.
+- **`Stop` after `Stop` has finished** returns `application already stopped`.
+
+Do not call `Start` or `Stop` from a module's own `Start` or `Stop`: the call would wait for itself until its context ends.
 
 ### Module Management
 
@@ -655,7 +667,8 @@ mono.NewMonoApplication(
 ```
 
 - The config file provides base settings and programmatic options override them, so a standard NATS config file can be used while customizing specific settings.
-- `WithNATSHost`, `WithNATSPort` and `WithNATSMaxPayload` override the file only when their value differs from the framework default (`127.0.0.1`, `4222`, 1 MB): `WithNATSPort(4222)`, for example, does not override a `port` set in the file.
+- `WithNATSHost`, `WithNATSPort` and `WithNATSMaxPayload` override the file whenever they are used, also with a value that equals the framework default (`127.0.0.1`, `4222`, 1 MB). Up to v0.2.16 a value equal to the default was dropped: `WithNATSPort(4222)` did not override a `port` set in the file, and `WithNATSHost("127.0.0.1")` did not keep the listener on loopback.
+- **Listen address:** without a config file the client listener binds `127.0.0.1`. With a config file that sets no `host` (or `listen`), and without `WithNATSHost`, nats-server's own default applies and the listener accepts connections on every interface, without authentication unless the file configures it. This is logged at Warn when the server starts, and the `NATS server started` line reports the address the server is bound to. Use `WithNATSHost("127.0.0.1")`, or set the host in the file, to keep the client port private.
 - File existence and validity are checked when `NewMonoApplication` starts the embedded server, not when the option is applied.
 
 For NATS configuration file format and options, see the [NATS Server Configuration documentation](https://docs.nats.io/running-a-nats-service/configuration).

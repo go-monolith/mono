@@ -165,6 +165,8 @@ func verifyAuditLog(filename string) error {
 
 `VerifyChain` expects the first entry to have an empty `prev_hash`. Verify a file continued with `WithHashChaining(lastHash)` with `audit.VerifyChainFrom(entries, lastHash)`, where `lastHash` is the last `entry_hash` of its predecessor.
 
+An entry is hashed in the form a reader of the log gets it in (`audit.CanonicalDetails`), so the log verifies after it was written and parsed again whatever Go values the details held: empty details are hashed like missing ones, and a struct like the map it is parsed as. Up to v0.2.16 an entry with empty details, which every clean `module.stopped` entry is, never verified, so `VerifyChain` rejected the untampered log of a normal run. Logs written by those versions verify now (the hash they gave such an entry is accepted), and the hashes of entries that verified before are unchanged.
+
 For a quick look at the hashes: `jq '.entry_hash, .prev_hash' audit.log`.
 
 Other exported helpers: `audit.NewHashChain(lastSavedHash)` / `HashChain.AddEntry`, the `audit.Entry` type and the `audit.EventType` constants.
