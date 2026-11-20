@@ -2379,6 +2379,7 @@ func (lm *lifecycleManager) purgeCronSchedule(ctx context.Context, es types.Even
 // acknowledgement here (see dispatchCronTick).
 func (lm *lifecycleManager) runCronConsumerLoop(ctx context.Context, consumer jetstream.Consumer, entry *types.ServiceEntry) {
 	fetchErrs := newFetchErrorReporter(lm.logger, "Cron fetch error", "service", entry.Name)
+	fetchErrs.WatchJetStreamConsumer(consumer)
 	for {
 		select {
 		case <-ctx.Done():
@@ -2643,6 +2644,7 @@ func (lm *lifecycleManager) runEventStreamConsumerLoop(
 	}
 
 	fetchErrs := newFetchErrorReporter(lm.logger, "Fetch error", "event", eventName)
+	fetchErrs.WatchJetStreamConsumer(consumer)
 	for {
 		select {
 		case <-ctx.Done():
@@ -2726,6 +2728,7 @@ func (lm *lifecycleManager) runStreamConsumerLoop(
 ) {
 	cfg := entry.StreamConsumerConfig
 	fetchErrs := newFetchErrorReporter(lm.logger, "Fetch error", "service", entry.Name)
+	fetchErrs.WatchJetStreamConsumer(consumer)
 
 	for {
 		select {
