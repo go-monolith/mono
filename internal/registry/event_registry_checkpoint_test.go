@@ -2,6 +2,7 @@ package registry
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/go-monolith/mono/pkg/types"
@@ -80,5 +81,33 @@ func TestEventRegistryCheckpoint(t *testing.T) {
 	}
 	if got := len(r.Entries()); got != 2 {
 		t.Fatalf("%d consumers after the retry, want 2", got)
+	}
+}
+
+// TestRegisterEventStreamConsumer_NegativeFetch: a negative batch size used
+// to be registered and crash the process in the fetch loop.
+func TestRegisterEventStreamConsumer_NegativeFetch(t *testing.T) {
+	r := NewEventRegistry(&mockLogger{})
+	def := types.BaseEventDefinition{ModuleName: "catalog", Name: "ProductAdded", Version: "v1", Subject: "events.catalog.product-added"}
+	batch := func(context.Context, []*types.Msg) error { return nil }
+	module := &mockModule{name: "orders"}
+	for name, fetch := range map[string]types.FetchConfig{
+		"batch size": {BatchSize: -1},
+		"timeout":    {Timeout: -1},
+	} {
+		err := r.RegisterEventStreamConsumer(def, types.StreamConsumerConfig{Stream: types.StreamConfig{Name: "EVENTS"}, Fetch: fetch}, batch, module)
+		if err == nil || !strings.Contains(err.Error(), "must not be negative") || !strings.Contains(err.Error(), "catalog.ProductAdded.v1") {
+			t.Errorf("negative %s: err = %v, want a rejection naming the event", name, err)
+		}
+	}
+	if got := len(r.StreamConsumerEntries()); got != 0 {
+		t.Fatalf("%d consumers registered", got)
+	}
+	// Zero still selects the defaults.
+	if err := r.RegisterEventStreamConsumer(def, types.StreamConsumerConfig{Stream: types.StreamConfig{Name: "EVENTS"}}, batch, module); err != nil {
+		t.Fatal(err)
+	}
+	if got := r.StreamConsumerEntries()[0].Config.Fetch; got.BatchSize != 10 || got.Timeout <= 0 {
+		t.Fatalf("defaults = %+v", got)
 	}
 }

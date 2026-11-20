@@ -112,7 +112,16 @@ func (b *JetStreamKVBackend) Set(key string, val []byte, exp time.Duration) erro
 
 // DeleteWithContext deletes the value for the given key with a context.
 // It returns no error if the storage does not contain the key.
+//
+// A key that does not exist is not deleted: the bucket's delete writes a
+// marker whether or not there is anything to delete, so every delete of a
+// missing key added a message to the bucket that Reset does not reclaim. The
+// key is therefore looked up first, which costs one read per delete.
 func (b *JetStreamKVBackend) DeleteWithContext(ctx context.Context, key string) error {
+	if _, err := b.kv.Get(ctx, key); errors.Is(err, jetstream.ErrKeyNotFound) {
+		return nil
+	}
+	// Any other lookup error is left to the delete to report.
 	if err := b.kv.Delete(ctx, key); err != nil {
 		if errors.Is(err, jetstream.ErrKeyNotFound) {
 			return nil // Key not found is not an error per storage.Storage contract
@@ -130,14 +139,25 @@ func (b *JetStreamKVBackend) Delete(key string) error {
 
 // ResetWithContext resets the storage and deletes all keys with a context.
 func (b *JetStreamKVBackend) ResetWithContext(ctx context.Context) error {
+	// The key lister runs until every key was read or its context ends, and
+	// it blocks handing over a key nobody takes. A reset that returns early
+	// (a purge failed) therefore ends the listing and takes what is left of
+	// it; without that its goroutines stayed for the life of the process.
+	listCtx, stopListing := context.WithCancel(ctx)
 	// List all keys and purge them
-	lister, err := b.kv.ListKeys(ctx)
+	lister, err := b.kv.ListKeys(listCtx)
 	if err != nil {
+		stopListing()
 		if errors.Is(err, jetstream.ErrNoKeysFound) {
 			return nil // No keys to delete
 		}
 		return fmt.Errorf("failed to list keys for reset: %w", err)
 	}
+	defer func() {
+		stopListing()
+		for range lister.Keys() { //nolint:revive // drained so that the lister can exit
+		}
+	}()
 
 	for key := range lister.Keys() {
 		if err := b.kv.Purge(ctx, key); err != nil {
@@ -145,6 +165,11 @@ func (b *JetStreamKVBackend) ResetWithContext(ctx context.Context) error {
 				return fmt.Errorf("failed to purge key %s during reset: %w", key, err)
 			}
 		}
+	}
+	// The lister ends without a word when its context does: a reset cut
+	// short must not be reported as done.
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("reset stopped before every key was purged: %w", err)
 	}
 	return nil
 }

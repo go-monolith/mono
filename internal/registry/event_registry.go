@@ -352,6 +352,19 @@ func (r *eventRegistry) RegisterEventStreamConsumer(eventDef types.BaseEventDefi
 	// This ensures the stream only captures messages for this specific event
 	config.Stream.Subjects = []string{eventDef.Subject}
 
+	// A negative batch size made the fetch loop panic the process when it
+	// allocated its batch (makechan: size out of range), and a negative
+	// timeout fails every fetch: both are rejected here, where the
+	// registration that carries them is named.
+	if config.Fetch.BatchSize < 0 {
+		return fmt.Errorf("event stream consumer of %s.%s.%s: Fetch.BatchSize must not be negative (got %d; 0 selects the default)",
+			eventDef.ModuleName, eventDef.Name, eventDef.Version, config.Fetch.BatchSize)
+	}
+	if config.Fetch.Timeout < 0 {
+		return fmt.Errorf("event stream consumer of %s.%s.%s: Fetch.Timeout must not be negative (got %v; 0 selects the default)",
+			eventDef.ModuleName, eventDef.Name, eventDef.Version, config.Fetch.Timeout)
+	}
+
 	// Apply default fetch config if not set
 	if config.Fetch.BatchSize == 0 {
 		config.Fetch.BatchSize = 10
