@@ -1800,6 +1800,8 @@ func closeWorkerPools(ctx context.Context, pools []*workerpool.Pool) int {
 // rollback stops all started modules in reverse order
 func (lm *lifecycleManager) rollback(ctx context.Context, started []string, originalErr error) error {
 	lm.logger.Error("Rolling back module startup", "error", originalErr, "started", len(started))
+	ctx, cancel := RollbackContext(ctx)
+	defer cancel()
 
 	// Stop modules in reverse order
 	for i := len(started) - 1; i >= 0; i-- {
@@ -1818,12 +1820,27 @@ func (lm *lifecycleManager) rollback(ctx context.Context, started []string, orig
 	return fmt.Errorf("module startup failed, rolled back %d modules: %w", len(started), originalErr)
 }
 
+// RollbackTimeout bounds the stopping of what a failed Start had started.
+const RollbackTimeout = 30 * time.Second
+
+// RollbackContext returns the context a failed Start stops what it had
+// started with. The Start context has often ended by then: its deadline is
+// why the start failed, or it was cancelled to abort the start (a Stop called
+// while starting, a signal). A module's Stop given that context would skip
+// its cleanup, so the rollback gets one that is not cancelled with it, keeps
+// its values, and is bounded by RollbackTimeout.
+func RollbackContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.WithoutCancel(ctx), RollbackTimeout)
+}
+
 // rollbackStartedInfrastructure stops, after a failed Start, the middleware
 // whose Start succeeded (in reverse order) and then every plugin (all of them
 // started, or startPlugins would have rolled them back and failed first), and
 // forgets the plugin containers, so nothing is left running and a retried
 // Start does not start a plugin twice without a Stop in between.
 func (lm *lifecycleManager) rollbackStartedInfrastructure(ctx context.Context, startedMiddleware []types.MiddlewareModule) {
+	ctx, cancel := RollbackContext(ctx)
+	defer cancel()
 	for i := len(startedMiddleware) - 1; i >= 0; i-- {
 		mw := startedMiddleware[i]
 		if err := lm.stopMiddlewareModule(ctx, mw); err != nil {
