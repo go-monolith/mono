@@ -61,7 +61,7 @@ func main() {
 
 - `WithOutput` is required: without it `New` returns the error `audit module requires WithOutput option`.
 - **The module closes the writer on `Stop`** (it calls `Sync()` and `Close()` when the writer implements them. `os.Stdout` and `os.Stderr` are never closed, and a pipe or terminal, which cannot be synced, does not fail `Stop`); do not close it yourself.
-- **A module whose log was closed cannot be started again**: `Start` returns `audit.ErrOutputClosed`. Build a new module with `audit.New` for a new application. When a failed `Start` of the application is rolled back, the log is flushed and left open, so a retried `Start` works (since v0.2.18).
+- **A module whose log was closed cannot be started again**: `Start` returns `audit.ErrOutputClosed`. Build a new module with `audit.New` for a new application. When a failed `Start` of the application is rolled back, the log is flushed and left open, so a retried `Start` works (since v0.2.18); it is closed when the application is stopped instead.
 - **Hash chaining is off by default**: `audit.New(audit.WithOutput(file))` writes `prev_hash` and `entry_hash` empty.
 - The `WithUserContext` function is called with the `Start`/`Stop` context or `context.Background()`, not with a request context.
 

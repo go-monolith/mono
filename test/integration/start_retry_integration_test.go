@@ -7,6 +7,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -282,5 +283,62 @@ func TestIntegration_RetriedStart(t *testing.T) {
 	}
 	if err := audit.VerifyChain(entries); err != nil {
 		t.Errorf("audit chain across the three starts: %v", err)
+	}
+}
+
+// TestIntegration_FailedStartThenStop: the rollback of a failed Start leaves
+// the audit and access log open for a retry. When the application is stopped
+// instead, both are closed, as they are after a run.
+func TestIntegration_FailedStartThenStop(t *testing.T) {
+	dir := t.TempDir()
+	auditFile, err := os.OpenFile(filepath.Join(dir, "audit.log"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	accessFile, err := os.OpenFile(filepath.Join(dir, "access.log"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	auditModule, err := audit.New(audit.WithOutput(auditFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	accessModule, err := accesslog.New(accesslog.WithOutput(accessFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	app, err := mono.NewMonoApplication(
+		mono.WithCustomLogger(&noOpsLogger{}),
+		mono.WithJetStreamStorageDir(filepath.Join(dir, "js")),
+		mono.WithNATSDontListen(),
+		mono.WithNATSInProcessConn(),
+	)
+	if err != nil {
+		t.Fatalf("NewMonoApplication: %v", err)
+	}
+	orders := &retryOrders{}
+	orders.failSetup.Store(true)
+	for _, m := range []mono.Module{auditModule, accessModule, &retryCatalog{in: make(chan *mono.Msg, 8), out: make(chan *mono.Msg, 8)}, orders} {
+		if err := app.Register(m); err != nil {
+			t.Fatalf("Register %s: %v", m.Name(), err)
+		}
+	}
+	ctx := context.Background()
+	if err := app.Start(ctx); err == nil {
+		t.Fatal("Start succeeded with a stream configuration the server rejects")
+	}
+	// Still open: a retry could write.
+	for name, f := range map[string]*os.File{"audit": auditFile, "access": accessFile} {
+		if _, err := f.Write(nil); err != nil {
+			t.Fatalf("the %s log is closed after the rollback: %v", name, err)
+		}
+	}
+	if err := app.Stop(ctx); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	for name, f := range map[string]*os.File{"audit": auditFile, "access": accessFile} {
+		if _, err := f.Write([]byte("x")); !errors.Is(err, os.ErrClosed) {
+			t.Errorf("the %s log is still open after Stop: write = %v", name, err)
+		}
 	}
 }

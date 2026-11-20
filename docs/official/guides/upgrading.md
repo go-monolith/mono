@@ -221,7 +221,7 @@ See [`Stop`](../api/framework.md#stop).
 - **Audit middleware:** every retry failed with `audit module already started`. **Access log middleware:** it started but logged nothing.
 - **A `Start` while an abandoned `Stop` is still running** (see above) fails with `monoerrors.ErrStopAbandoned`.
 
-Custom middleware whose `Stop` gives up something it cannot get back can implement [`types.RollbackAwareMiddleware`](../middleware/README.md#middleware-lifecycle), as the built-in ones do.
+The built-in middleware keep their log open through the rollback and close it when the application stops, whether or not it was started again. Custom middleware whose `Stop` gives up something it cannot get back can implement [`types.RollbackAwareMiddleware`](../middleware/README.md#middleware-lifecycle), as the built-in ones do.
 
 ### Audit middleware: failed writes, `Stop` and large saves (v0.2.18)
 

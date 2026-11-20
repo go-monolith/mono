@@ -59,7 +59,7 @@ Starts plugins, middleware and all registered modules in dependency order (the e
 - An error wrapping `context.Canceled` when `Stop` was called while `Start` was running (see [`Stop`](#stop)).
 - An error wrapping `monoerrors.ErrStopAbandoned` while the `Stop` of a module that an earlier stop or rollback gave up on is still running (see [`Stop`](#stop)).
 
-After a failed `Start` the application is back in `StateCreated` and `Start` may be called again. Since v0.2.18 the retry finds nothing of the failed attempt: the events and event consumers it registered are forgotten, its channel routers have ended, and the built-in audit and access log middleware start again with their log still open.
+After a failed `Start` the application is back in `StateCreated` and `Start` may be called again. Since v0.2.18 the retry finds nothing of the failed attempt: the events and event consumers it registered are forgotten, its channel routers have ended, and the built-in audit and access log middleware start again with their log still open. `Stop` on an application whose `Start` failed closes those logs.
 
 When `Start` fails, what it had started is stopped with a context of its own, not with `ctx`: `ctx` has usually ended by then, and a module's `Stop` given an ended context would skip its cleanup. That context is bounded by the shutdown timeout ([`WithShutdownTimeout`](#withshutdowntimeout), default 30 seconds). A `Stop` that aborts the start hands over its own bound: the stopping ends when that `Stop`'s context does.
 

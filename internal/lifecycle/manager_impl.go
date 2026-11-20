@@ -63,6 +63,7 @@ type lifecycleManager struct {
 	abandonedStops             map[string]int                // Stops given up on that have not returned yet, by "<kind> <name>" (see RunStop)
 	cancelRouters              context.CancelFunc            // ends the channel routers of the current start (nil: none running)
 	stopMinBudget              time.Duration                 // wait for a Stop called with an ended context (0 = StopMinBudget)
+	rolledBack                 []types.MiddlewareModule      // middleware stopped by RollbackStart and not started again: their final Stop is owed
 }
 
 // EventRegistryCheckpointer is the optional capability of an event registry
@@ -860,6 +861,10 @@ func (lm *lifecycleManager) Start(ctx context.Context) (err error) {
 				return fmt.Errorf("failed to start middleware module %s: %w", mw.Name(), err)
 			}
 			startedMiddleware = append(startedMiddleware, mw)
+			// Started again: its final Stop comes with this start's.
+			lm.mu.Lock()
+			lm.rolledBack = RemoveMiddleware(lm.rolledBack, mw)
+			lm.mu.Unlock()
 		}
 	}
 
@@ -1909,8 +1914,54 @@ func (lm *lifecycleManager) rollbackStartedInfrastructure(ctx context.Context, s
 		if err := lm.stopMiddlewareModule(ctx, mw, true); err != nil {
 			lm.logger.Error("Failed to stop middleware module during rollback", "module", mw.Name(), "error", err)
 		}
+		// Stopped through RollbackStart, it still owes its final Stop
+		// (see StopRolledBackMiddleware).
+		if _, aware := mw.(types.RollbackAwareMiddleware); aware {
+			lm.mu.Lock()
+			lm.rolledBack = AppendMiddlewareOnce(lm.rolledBack, mw)
+			lm.mu.Unlock()
+		}
 	}
 	lm.rollbackPlugins(ctx, lm.pluginRegistry.List())
+}
+
+// AppendMiddlewareOnce returns list with mw appended unless it is in it.
+func AppendMiddlewareOnce(list []types.MiddlewareModule, mw types.MiddlewareModule) []types.MiddlewareModule {
+	for _, have := range list {
+		if have == mw {
+			return list
+		}
+	}
+	return append(list, mw)
+}
+
+// RemoveMiddleware returns list without mw.
+func RemoveMiddleware(list []types.MiddlewareModule, mw types.MiddlewareModule) []types.MiddlewareModule {
+	kept := list[:0:0]
+	for _, have := range list {
+		if have != mw {
+			kept = append(kept, have)
+		}
+	}
+	return kept
+}
+
+// StopRolledBackMiddleware calls Stop on the middleware modules a rollback
+// stopped through RollbackStart and that were not started again, in reverse
+// order. A middleware that was started again is stopped by Stop.
+func (lm *lifecycleManager) StopRolledBackMiddleware(ctx context.Context) error {
+	lm.mu.Lock()
+	rolledBack := lm.rolledBack
+	lm.rolledBack = nil
+	lm.mu.Unlock()
+
+	var errs []error
+	for i := len(rolledBack) - 1; i >= 0; i-- {
+		if err := lm.stopMiddlewareModule(ctx, rolledBack[i], false); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
 }
 
 // servesOverNATS reports whether c holds a service that is subscribed over

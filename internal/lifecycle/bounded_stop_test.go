@@ -260,3 +260,94 @@ func TestRunStop(t *testing.T) {
 		eventually(t, func() bool { return len(lm.AbandonedStops()) == 0 }, "still counted after both returned")
 	})
 }
+
+// RollbackAwareMock is a middleware module that counts its final Stops and
+// its rollbacks.
+type RollbackAwareMock struct {
+	mockMiddlewareModule
+	Stops, Rollbacks atomic.Int32
+}
+
+// Stop counts a final stop.
+func (m *RollbackAwareMock) Stop(context.Context) error { m.Stops.Add(1); return nil }
+
+// RollbackStart counts a rollback.
+func (m *RollbackAwareMock) RollbackStart(context.Context) error { m.Rollbacks.Add(1); return nil }
+
+// TestStopRolledBackMiddleware: a middleware the rollback of a failed Start
+// stopped through RollbackStart is owed its final Stop until it is started
+// again.
+func TestStopRolledBackMiddleware(t *testing.T) {
+	lm, _, reg := newBareManager(t, newMockEventBus())
+	mw := &RollbackAwareMock{mockMiddlewareModule: mockMiddlewareModule{mockModule: mockModule{name: "audit"}}}
+	plain := &mockMiddlewareModule{mockModule: mockModule{name: "plain"}}
+	failing := &mockModule{name: "orders", startErr: errors.New("boom")}
+	for _, m := range []types.Module{mw, plain, failing} {
+		if err := reg.Register(m); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ctx := context.Background()
+
+	// Two failed starts: rolled back twice, owed one final Stop.
+	for i := 0; i < 2; i++ {
+		if err := lm.Start(ctx); err == nil {
+			t.Fatal("Start succeeded")
+		}
+	}
+	if mw.Rollbacks.Load() != 2 || mw.Stops.Load() != 0 {
+		t.Fatalf("rollbacks=%d stops=%d after two failed starts, want 2 and 0", mw.Rollbacks.Load(), mw.Stops.Load())
+	}
+	if !plain.wasStopped() {
+		t.Fatal("a middleware without RollbackStart is stopped by the rollback")
+	}
+	if err := lm.StopRolledBackMiddleware(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := lm.StopRolledBackMiddleware(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if got := mw.Stops.Load(); got != 1 {
+		t.Fatalf("final Stop called %d times, want once", got)
+	}
+
+	// Rolled back, then started again: Stop stops it, nothing more is owed.
+	if err := lm.Start(ctx); err == nil {
+		t.Fatal("Start succeeded")
+	}
+	failing.mu.Lock()
+	failing.startErr = nil
+	failing.mu.Unlock()
+	if err := lm.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if err := lm.StopRolledBackMiddleware(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if got := mw.Stops.Load(); got != 1 {
+		t.Fatalf("a middleware that was started again got a final Stop beside its run (%d)", got)
+	}
+	if err := lm.Stop(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if got := mw.Stops.Load(); got != 2 {
+		t.Fatalf("final Stops = %d, want the one of Stop added", got)
+	}
+}
+
+func TestAppendAndRemoveMiddleware(t *testing.T) {
+	a := &mockMiddlewareModule{mockModule: mockModule{name: "a"}}
+	b := &mockMiddlewareModule{mockModule: mockModule{name: "b"}}
+	list := AppendMiddlewareOnce(nil, a)
+	list = AppendMiddlewareOnce(list, a)
+	list = AppendMiddlewareOnce(list, b)
+	if len(list) != 2 {
+		t.Fatalf("list = %v", list)
+	}
+	if got := RemoveMiddleware(list, a); len(got) != 1 || got[0] != types.MiddlewareModule(b) {
+		t.Fatalf("after removing a: %v", got)
+	}
+	if got := RemoveMiddleware(nil, a); len(got) != 0 {
+		t.Fatalf("removing from an empty list: %v", got)
+	}
+}

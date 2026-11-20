@@ -75,7 +75,7 @@ func main() {
 {% hint style="warning" %}
 **The module closes the writer on `Stop`** (it calls `Sync()` and `Close()` when the writer implements them. `os.Stdout` and `os.Stderr` are never closed, and a pipe or terminal, which cannot be synced, does not fail `Stop`). Do not close it yourself.
 
-A module whose log was closed cannot be started again: `Start` returns `accesslog.ErrOutputClosed`, so build a new module with `accesslog.New` for a new application. When a failed `Start` of the application is rolled back, the log is flushed and left open, and the module logs again after the retried `Start` (since v0.2.18).
+A module whose log was closed cannot be started again: `Start` returns `accesslog.ErrOutputClosed`, so build a new module with `accesslog.New` for a new application. When a failed `Start` of the application is rolled back, the log is flushed and left open, and the module logs again after the retried `Start` (since v0.2.18); it is closed when the application is stopped instead.
 {% endhint %}
 
 Select fields:

@@ -26,6 +26,14 @@ type LifecycleManager interface {
 	// Stop stops all modules in reverse dependency order
 	Stop(ctx context.Context) error
 
+	// StopRolledBackMiddleware calls Stop on the middleware modules that the
+	// rollback of a failed Start stopped through RollbackStart and that
+	// were not started again. Their rollback left open what only their
+	// final Stop gives up (the log of the built-in audit and access log
+	// middleware); the application calls this when it stops without having
+	// started again. It does nothing when there is none.
+	StopRolledBackMiddleware(ctx context.Context) error
+
 	// WaitForShutdown blocks until shutdown signal or context cancellation
 	WaitForShutdown(ctx context.Context) error
 
