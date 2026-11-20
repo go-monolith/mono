@@ -353,3 +353,69 @@ func TestIsConfirmationOf(t *testing.T) {
 		t.Fatal("an empty confirmation is not an error")
 	}
 }
+
+// BlockingCloser is a BlockingWriter whose Close is counted.
+type BlockingCloser struct {
+	BlockingWriter
+	mu     sync.Mutex
+	closes int
+}
+
+// Close counts.
+func (w *BlockingCloser) Close() error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.closes++
+	return nil
+}
+
+// Closes returns how often Close was called.
+func (w *BlockingCloser) Closes() int {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.closes
+}
+
+// TestStop_HandlerStillWriting: a final Stop that gives up on a handler in a
+// write does not close the log under it. Nobody calls Stop a second time, so
+// the log is closed when the handler has exited, with the entry in it.
+func TestStop_HandlerStillWriting(t *testing.T) {
+	w := &BlockingCloser{BlockingWriter: BlockingWriter{Release: make(chan struct{})}}
+	m, adapter := StartedAudit(t, w)
+	if err := adapter.AsyncSaveAuditTrail(context.Background(), customEntries(1)); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(50 * time.Millisecond) // the handler is in the write
+	ended, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := m.Stop(ended); err == nil || !strings.Contains(err.Error(), "still writing") {
+		t.Fatalf("Stop = %v, want the handler reported as still writing", err)
+	}
+	if err := m.Stop(ended); err == nil {
+		t.Fatal("a second Stop reported success while the handler is still writing")
+	}
+	if w.Closes() != 0 {
+		t.Fatal("the log was closed under the handler's write")
+	}
+
+	close(w.Release)
+	deadline := time.Now().Add(5 * time.Second)
+	for w.Closes() == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("the log was not closed after the handler exited")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if got := len(w.Entries(t)); got != 1 {
+		t.Fatalf("%d entries written, want the one the handler was writing", got)
+	}
+	if err := m.Start(context.Background()); !errors.Is(err, ErrOutputClosed) {
+		t.Fatalf("Start after the final Stop = %v, want ErrOutputClosed", err)
+	}
+	if err := m.Stop(context.Background()); err != nil {
+		t.Fatalf("Stop once everything is closed: %v", err)
+	}
+	if w.Closes() != 1 {
+		t.Fatalf("the log was closed %d times, want once", w.Closes())
+	}
+}

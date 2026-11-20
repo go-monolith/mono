@@ -71,6 +71,9 @@ type AuditModule struct {
 	outputClosed bool
 	// tornLine is set when a failed write left part of a line in the log.
 	tornLine bool
+	// closeOwed is set (under lifecycleMu) when a final Stop gave up on a
+	// handler that was still in a write: the log is closed once it exits.
+	closeOwed bool
 }
 
 // ErrOutputClosed is returned by Start, and for an entry that arrives, after
@@ -150,11 +153,20 @@ func (m *AuditModule) Start(_ context.Context) error {
 		if !m.handlerStopped() {
 			return fmt.Errorf("audit module already started")
 		}
-		// A RollbackStart gave up on a handler that was still in a write,
-		// and the handler has finished since: what that stop left undone
-		// is done now. Nobody would call it again, and without this every
-		// later Start would fail.
+		// A stop gave up on a handler that was still in a write, and the
+		// handler has finished since: what that stop left undone is done
+		// now. Nobody would call it again, and without this every later
+		// Start would fail.
 		m.started = false
+		if m.closeOwed {
+			// It was the final Stop: the log is closed, as it would have
+			// been, and the module cannot be started again.
+			m.closeOwed = false
+			if err := m.closeOutput(); err != nil {
+				return err
+			}
+			return fmt.Errorf("audit module cannot be started again: %w", ErrOutputClosed)
+		}
 		m.mu.Lock()
 		err := output.Flush(m.writer, "audit log")
 		m.mu.Unlock()
@@ -220,13 +232,7 @@ func (m *AuditModule) stop(ctx context.Context, closeOutput bool) error {
 		}
 		// Never started, or stopped by RollbackStart: the hooks may have
 		// written entries all the same, and the final Stop owns the writer.
-		m.mu.Lock()
-		defer m.mu.Unlock()
-		if m.outputClosed {
-			return nil
-		}
-		m.outputClosed = output.Closes(m.writer)
-		return output.FlushAndClose(m.writer, "audit log")
+		return m.closeOutput()
 	}
 
 	// Tell the handler to stop; it first writes what is in the channel.
@@ -234,21 +240,54 @@ func (m *AuditModule) stop(ctx context.Context, closeOutput bool) error {
 	if err := WaitForHandler(ctx, m.handlerDone); err != nil {
 		// The handler is still in a write and holds the writer: it is
 		// neither flushed nor closed under it, and the module stays
-		// started, so that no second handler is started beside this one. A
-		// later Stop waits for it again.
+		// started, so that no second handler is started beside this one.
+		// Nobody calls Stop a second time, so what a final Stop owes, the
+		// close of the log, is done when the handler has exited.
+		if closeOutput && !m.closeOwed {
+			m.closeOwed = true
+			go m.closeWhenHandlerStops(m.handlerDone)
+		}
 		return err
 	}
+	m.closeOwed = false
 	m.started = false
 
-	m.mu.Lock()
-	defer m.mu.Unlock()
 	if !closeOutput {
+		m.mu.Lock()
+		defer m.mu.Unlock()
 		return output.Flush(m.writer, "audit log")
 	}
-	// Flush and close the writer, except os.Stdout and os.Stderr, which
-	// the rest of the process keeps using (see output.FlushAndClose).
+	return m.closeOutput()
+}
+
+// closeOutput flushes and closes the writer, except os.Stdout and os.Stderr,
+// which the rest of the process keeps using (see output.FlushAndClose), once.
+func (m *AuditModule) closeOutput() error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.outputClosed {
+		return nil
+	}
 	m.outputClosed = output.Closes(m.writer)
 	return output.FlushAndClose(m.writer, "audit log")
+}
+
+// closeWhenHandlerStops closes the log once the handler a final Stop gave up
+// on has exited, unless a Start or another Stop did so first. Without it the
+// log of a module whose Stop gave up would never be closed: the application
+// calls Stop once.
+func (m *AuditModule) closeWhenHandlerStops(done <-chan struct{}) {
+	<-done
+	m.lifecycleMu.Lock()
+	defer m.lifecycleMu.Unlock()
+	if !m.closeOwed || !m.started {
+		return
+	}
+	m.closeOwed = false
+	m.started = false
+	if err := m.closeOutput(); err != nil {
+		fmt.Fprintf(os.Stderr, "CRITICAL: Failed to close audit log after its handler stopped: %v\n", err)
+	}
 }
 
 // handlerStopped reports whether the handler of the current start was told

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -1389,8 +1390,8 @@ func TestStop(t *testing.T) {
 		buf := &syncWriter{}
 		logger, _ := New(WithOutput(buf))
 		// A write in flight that never completes.
-		logger.wg.Add(1)
-		defer logger.wg.Done()
+		logger.writes.RLock()
+		defer logger.writes.RUnlock()
 
 		ctx, cancel := context.WithCancel(context.Background())
 		cancel()
@@ -1731,9 +1732,9 @@ func TestStop_InFlightWritesTimeout(t *testing.T) {
 	logger, _ := New(WithOutput(slowWriter))
 
 	// Start a write that will block - manually simulate in-flight write
-	logger.wg.Add(1)
+	logger.writes.RLock()
 	go func() {
-		defer logger.wg.Done()
+		defer logger.writes.RUnlock()
 		logger.mu.Lock()
 		close(slowWriter.started) // Signal that we've started
 		defer logger.mu.Unlock()
@@ -2087,5 +2088,77 @@ func TestOnEventStreamConsumerRegistration_NilHandler(t *testing.T) {
 	result := m.OnEventStreamConsumerRegistration(context.Background(), entry)
 	if result.Handler != nil {
 		t.Error("nil handler should remain nil")
+	}
+}
+
+// GateWriter signals each write and holds it until Release is closed.
+type GateWriter struct {
+	syncWriter
+	Entered chan struct{}
+	Release chan struct{}
+	Closed  atomic.Bool
+	// WroteAfterClose is set when a write ran on the closed writer.
+	WroteAfterClose atomic.Bool
+}
+
+// Write waits for the release.
+func (w *GateWriter) Write(p []byte) (int, error) {
+	select {
+	case w.Entered <- struct{}{}:
+	default:
+	}
+	<-w.Release
+	if w.Closed.Load() {
+		w.WroteAfterClose.Store(true)
+	}
+	return w.syncWriter.Write(p)
+}
+
+// Close records that the writer was closed.
+func (w *GateWriter) Close() error { w.Closed.Store(true); return nil }
+
+// TestStop_DoesNotCloseUnderAWrite: a write that began before Stop finishes
+// before the log is closed, and one that begins after Stop was called does
+// not write at all.
+func TestStop_DoesNotCloseUnderAWrite(t *testing.T) {
+	w := &GateWriter{Entered: make(chan struct{}, 1), Release: make(chan struct{})}
+	m, err := New(WithOutput(w))
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := m.wrapRequestReplyHandler(func(context.Context, *types.Msg) ([]byte, error) { return nil, nil }, "orders", "place")
+	call := func() { _, _ = h(context.Background(), &types.Msg{}) }
+
+	go call()
+	<-w.Entered // the write is in progress
+
+	stopped := make(chan error, 1)
+	go func() { stopped <- m.Stop(context.Background()) }()
+	select {
+	case err := <-stopped:
+		t.Fatalf("Stop returned (%v) while a write was in progress", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+	if w.Closed.Load() {
+		t.Fatal("the log was closed under a write in progress")
+	}
+	// A call that begins now, with Stop waiting, must not write.
+	late := make(chan struct{})
+	go func() { call(); close(late) }()
+
+	close(w.Release)
+	if err := <-stopped; err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	select {
+	case <-late:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the call made during Stop did not return")
+	}
+	if w.WroteAfterClose.Load() {
+		t.Fatal("a write ran on the closed log")
+	}
+	if lines := w.Lines(); len(lines) != 1 {
+		t.Fatalf("%d lines written, want the one that was in progress", len(lines))
 	}
 }

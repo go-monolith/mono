@@ -426,3 +426,64 @@ func TestAppendAndRemoveMiddleware(t *testing.T) {
 		t.Fatalf("removing from an empty list: %v", got)
 	}
 }
+
+// TestOweFinalStop: a middleware whose abandoned RollbackStart returns later
+// is given its final Stop: by the application's stop when that comes
+// afterwards, and at once when the application has stopped already.
+func TestOweFinalStop(t *testing.T) {
+	setup := func(t *testing.T) (*lifecycleManager, *HangingRollback) {
+		t.Helper()
+		lm, _, reg := newBareManager(t, newMockEventBus())
+		lm.stopMinBudget = 50 * time.Millisecond
+		mw := &HangingRollback{
+			RollbackAwareMock: RollbackAwareMock{mockMiddlewareModule: mockMiddlewareModule{mockModule: mockModule{name: "audit"}}},
+			HangingStop:       NewHangingStop(t),
+		}
+		for _, m := range []types.Module{mw, &mockModule{name: "orders", startErr: errors.New("boom")}} {
+			if err := reg.Register(m); err != nil {
+				t.Fatal(err)
+			}
+		}
+		budget := &RollbackBudget{Timeout: 100 * time.Millisecond}
+		if err := lm.Start(WithRollbackBudget(context.Background(), budget)); err == nil {
+			t.Fatal("Start succeeded")
+		}
+		if got := lm.AbandonedStops(); len(got) != 1 {
+			t.Fatalf("AbandonedStops = %v", got)
+		}
+		return lm, mw
+	}
+
+	t.Run("the rollback returns before the application stops", func(t *testing.T) {
+		lm, mw := setup(t)
+		close(mw.Release)
+		eventually(t, func() bool { return len(lm.AbandonedStops()) == 0 }, "the RollbackStart did not return")
+		eventually(t, func() bool {
+			lm.mu.RLock()
+			defer lm.mu.RUnlock()
+			return len(lm.rolledBack) == 1
+		}, "the middleware is not owed its final Stop")
+		if err := lm.StopRolledBackMiddleware(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		if got := mw.Stops.Load(); got != 1 {
+			t.Fatalf("final Stop called %d time(s), want once", got)
+		}
+	})
+
+	t.Run("the rollback returns after the application stopped", func(t *testing.T) {
+		lm, mw := setup(t)
+		if err := lm.StopRolledBackMiddleware(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		if got := mw.Stops.Load(); got != 0 {
+			t.Fatalf("final Stop called %d time(s) beside the running RollbackStart", got)
+		}
+		close(mw.Release)
+		eventually(t, func() bool { return mw.Stops.Load() == 1 }, "the middleware never got its final Stop")
+		time.Sleep(50 * time.Millisecond)
+		if got := mw.Stops.Load(); got != 1 {
+			t.Fatalf("final Stop called %d times", got)
+		}
+	})
+}

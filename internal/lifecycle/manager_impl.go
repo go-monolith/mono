@@ -65,6 +65,7 @@ type lifecycleManager struct {
 	stopMinBudget              time.Duration                 // time the Stops called with an ended context share (0 = StopMinBudget)
 	stopOvertime               time.Duration                 // how much of it the current stop or rollback has used
 	rolledBack                 []types.MiddlewareModule      // middleware stopped by RollbackStart and not started again: their final Stop is owed
+	finalStopsGiven            bool                          // StopRolledBackMiddleware ran since the last Start: a rollback that returns now is stopped at once
 }
 
 // EventRegistryCheckpointer is the optional capability of an event registry
@@ -760,6 +761,9 @@ func (lm *lifecycleManager) Start(ctx context.Context) (err error) {
 	}
 	// The rollback of this start, should it fail, has a stop budget of its own.
 	lm.ResetStopBudget()
+	lm.mu.Lock()
+	lm.finalStopsGiven = false
+	lm.mu.Unlock()
 
 	// A failed Start leaves the event registry as it found it, so that a
 	// retried Start registers the same events and consumers once more
@@ -1624,10 +1628,14 @@ func (lm *lifecycleManager) stopMiddlewareModule(ctx context.Context, mw types.M
 	lm.logger.Info("Stopping middleware module", "module", moduleName)
 
 	stop := mw.Stop
+	var afterAbandoned func()
 	if aware, ok := mw.(types.RollbackAwareMiddleware); ok && rollback {
 		stop = aware.RollbackStart
+		// A RollbackStart that is abandoned and returns later still owes
+		// the middleware its final Stop.
+		afterAbandoned = func() { lm.OweFinalStop(mw) }
 	}
-	panicValue, err := lm.RunStop(ctx, "middleware module", moduleName, stop)
+	panicValue, err := lm.RunStopThen(ctx, "middleware module", moduleName, stop, afterAbandoned)
 	if panicValue != nil {
 		lm.logger.Error("Middleware module panic during stop", "module", moduleName, "panic", panicValue)
 		return monoerrors.WrapModulePanic(moduleName, "stop", panicValue)
@@ -1931,6 +1939,29 @@ func (lm *lifecycleManager) rollbackStartedInfrastructure(ctx context.Context, s
 	lm.rollbackPlugins(ctx, lm.pluginRegistry.List())
 }
 
+// lateFinalStopTimeout bounds the final Stop given to a middleware whose
+// abandoned RollbackStart returned after the application stopped.
+const lateFinalStopTimeout = 5 * time.Second
+
+// OweFinalStop records that mw, whose abandoned RollbackStart has returned,
+// is owed its final Stop (see StopRolledBackMiddleware). When the final
+// stops were given already, the application has stopped and nothing would
+// call it: it is stopped here.
+func (lm *lifecycleManager) OweFinalStop(mw types.MiddlewareModule) {
+	lm.mu.Lock()
+	if !lm.finalStopsGiven {
+		lm.rolledBack = AppendMiddlewareOnce(lm.rolledBack, mw)
+		lm.mu.Unlock()
+		return
+	}
+	lm.mu.Unlock()
+	ctx, cancel := context.WithTimeout(context.Background(), lateFinalStopTimeout)
+	defer cancel()
+	if err := lm.stopMiddlewareModule(ctx, mw, false); err != nil {
+		lm.logger.Error("Failed to stop middleware module after its rollback returned", "module", mw.Name(), "error", err)
+	}
+}
+
 // AppendMiddlewareOnce returns list with mw appended unless it is in it.
 func AppendMiddlewareOnce(list []types.MiddlewareModule, mw types.MiddlewareModule) []types.MiddlewareModule {
 	for _, have := range list {
@@ -1955,11 +1986,13 @@ func RemoveMiddleware(list []types.MiddlewareModule, mw types.MiddlewareModule) 
 // StopRolledBackMiddleware calls Stop on the middleware modules a rollback
 // stopped through RollbackStart and that were not started again, in reverse
 // registration order. A middleware that was started again is stopped by
-// Stop; one whose RollbackStart was abandoned is not among them.
+// Stop; one whose RollbackStart was abandoned is not among them until it
+// has returned (see OweFinalStop).
 func (lm *lifecycleManager) StopRolledBackMiddleware(ctx context.Context) error {
 	lm.mu.Lock()
 	rolledBack := lm.rolledBack
 	lm.rolledBack = nil
+	lm.finalStopsGiven = true
 	lm.mu.Unlock()
 
 	if len(rolledBack) == 0 {

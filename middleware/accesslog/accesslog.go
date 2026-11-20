@@ -74,7 +74,13 @@ type AccessLogModule struct {
 	formatter       Formatter
 	mu              sync.Mutex
 	shutdown        atomic.Bool
-	wg              sync.WaitGroup
+	// writes is held shared by every write for as long as it runs, and
+	// taken exclusively by stop once the shutdown flag is set: when stop
+	// has had it, no write is in progress and none begins. A WaitGroup
+	// cannot do this: a write that read the flag just before it was set
+	// would add itself beside the Wait, and stop would close the log
+	// under it.
+	writes sync.RWMutex
 	// outputClosed is set (under mu) once Stop closed the writer: nothing
 	// can be written after that, so the module cannot be started again.
 	outputClosed bool
@@ -232,10 +238,12 @@ func (m *AccessLogModule) stop(ctx context.Context, closeOutput bool) error {
 		}
 	}
 
-	// Wait for all in-flight writes to complete with timeout
+	// Wait for all in-flight writes to complete with timeout. The flag is
+	// set, so a write that gets the lock after this returns at once.
 	done := make(chan struct{})
 	go func() {
-		m.wg.Wait()
+		m.writes.Lock()
+		m.writes.Unlock() //nolint:staticcheck // SA2001: taken only to wait for the writes in progress
 		close(done)
 	}()
 
@@ -764,13 +772,16 @@ func (m *AccessLogModule) proxyOutboundChannel(proxy *channelProxy) {
 // Write failures are logged to stderr but do not propagate to prevent
 // logging failures from impacting service handlers.
 func (m *AccessLogModule) writeEntry(entry Entry) {
+	// Held for the whole write, so that stop cannot close the log under
+	// it; the flag is read under it, so a write either finishes before
+	// stop goes on or does not begin.
+	m.writes.RLock()
+	defer m.writes.RUnlock()
+
 	// Skip writes during shutdown
 	if m.shutdown.Load() {
 		return
 	}
-
-	m.wg.Add(1)
-	defer m.wg.Done()
 
 	m.mu.Lock()
 	defer m.mu.Unlock()

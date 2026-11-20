@@ -80,6 +80,12 @@ func (lm *lifecycleManager) chargeStopBudget(d time.Duration) {
 // wrap as it does for its kind. An abandoned Stop is counted until it
 // returns (see AbandonedStops), which is logged.
 func (lm *lifecycleManager) RunStop(ctx context.Context, kind, name string, stop func(context.Context) error) (panicValue any, err error) {
+	return lm.RunStopThen(ctx, kind, name, stop, nil)
+}
+
+// RunStopThen is RunStop with a function that is called when a Stop that was
+// abandoned has returned after all (nil: none).
+func (lm *lifecycleManager) RunStopThen(ctx context.Context, kind, name string, stop func(context.Context) error, afterAbandoned func()) (panicValue any, err error) {
 	type outcome struct {
 		err        error
 		panicValue any
@@ -131,6 +137,9 @@ func (lm *lifecycleManager) RunStop(ctx context.Context, kind, name string, stop
 		lm.mu.Unlock()
 		lm.logger.Warn("A Stop that was abandoned has returned",
 			"kind", kind, "name", name, "after", time.Since(started), "error", out.err, "panic", out.panicValue)
+		if afterAbandoned != nil {
+			afterAbandoned()
+		}
 	}()
 	return nil, fmt.Errorf("%w: Stop of %s did not return within %v after its context ended (%v) and is left running",
 		monoerrors.ErrStopAbandoned, key, wait, context.Cause(ctx))
