@@ -269,6 +269,8 @@ type StreamConsumerHandler func(ctx context.Context, msgs []*Msg) error
 
 The handler acknowledges each message itself, using `Ack()`, `Nak()`, `NakWithDelay()`, `Term()`, or `InProgress()`.
 
+**Typed handlers and messages that cannot be unmarshaled:** with `helper.RegisterTypedStreamConsumerService` (and the `Register` method of a typed stream consumer definition), a message that fails to unmarshal is left out of the batch. The handler gets the other messages, with `payloads[i]` belonging to `msgs[i]`, and is not called when none is left. The error logged for the batch wraps `helper.ErrUndecodableMessage`. The message itself is neither acknowledged nor terminated: it stays in the stream and is redelivered after `AckWait`, until `MaxDeliver`. Up to v0.2.16 one such message made the handler skip its whole batch, so the valid messages were redelivered, and after `MaxDeliver` given up on, together with it.
+
 **Returns:** `error`, nil on success.
 
 **Configuration:** `StreamConsumerConfig` combines stream, consumer and fetch configuration:

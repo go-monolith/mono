@@ -315,7 +315,7 @@ type TypedEventStreamConsumerHandler[T any] func(ctx context.Context, events []T
 err := helper.RegisterTypedEventStreamConsumer(registry, contract.OrderCreatedV1, config, m.handleOrderBatch, m)
 ```
 
-If any message in a batch fails to unmarshal, the handler is not called and the batch is returned as an error, unacknowledged. It is redelivered after `AckWait`, until `MaxDeliver`.
+A message that fails to unmarshal is left out of the batch: the handler gets the other messages (it is not called when none is left), and the error logged for the batch wraps `helper.ErrUndecodableMessage`. The message itself is neither acknowledged nor terminated, so it stays in the stream and is redelivered after `AckWait`. An event stream consumer has no `MaxDeliver` unless `Consumer.MaxDeliver` sets one; set it to bound how often such a message is redelivered and logged. Up to v0.2.16 one such message made the handler skip its whole batch, so valid messages were redelivered, and given up on, together with it.
 
 **Raw:**
 
