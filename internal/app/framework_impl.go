@@ -33,9 +33,18 @@ type frameworkApplication struct {
 	// startCancel cancels the context of the Start in progress and startDone
 	// is closed when that Start has returned, after it stopped what it had
 	// started if a Stop was called meanwhile. Both are nil when no Start is
-	// in progress. Guarded by mu.
+	// in progress. startBudget is the rollback budget of that Start: a Stop
+	// that aborts it hands over its deadline. abortErr is what stopping the
+	// lifecycle returned to a Start that a Stop aborted. Guarded by mu.
 	startCancel context.CancelFunc
 	startDone   chan struct{}
+	startBudget *lifecycle.RollbackBudget
+	abortErr    error
+	// releaseStart cancels the context of the Start that succeeded, once
+	// Stop has finished. Modules may keep that context for the goroutines
+	// they start (as they could keep the caller's before), so it must
+	// outlive Start and everything Stop waits for. Guarded by mu.
+	releaseStart context.CancelFunc
 	// stopDone is closed when the Stop in progress has finished, and stopErr
 	// is its result; a Stop called meanwhile waits for it instead of stopping
 	// a second time. Guarded by mu.
@@ -211,6 +220,10 @@ func (fw *frameworkApplication) Plugin(alias string) types.PluginModule {
 // started with is cancelled, and Start returns an error wrapping
 // context.Canceled after what it had started was stopped. That holds also
 // when the modules did not react to the cancellation and all of them started.
+//
+// What a failed or aborted Start had started is stopped with a context of its
+// own, bounded by ShutdownTimeout (30 seconds without one) or, when a Stop
+// aborted the start, by the deadline of that Stop.
 func (fw *frameworkApplication) Start(ctx context.Context) error {
 	fw.mu.Lock()
 	switch fw.state {
@@ -228,14 +241,14 @@ func (fw *frameworkApplication) Start(ctx context.Context) error {
 		return fmt.Errorf("application is stopping, cannot start")
 	}
 	fw.state = types.StateStarting
-	startCtx, cancel := context.WithCancel(ctx)
+	budget := &lifecycle.RollbackBudget{Timeout: fw.settings.ShutdownTimeout}
+	startCtx, cancel := context.WithCancel(lifecycle.WithRollbackBudget(ctx, budget))
 	done := make(chan struct{})
-	fw.startCancel, fw.startDone = cancel, done
+	fw.startCancel, fw.startDone, fw.startBudget = cancel, done, budget
 	fw.mu.Unlock()
 	// Closed last: a Stop that aborted this Start waits for it, and must not
 	// stop the NATS server under modules that are still being stopped.
 	defer close(done)
-	defer cancel()
 
 	fw.logger.Info("Starting application")
 
@@ -253,15 +266,20 @@ func (fw *frameworkApplication) Start(ctx context.Context) error {
 			fw.state = types.StateCreated
 		} else {
 			fw.state = types.StateRunning
+			// The modules run on: their context stays live until Stop
+			// has finished.
+			fw.releaseStart = cancel
 		}
 	}
-	fw.startCancel, fw.startDone = nil, nil
+	fw.startCancel, fw.startDone, fw.startBudget = nil, nil, nil
 	fw.mu.Unlock()
 
 	if aborted {
-		return fw.abortedStart(ctx, err)
+		defer cancel()
+		return fw.abortedStart(startCtx, err)
 	}
 	if err != nil {
+		cancel()
 		return err
 	}
 
@@ -274,21 +292,34 @@ func (fw *frameworkApplication) Start(ctx context.Context) error {
 // does when a module reacts to the cancelled context, or nil when every
 // module started regardless. In that case nothing was rolled back, and the
 // Stop that is waiting only stops the NATS server, so the lifecycle is
-// stopped here.
-func (fw *frameworkApplication) abortedStart(ctx context.Context, startErr error) error {
+// stopped here, with the budget a rollback has (startCtx carries it): it ends
+// when that Stop stops waiting. An error of that stop is kept for the Stop
+// (abortErr), which would otherwise report success.
+//
+// The returned error always wraps context.Canceled, whatever the modules
+// returned when their context was cancelled.
+func (fw *frameworkApplication) abortedStart(startCtx context.Context, startErr error) error {
 	if startErr != nil {
-		return fmt.Errorf("application start aborted by Stop: %w", startErr)
+		return fmt.Errorf("application start aborted by Stop: %w", stderrors.Join(context.Canceled, startErr))
 	}
 	fw.logger.Warn("Start completed although Stop was called while starting; stopping what was started")
-	// The caller's context may have ended, which must not cut the stop short.
-	stopCtx, cancel := fw.shutdownContext(context.WithoutCancel(ctx))
+	stopCtx, cancel := lifecycle.RollbackContext(startCtx)
 	defer cancel()
 	if err := fw.lifecycleManager.Stop(stopCtx); err != nil {
 		fw.logger.Error("Application stopped with errors", "error", err)
+		fw.mu.Lock()
+		fw.abortErr = err
+		fw.mu.Unlock()
 		return fmt.Errorf("application start aborted by Stop: %w", stderrors.Join(context.Canceled, err))
 	}
 	return fmt.Errorf("application start aborted by Stop: %w", context.Canceled)
 }
+
+// AbortGrace is how long a Stop that aborted a Start keeps waiting for it
+// after its own context has ended. The rollback of the start ends with that
+// context, so it is about to return; stopping the NATS server in the same
+// instant would pull it from under the last module being stopped.
+const AbortGrace = 2 * time.Second
 
 // shutdownContext bounds ctx with the configured ShutdownTimeout when it has
 // no deadline of its own.
@@ -308,8 +339,8 @@ func (fw *frameworkApplication) shutdownContext(ctx context.Context) (context.Co
 //
 // A Stop called while Start is running aborts the start (see Start) and waits,
 // within ctx, until Start has stopped what it had started, before it stops
-// the NATS server. Start and Stop must not be called from a module's own
-// Start or Stop: they would wait for themselves until ctx ends.
+// the NATS server. Stop must not be called from a module's own Start or Stop:
+// it would wait for itself until ctx ends.
 func (fw *frameworkApplication) Stop(ctx context.Context) error {
 	defer finalizeShutdown(fw.logger)
 
@@ -329,7 +360,7 @@ func (fw *frameworkApplication) Stop(ctx context.Context) error {
 		return fw.waitForStop(ctx, inProgress)
 	}
 	previous := fw.state
-	startCancel, startDone := fw.startCancel, fw.startDone
+	startCancel, startDone, startBudget := fw.startCancel, fw.startDone, fw.startBudget
 	fw.state = types.StateStopping
 	done := make(chan struct{})
 	fw.stopDone = done
@@ -348,11 +379,17 @@ func (fw *frameworkApplication) Stop(ctx context.Context) error {
 		// Abort the start and wait until it has stopped what it started:
 		// stopping the NATS server first would pull it from under modules
 		// that are still starting or being stopped.
+		// What the start stops, it stops until this Stop stops waiting.
 		fw.logger.Info("Stop called while starting; aborting the start")
+		if deadline, ok := ctx.Deadline(); ok {
+			startBudget.SetDeadline(deadline)
+		}
 		startCancel()
-		select {
-		case <-startDone:
-		case <-ctx.Done():
+		if fw.waitForAbortedStart(ctx, startDone) {
+			fw.mu.RLock()
+			stopErr = fw.abortErr
+			fw.mu.RUnlock()
+		} else {
 			fw.logger.Error("Start in progress did not return while stopping; stopping the NATS server anyway", "error", ctx.Err())
 			stopErr = fmt.Errorf("start in progress did not return while stopping: %w", ctx.Err())
 		}
@@ -372,7 +409,12 @@ func (fw *frameworkApplication) Stop(ctx context.Context) error {
 	fw.mu.Lock()
 	fw.state = types.StateStopped
 	fw.stopErr = stopErr
+	releaseStart := fw.releaseStart
+	fw.releaseStart = nil
 	fw.mu.Unlock()
+	if releaseStart != nil {
+		releaseStart()
+	}
 	close(done)
 
 	if stopErr != nil {
@@ -381,6 +423,25 @@ func (fw *frameworkApplication) Stop(ctx context.Context) error {
 
 	fw.logger.Info("Application stopped successfully")
 	return nil
+}
+
+// waitForAbortedStart waits until the Start that was aborted has returned
+// (startDone), and reports whether it did before ctx ended and AbortGrace
+// passed.
+func (fw *frameworkApplication) waitForAbortedStart(ctx context.Context, startDone <-chan struct{}) bool {
+	select {
+	case <-startDone:
+		return true
+	case <-ctx.Done():
+	}
+	grace := time.NewTimer(AbortGrace)
+	defer grace.Stop()
+	select {
+	case <-startDone:
+		return true
+	case <-grace.C:
+		return false
+	}
 }
 
 // waitForStop waits for the Stop in progress, whose completion inProgress

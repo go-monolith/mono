@@ -267,3 +267,112 @@ func TestKeyedMutex(t *testing.T) {
 		t.Errorf("%d locks kept after all were released", len(locks.locks))
 	}
 }
+
+// ChunkMessages returns the number of chunk messages the bucket holds.
+func ChunkMessages(t *testing.T, js jetstream.JetStream, bucket string) uint64 {
+	t.Helper()
+	stream, err := js.Stream(context.Background(), "OBJ_"+bucket)
+	if err != nil {
+		t.Fatalf("stream of bucket %s: %v", bucket, err)
+	}
+	info, err := stream.Info(context.Background(), jetstream.WithSubjectFilter("$O."+bucket+".C.>"))
+	if err != nil {
+		t.Fatalf("stream info of bucket %s: %v", bucket, err)
+	}
+	var chunks uint64
+	for _, n := range info.State.Subjects {
+		chunks += n
+	}
+	return chunks
+}
+
+// GatedReader blocks its first Read until Release is closed, after it
+// signalled Reading.
+type GatedReader struct {
+	Reader  io.Reader
+	Reading chan struct{}
+	Release chan struct{}
+	once    sync.Once
+}
+
+func (r *GatedReader) Read(p []byte) (int, error) {
+	r.once.Do(func() {
+		close(r.Reading)
+		<-r.Release
+	})
+	return r.Reader.Read(p)
+}
+
+// A delete during an upload of the same name used to mark the version it
+// found as deleted over the metadata of the upload, whose chunks nothing
+// referred to any more. It must wait for the upload and then delete it.
+func TestJetStreamBackend_DeleteWaitsForUploadOfTheSameName(t *testing.T) {
+	b, js := NewPutTestBackend(t, BucketConfig{Name: "delete-race"})
+	if err := b.Set("doc", bytes.Repeat([]byte("a"), 300<<10), 0); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+
+	gated := &GatedReader{Reader: bytes.NewReader(bytes.Repeat([]byte("b"), 300<<10)), Reading: make(chan struct{}), Release: make(chan struct{})}
+	putErr := make(chan error, 1)
+	go func() {
+		_, err := b.PutReaderWithContext(context.Background(), "doc", gated, 0)
+		putErr <- err
+	}()
+	<-gated.Reading
+
+	// A delete of another name is not held up.
+	if err := b.Delete("other"); err != nil {
+		t.Errorf("Delete of another name: %v", err)
+	}
+	// A delete of the name gives up with its context while the upload runs.
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	defer cancel()
+	if err := b.DeleteWithContext(ctx, "doc"); !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("Delete during the upload = %v, want context.DeadlineExceeded", err)
+	}
+
+	deleteErr := make(chan error, 1)
+	go func() { deleteErr <- b.Delete("doc") }()
+	close(gated.Release)
+	if err := <-putErr; err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	if err := <-deleteErr; err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+
+	if data, err := b.Get("doc"); err != nil || data != nil {
+		t.Errorf("Get after the delete = %d bytes, %v; want no object", len(data), err)
+	}
+	if chunks := ChunkMessages(t, js, "delete-race"); chunks != 0 {
+		t.Errorf("bucket holds %d chunk messages after the delete, want none", chunks)
+	}
+}
+
+func TestJetStreamBackend_DeleteWithEndedContextDeletesNothing(t *testing.T) {
+	b, _ := NewPutTestBackend(t, BucketConfig{Name: "delete-ended"})
+	data := []byte("keep me")
+	if err := b.Set("doc", data, 0); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := b.DeleteWithContext(ctx, "doc"); !errors.Is(err, context.Canceled) {
+		t.Errorf("Delete = %v, want context.Canceled", err)
+	}
+	if got, err := b.Get("doc"); err != nil || !bytes.Equal(got, data) {
+		t.Errorf("Get = %q, %v; want the object untouched", got, err)
+	}
+}
+
+// A nil reader stores an empty object, as it did before the reader was wrapped.
+func TestJetStreamBackend_PutObjectNilReader(t *testing.T) {
+	b, _ := NewPutTestBackend(t, BucketConfig{Name: "nil-reader"})
+	info, err := b.PutObject(context.Background(), jetstream.ObjectMeta{Name: "empty"}, nil)
+	if err != nil {
+		t.Fatalf("PutObject(nil reader): %v", err)
+	}
+	if info.Size != 0 {
+		t.Errorf("stored %d bytes, want an empty object", info.Size)
+	}
+}

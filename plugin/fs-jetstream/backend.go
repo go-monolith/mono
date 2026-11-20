@@ -128,7 +128,7 @@ func (b *JetStreamBackend) Set(key string, val []byte, exp time.Duration) error 
 // DeleteWithContext deletes the value for the given key with a context.
 // It returns no error if the storage does not contain the key.
 func (b *JetStreamBackend) DeleteWithContext(ctx context.Context, key string) error {
-	if err := b.store.Delete(ctx, key); err != nil {
+	if err := b.DeleteObject(ctx, key); err != nil {
 		if errors.Is(err, jetstream.ErrObjectNotFound) {
 			return nil // Key not found is not an error per storage.Storage contract
 		}
@@ -155,7 +155,7 @@ func (b *JetStreamBackend) ResetWithContext(ctx context.Context) error {
 	}
 
 	for _, info := range infos {
-		if err := b.store.Delete(ctx, info.Name); err != nil {
+		if err := b.DeleteObject(ctx, info.Name); err != nil {
 			if !errors.Is(err, jetstream.ErrObjectNotFound) {
 				return fmt.Errorf("failed to delete object %s during reset: %w", info.Name, err)
 			}

@@ -188,7 +188,7 @@ func (m *natsManager) Start(ctx context.Context) error {
 
 	// A config file without a host, and no WithHost: nats-server's default
 	// applies, which is every interface, not the framework's loopback
-	// default. It is reported after the start (warnAllInterfaces).
+	// default. It is reported at Warn once the server has started.
 	fileLeavesHostOpen := m.config.ConfigFile != "" && !m.config.HostSet && opts.Host == "" && !m.config.DontListen
 
 	// Apply host/port configuration

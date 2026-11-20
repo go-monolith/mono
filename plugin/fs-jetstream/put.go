@@ -92,11 +92,18 @@ func (k *KeyedMutex) Lock(ctx context.Context, key string) (func(), error) {
 // upload whose data was read completely is finished even when ctx ends
 // meanwhile.
 //
-// Uploads of one name are serialised within this backend. The store removes
-// the chunks of the version it found when the upload began, so of several
-// concurrent uploads of one name only one is referred to and the others'
-// chunks stay. Uploads of one name from several processes at once are not
-// covered: they cannot see each other.
+// Uploads of one name are serialised within this backend, with each other
+// and with deletes of that name (DeleteObject). The store removes the chunks
+// of the version it found when the upload began, so of several concurrent
+// uploads of one name only one is referred to and the others' chunks stay.
+// Uploads of one name from several processes at once are not covered: they
+// cannot see each other.
+//
+// A reader that blocks cannot be interrupted: the upload, and with it every
+// later upload or delete of that name, waits until the Read returns. The
+// callers that wait give up with their own context.
+//
+// A nil reader stores an empty object, as the store does.
 //
 // Chunks left behind before this (or by a process that died during an upload)
 // are not removed: they cannot be told from the chunks of an upload another
@@ -107,5 +114,33 @@ func (b *JetStreamBackend) PutObject(ctx context.Context, meta jetstream.ObjectM
 		return nil, err
 	}
 	defer unlock()
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if reader == nil {
+		return b.store.Put(context.WithoutCancel(ctx), meta, nil)
+	}
 	return b.store.Put(context.WithoutCancel(ctx), meta, &ContextReader{Ctx: ctx, Reader: reader})
+}
+
+// DeleteObject deletes the object name. It returns
+// jetstream.ErrObjectNotFound when there is none.
+//
+// It waits for an upload of that name in this backend: a delete in between
+// would mark the version it found as deleted over the metadata of the upload,
+// whose chunks nothing would refer to any more. The store marks the object
+// deleted and then removes its chunks, in two requests; like PutObject it is
+// called with a context the caller's cancellation does not reach, so a delete
+// that has begun removes the chunks too. A context that has already ended
+// deletes nothing.
+func (b *JetStreamBackend) DeleteObject(ctx context.Context, name string) error {
+	unlock, err := b.puts.Lock(ctx, name)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return b.store.Delete(context.WithoutCancel(ctx), name)
 }

@@ -185,7 +185,8 @@ See [Work-Queue Streams: One Consumer per Subject](../api/container.md#work-queu
 - **`Stop` during `Start`** stopped NATS under the start, which then returned nil and left the application "running" without a server and with no module stopped. `Stop` now aborts the start: `Start` stops what it started and returns an error wrapping `context.Canceled`. A program that calls `Stop` from a signal handler while `Start` is running must expect that error from `Start`.
 - **A second `Stop` during a graceful one** stopped NATS at once, under the handlers the first one was waiting for. It now waits for the first and returns its result.
 - **A second `Start` during `Start`** started the modules twice. It now fails with `application is already starting`.
-- **A failed `Start`** stops what it started with a context of its own (30 seconds) instead of the `Start` context, which has usually ended by then.
+- **A failed `Start`** stops what it started with a context of its own (bounded by the shutdown timeout) instead of the `Start` context, which has usually ended by then.
+- **The context a module's `Start` receives** is now derived from the one passed to `Start`. It stays live while the application runs, as before, and ends once `Stop` has finished.
 
 See [`Start`](../api/framework.md#start) and [`Stop`](../api/framework.md#stop).
 

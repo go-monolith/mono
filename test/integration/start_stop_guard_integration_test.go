@@ -262,3 +262,237 @@ func TestIntegration_ConcurrentStop(t *testing.T) {
 		t.Errorf("Stop after Stop = %v, want already stopped", err)
 	}
 }
+
+// The context a module is started with is its own to keep: modules start
+// goroutines with it. It must stay live after Start has returned and while
+// the module is being stopped, and end once Stop has finished.
+func TestIntegration_StartContextOutlivesStart(t *testing.T) {
+	fw := newWorkerPoolApp(t)
+	var startCtx context.Context
+	var endedAtStop atomic.Bool
+	m := &guardModule{name: "svc"}
+	m.startFunc = func(ctx context.Context) error {
+		startCtx = ctx
+		return nil
+	}
+	m.stopFunc = func(context.Context) error {
+		if startCtx.Err() != nil {
+			endedAtStop.Store(true)
+		}
+		return nil
+	}
+	if err := fw.Register(m); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	if err := fw.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if err := startCtx.Err(); err != nil {
+		t.Errorf("start context ended when Start returned: %v", err)
+	}
+	if err := fw.Stop(context.Background()); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	if endedAtStop.Load() {
+		t.Error("start context had ended when the module was stopped")
+	}
+	if startCtx.Err() == nil {
+		t.Error("start context still live after Stop")
+	}
+}
+
+// When Start fails because its context ended, the modules it had started are
+// stopped with a context that is still live: a Stop given the ended one would
+// skip its cleanup.
+func TestIntegration_FailedStartStopsModulesWithLiveContext(t *testing.T) {
+	fw := newWorkerPoolApp(t)
+	var stopCtxErr atomic.Value
+	first := &guardModule{name: "first"}
+	first.stopFunc = func(ctx context.Context) error {
+		if err := ctx.Err(); err != nil {
+			stopCtxErr.Store(err)
+		}
+		return nil
+	}
+	second := &guardModule{name: "second", deps: []string{"first"}}
+	second.startFunc = func(ctx context.Context) error {
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	for _, m := range []*guardModule{first, second} {
+		if err := fw.Register(m); err != nil {
+			t.Fatalf("Register: %v", err)
+		}
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	if err := fw.Start(ctx); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Start = %v, want context.DeadlineExceeded", err)
+	}
+	if got := first.stops.Load(); got != 1 {
+		t.Errorf("started module was stopped %d times, want 1", got)
+	}
+	if err := stopCtxErr.Load(); err != nil {
+		t.Errorf("module was stopped with an ended context: %v", err)
+	}
+	if state := fw.Health(context.Background()).State; state != mono.StateCreated {
+		t.Errorf("state %v after a failed Start, want created", state)
+	}
+	if err := fw.Stop(context.Background()); err != nil {
+		t.Errorf("Stop: %v", err)
+	}
+}
+
+// A module that answers the cancelled start context with an error of its own
+// still makes Start report the abort.
+func TestIntegration_StopDuringStart_ModuleReturnsOwnError(t *testing.T) {
+	fw := newWorkerPoolApp(t)
+	ownErr := errors.New("database connection closed")
+	inStart := make(chan struct{})
+	m := &guardModule{name: "svc"}
+	m.startFunc = func(ctx context.Context) error {
+		close(inStart)
+		<-ctx.Done()
+		return ownErr
+	}
+	if err := fw.Register(m); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	startErr := make(chan error, 1)
+	go func() { startErr <- fw.Start(context.Background()) }()
+	<-inStart
+
+	if err := fw.Stop(context.Background()); err != nil {
+		t.Errorf("Stop = %v, want nil", err)
+	}
+	err := <-startErr
+	if !errors.Is(err, context.Canceled) || !errors.Is(err, ownErr) {
+		t.Errorf("Start = %v, want an error wrapping context.Canceled and the module's error", err)
+	}
+}
+
+// A Start that ignored its cancelled context completes, and is then stopped
+// by Start itself. An error of that stop must reach the Stop that caused it,
+// which would otherwise report success.
+func TestIntegration_StopDuringStart_ReportsModuleStopError(t *testing.T) {
+	fw := newWorkerPoolApp(t)
+	stopFailed := errors.New("flush failed")
+	inStart := make(chan struct{})
+	release := make(chan struct{})
+	m := &guardModule{name: "svc"}
+	m.startFunc = func(context.Context) error {
+		close(inStart)
+		<-release
+		return nil
+	}
+	m.stopFunc = func(context.Context) error { return stopFailed }
+	if err := fw.Register(m); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	startErr := make(chan error, 1)
+	go func() { startErr <- fw.Start(context.Background()) }()
+	<-inStart
+	stopErr := make(chan error, 1)
+	go func() { stopErr <- fw.Stop(context.Background()) }()
+	waitUntil(t, "Stop to take over", func() bool {
+		return fw.Health(context.Background()).State == mono.StateStopping
+	})
+	close(release)
+
+	if err := <-stopErr; err == nil || !strings.Contains(err.Error(), stopFailed.Error()) {
+		t.Errorf("Stop = %v, want the module's stop error", err)
+	}
+	if err := <-startErr; !errors.Is(err, context.Canceled) {
+		t.Errorf("Start = %v, want an error wrapping context.Canceled", err)
+	}
+}
+
+// A Start that does not return bounds the Stop that aborted it: Stop gives up
+// when its context has ended, stops the NATS server and says so.
+func TestIntegration_StopDuringStart_StartDoesNotReturn(t *testing.T) {
+	fw := newWorkerPoolApp(t)
+	inStart := make(chan struct{})
+	release := make(chan struct{})
+	m := &guardModule{name: "svc"}
+	m.startFunc = func(context.Context) error {
+		close(inStart)
+		<-release
+		return nil
+	}
+	if err := fw.Register(m); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	startErr := make(chan error, 1)
+	go func() { startErr <- fw.Start(context.Background()) }()
+	<-inStart
+
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	begin := time.Now()
+	err := fw.Stop(ctx)
+	if !errors.Is(err, context.DeadlineExceeded) || !strings.Contains(err.Error(), "did not return") {
+		t.Errorf("Stop = %v, want a deadline error saying the start did not return", err)
+	}
+	if took := time.Since(begin); took > 10*time.Second {
+		t.Errorf("Stop took %s, want it bounded by its context", took)
+	}
+	if state := fw.Health(context.Background()).State; state != mono.StateStopped {
+		t.Errorf("state %v, want stopped", state)
+	}
+
+	// The start returns later: it reports the abort, stops its module and
+	// leaves the state alone.
+	close(release)
+	if err := <-startErr; !errors.Is(err, context.Canceled) {
+		t.Errorf("Start = %v, want an error wrapping context.Canceled", err)
+	}
+	if got := m.stops.Load(); got != 1 {
+		t.Errorf("module stopped %d times, want 1", got)
+	}
+	if state := fw.Health(context.Background()).State; state != mono.StateStopped {
+		t.Errorf("state %v after the late Start, want stopped", state)
+	}
+}
+
+// A second Stop gives up waiting for the first with its own context, without
+// stopping anything itself.
+func TestIntegration_ConcurrentStop_SecondGivesUp(t *testing.T) {
+	fw := newWorkerPoolApp(t)
+	inStop := make(chan struct{})
+	release := make(chan struct{})
+	m := &guardModule{name: "svc"}
+	m.stopFunc = func(context.Context) error {
+		close(inStop)
+		<-release
+		return nil
+	}
+	if err := fw.Register(m); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	if err := fw.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	firstStop := make(chan error, 1)
+	go func() { firstStop <- fw.Stop(context.Background()) }()
+	<-inStop
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	err := fw.Stop(ctx)
+	if !errors.Is(err, context.DeadlineExceeded) || !strings.Contains(err.Error(), "already in progress") {
+		t.Errorf("second Stop = %v, want a deadline error saying a stop is in progress", err)
+	}
+	// The server is still there for the module being stopped.
+	if err := fw.EventBus("").Publish("start-stop-guard.probe", nil); err != nil {
+		t.Errorf("the NATS server was stopped by the second Stop: %v", err)
+	}
+
+	close(release)
+	if err := <-firstStop; err != nil {
+		t.Errorf("first Stop = %v, want nil", err)
+	}
+	if got := m.stops.Load(); got != 1 {
+		t.Errorf("module stopped %d times, want 1", got)
+	}
+}
