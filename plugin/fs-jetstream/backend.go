@@ -29,6 +29,8 @@ type JetStreamBackend struct {
 	bucketTTL  time.Duration
 	store      jetstream.ObjectStore
 	logger     *slog.Logger
+	// puts serialises the uploads of one object name (see PutObject).
+	puts KeyedMutex
 }
 
 // Compile-time interface checks.
@@ -106,7 +108,7 @@ func (b *JetStreamBackend) SetWithContext(ctx context.Context, key string, val [
 		Name: key,
 	}
 
-	_, err := b.store.Put(ctx, meta, bytes.NewReader(val))
+	_, err := b.PutObject(ctx, meta, bytes.NewReader(val))
 	if err != nil {
 		return fmt.Errorf("failed to put object %s: %w", key, err)
 	}
@@ -282,7 +284,7 @@ func (b *JetStreamBackend) PutReaderWithContext(ctx context.Context, key string,
 		}
 	}
 
-	info, err := b.store.Put(ctx, meta, reader)
+	info, err := b.PutObject(ctx, meta, reader)
 	if err != nil {
 		return nil, fmt.Errorf("failed to put object %s: %w", key, err)
 	}
