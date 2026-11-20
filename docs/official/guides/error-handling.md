@@ -37,8 +37,8 @@ When a request-reply handler returns an error, the framework logs it at Error le
 | Header | Value |
 |--------|-------|
 | `Mono-Error` | `true` |
-| `Mono-Error-Message` | `err.Error()`: the full wrapped message |
-| `Mono-Error-Type` | The type name of the returned error, lower-cased, without an `Error` suffix: `*OrderError` gives `order`, `errors.New` gives `errorstring`, `fmt.Errorf("...%w", err)` gives `wrap`. The framework's own values are `overloaded`, `handler-panic` and `shutting-down`. |
+| `Mono-Error-Message` | `err.Error()`: the full wrapped message (for a handler that panicked: `handler panicked`) |
+| `Mono-Error-Type` | The type name of the returned error, lower-cased, without an `Error` suffix: `*OrderError` gives `order`, `errors.New` gives `errorstring`, `fmt.Errorf("...%w", err)` gives `wrap`. The framework's own values are `overloaded`, `handler-panic`, `shutting-down` and `reply-failed`; a handler error type whose name would equal one of them gets the suffix `-error` (`OverloadedError` is sent as `overloaded-error`), so a handler's own error is never taken for "not handled, retry". |
 
 On the caller side:
 
@@ -60,6 +60,19 @@ Consequences for handler code:
 - Because the full wrapped message reaches the caller, keep internal details in logs, not in returned errors.
 - To give callers a usable `ErrorType`, return the custom error type unwrapped.
 - `errors.Is(err, ErrInsufficientFunds)` with a sentinel of your own package works only for local calls.
+
+
+## A Request Always Gets a Reply
+
+A request-reply caller that reached a handler is answered, whatever the handler returns:
+
+- **A nil response** (`return nil, nil`) is sent as an empty reply.
+- **A response that cannot be sent**, for example one larger than the server's maximum payload, is answered with an error whose type is `reply-failed` and whose message gives the reason. The caller gets a `*monoerrors.RemoteError`. The handler's work is done, so a retry repeats it.
+- Before v0.2.19 both left the caller waiting for its timeout.
+
+A timeout error reports the time the call actually waited (`operation 'request-reply' timed out after 2s`), not the client's default of 30 seconds.
+
+**Messages without a reply subject.** A message published to a request-reply subject (`EventBus.Publish("services.orders.place", ...)`) is handled, and its response is dropped. It never holds the subscription up: when the service's worker pool is full, such a message is dropped and counted with the rejected ones, where a call gets `ErrServiceOverloaded`. Use a queue group service for work that needs no answer.
 
 ## Service Handler Error Patterns
 
@@ -119,7 +132,7 @@ func (m *OrderModule) listenForOrderUpdates(ctx context.Context, updateChan <-ch
 A panic inside any handler (request-reply, queue group, event consumer, stream consumer, event stream consumer, cron) is recovered by the framework:
 
 - It is logged at `Error` level with `panic=true` and the stack trace, and the subscription keeps running, so one bad message does not crash the process.
-- A request-reply caller receives `ErrHandlerPanic` immediately instead of waiting for a timeout.
+- A request-reply caller receives `ErrHandlerPanic` immediately instead of waiting for a timeout. The value the handler panicked with stays in the log: the caller, and the `last_error` of the service statistics, get the text `handler panicked`.
 - Acknowledgement is unchanged: a cron occurrence is Nak'd, while a stream or event stream consumer batch is neither Ack'd nor Nak'd, so the messages the handler did not acknowledge are redelivered after `AckWait` (bounded by `MaxDeliver`).
 
 ```go

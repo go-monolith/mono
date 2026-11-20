@@ -331,7 +331,7 @@ mono.WithNATSPort(4222)
 func WithNATSHost(host string) MonoFrameworkOption
 ```
 
-Sets the NATS server host address.
+Sets the NATS server host address. An IPv6 address is given without brackets (`"::1"`); the framework adds them where a URL needs them (since v0.2.19; before, the framework's own client failed with "too many colons in address").
 
 | Property | Value |
 |----------|-------|
@@ -569,7 +569,7 @@ mono.WithNATSClusterTLS("/etc/nats-route-tls/tls.crt", "/etc/nats-route-tls/tls.
 - **Certificate names.** On a route it opens, a server also checks that the peer's certificate matches the route URL's host. The certificate needs a DNS name (or IP address) for every route host, for example `*.<headless-service>.<namespace>.svc.cluster.local` in Kubernetes. Each server is both TLS server and client on routes, so the certificate must allow both uses (extended key usages `serverAuth` and `clientAuth`, or none).
 - **Renewal without a restart.** The certificate and key are read again when the files change, checked at most every 10 seconds on the next route handshake. A renewed certificate (a Kubernetes Secret updated by cert-manager, for example) is used for new routes, and routes already established keep their session. The framework logs `Reloaded the cluster TLS certificate`. A file that cannot be loaded (for example half-written), or a certificate that is not signed by the route CA, keeps the previous certificate and is retried; a certificate from another CA would otherwise break every route that reconnects. A change of CA needs a restart.
 - **The reloader is public.** [`pkg/certreload`](https://pkg.go.dev/github.com/go-monolith/mono/pkg/certreload) is the same reloader, for an application's own TLS servers and clients: `certreload.New(certreload.Config{CertFile, KeyFile, Roots, Usages})`, then `GetCertificate` or `GetClientCertificate` in a `tls.Config`.
-- **Expiry monitoring.** nats-server's `/varz` cannot report the expiry of a certificate served this way (`cluster.tls_cert_not_after` is absent). The framework logs it instead: `Cluster TLS enabled` at start and `Reloaded the cluster TLS certificate` on renewal, both with `not_after`.
+- **Expiry monitoring.** nats-server's `/varz` cannot report the expiry of a certificate served this way (`cluster.tls_cert_not_after` is absent). The framework logs it instead: `Cluster TLS enabled` at start and `Reloaded the cluster TLS certificate` on renewal, both with `not_after`. A certificate that passes its expiry without being renewed is warned about, at most once an hour (since v0.2.19).
 - **With route credentials.** It combines with [`WithNATSClusterAuth`](#withnatsclusterauth): TLS encrypts the routes and authenticates peers by certificate, and the password is checked on top.
 - **All servers must agree.** A server with route TLS and one without cannot route to each other, so turning it on (or off) for a running cluster takes a restart of every server at once, or a blue-green cutover.
 - The client listener is not affected; see [`WithNATSClientTLS`](#withnatsclienttls) and [`WithNATSAutoTLS`](#withnatsautotls). The startup log line `NATS server started` carries `cluster_tls=true`.
@@ -767,7 +767,7 @@ Enables automatic ACME (Let's Encrypt) TLS certificates for the embedded NATS se
 |----------|-------|
 | Type | `types.AutoTLSConfig` |
 | Default | (disabled) |
-| Constraints | The fields below (checked when the option is applied); not combined with `WithNATSDontListen` or [`WithNATSClientTLS`](#withnatsclienttls); not combined with a config file that has a `tls{}` block |
+| Constraints | The fields below (checked when the option is applied); not combined with `WithNATSDontListen` or [`WithNATSClientTLS`](#withnatsclienttls); not combined with a config file that has a `tls{}` block or sets `allow_non_tls` (which would let plaintext clients in; rejected since v0.2.19) |
 
 **Example:**
 ```go

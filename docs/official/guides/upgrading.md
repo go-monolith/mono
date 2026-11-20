@@ -254,6 +254,43 @@ See [Request ID Middleware](../middleware/requestid.md#how-it-works).
 - **kv-jetstream:** `Keys` returned a shorter list and a nil error when its context ended during the listing. It now returns the context's error.
 - **AutoTLS:** one connection held open on the ACME challenge port (a request whose body never arrives) blocked `Stop` until the client went away. The challenge server now limits reading, writing and idle connections, and is closed after 2 seconds of shutdown.
 
+### Request-reply: a caller always gets a reply (v0.2.19)
+
+*v0.2.19.*
+
+- **A handler that returns `(nil, nil)`** now answers with an empty reply. Before, nothing was sent and the caller waited for its timeout. A caller that relied on that timeout to mean "no result" now gets an empty response at once.
+- **A response that cannot be sent** (larger than the server's maximum payload) is answered with an error of type `reply-failed`. Before, the caller waited for its timeout.
+- **A panic** is reported to the caller as `handler panicked`; the value the handler panicked with was sent to the caller in `Mono-Error-Message` and shown in the `last_error` of the service statistics. It is in the log only now.
+- **A handler error type named like a framework type** (`OverloadedError`) is sent as `overloaded-error`. Before, it arrived as `ErrServiceOverloaded`, which means "not handled, retry", although the handler had run.
+- **A message without a reply subject** on a request-reply subject is still handled, but it no longer waits for the worker pool: when the pool is full it is dropped (and counted with the rejected messages) instead of holding up the calls behind it. Its warning is rate-limited.
+- **Timeout errors** report the time waited instead of the client's default of 30 seconds.
+
+See [A Request Always Gets a Reply](error-handling.md#a-request-always-gets-a-reply).
+
+### Stricter checks that can fail an existing configuration (v0.2.19)
+
+*v0.2.19.*
+
+- **AutoTLS with `allow_non_tls` in a config file** fails `NewMonoApplication`. The setting let clients connect and publish in plaintext although AutoTLS makes TLS mandatory; `WithNATSClientTLS` already rejected it.
+- **Strict module boundaries** reject a subscription whose first token is a wildcard and that reaches service subjects (`>`, `*.>`, `*.billing.charge`); without `WithStrictModuleBoundaries` it is recorded as a `foreign-service-subscription`. Such a subscription received other modules' requests and replies unnoticed.
+- **An event stream consumer with a negative `Fetch.BatchSize` or `Fetch.Timeout`** is rejected at registration. A negative batch size crashed the process in the fetch loop.
+- **`RecreateOnStorageMismatch`:** a backup that holds fewer messages than the bucket fails `Start` instead of being accepted (see the [plugin page](../plugins/kv-jetstream.md#changing-a-buckets-storage-type)).
+- **`WithNATSClientTLS` with a route CA in a config file's `cluster { tls {} }` block:** a route CA that is signed by the client CA is now found and refused, as it is with `WithNATSClusterTLS`.
+- **`monotest.CheckImports`** refuses a pattern that is empty or starts with `-`.
+
+### Other fixes in v0.2.19
+
+- **A NATS server that cannot start says why.** With the port in use, `NewMonoApplication` waited the whole startup timeout and returned `NATS server not ready`. It now returns at once with the server's reason (`Error listening on port: ... address already in use`), which is also logged.
+- **IPv6:** `WithNATSHost("::1")` works; the framework's client URL and `ServerInfo` put the address in brackets.
+- **Config file errors** no longer quote a route URL that fails to parse, which included its password.
+- **`EventBus.ChanSubscribe`** left one goroutine behind for every subscription; it now ends with the subscription. The channel is not closed (it never was).
+- **kv-jetstream:** `Delete` of a key that does not exist no longer writes a delete marker (it costs one read per delete). A `Reset` that fails no longer leaves goroutines behind, and one cut short by its context returns the context's error.
+- **Access log:** a request whose handler panics is logged, with status `error`. Two modules with a channel service of the same name no longer share one proxy entry (the first one's goroutines were never stopped).
+- **`pkg/certreload`:** the certificate files are read without holding the reloader's lock, so a file system that stalls no longer blocks every TLS handshake, and a certificate that expired without being renewed is warned about.
+- **Channel services:** a nil message on a provider's out channel is dropped with a warning; it crashed the process.
+- **Locks:** middleware hooks no longer run with the service container's lock held, and a module's `SetDependencyServiceContainer` no longer runs under the lifecycle lock; code in them that asked the framework something could deadlock.
+- **CI and dependencies:** the issue triage workflow reads a new issue as data and may only label and comment on that issue; actions are pinned by commit; `golang.org/x/net` is v0.62.0.
+
 ## New Features
 
 All optional.
@@ -273,6 +310,8 @@ All optional.
 | [`monoerrors.ErrWorkQueueConsumerConflict`](../api/container.md#work-queue-streams-one-consumer-per-subject), [`monoerrors.ErrStreamSubjectsOverlap`](../api/container.md#renaming-a-stream-or-switching-a-service-between-stream-consumer-and-cron) | v0.2.16 | `Start` errors for a second consumer on the same subjects of a work-queue stream, and for a stream that asks for subjects another stream holds. Both failed before as well, with the server's error; nothing is deleted |
 | `helper.DecodeBatch`, `helper.ErrUndecodableMessage` | v0.2.17 | Decode a batch leaving out the messages that fail to unmarshal; the error the typed batch handlers return for such a batch |
 | `audit.CanonicalDetails`, `audit.HashEntry`, `audit.LegacyEmptyDetailsHash` | v0.2.17 | The form an audit entry's details are hashed in, and the hash earlier versions gave an entry with empty details |
+| `types.ErrorTypeReplyFailed` (`reply-failed`) | v0.2.19 | The error type of the reply a request-reply caller gets when the handler ran but its response could not be sent |
+| `certreload.ExpiryWarnInterval` | v0.2.19 | The least time between two warnings that the certificate being served has expired |
 | `monoerrors.ErrStopAbandoned` | v0.2.18 | The error `Stop` returns for a module, middleware module or plugin whose `Stop` did not return after its context ended, and `Start` while such a `Stop` is still running |
 | [`types.RollbackAwareMiddleware`](../middleware/README.md#middleware-lifecycle) | v0.2.18 | Optional `RollbackStart(ctx)` of a middleware module, called instead of `Stop` when a failed `Start` is rolled back, so the middleware can be started again |
 | `audit.ErrOutputClosed`, `accesslog.ErrOutputClosed` | v0.2.18 | `Start` of a module whose log `Stop` has closed |
