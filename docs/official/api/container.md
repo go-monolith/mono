@@ -438,6 +438,7 @@ WARN Stream left behind by a stream registration this application no longer has 
 - **What is not reported:** streams and consumers the application created itself, and anything left behind before v0.2.13 (it never received the marker). List those with `nats stream ls` and `nats consumer ls <stream>`.
 - **Marking happens at the first start on v0.2.13 or later**, in place, without changing a consumer's position.
 - **The report is best effort.** It inspects at most 64 unregistered consumers and 64 unregistered streams per start, within 10 seconds, logs when it could not inspect everything, and never fails `Start`.
+- **It runs during `Start`.** With a JetStream that answers slowly it can add up to those 10 seconds to startup; allow for that in a startup probe.
 
 A new durable cannot take over the old one's position, so on a limits stream a rename means the stream is delivered again. Handlers should be idempotent in any case, because delivery is at least once.
 

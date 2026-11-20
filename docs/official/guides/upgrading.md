@@ -114,12 +114,13 @@ This includes non-durable consumers your application creates itself. The server 
 - **Handlers stop receiving foreign messages.** A handler that relied on receiving another registration's messages must register for them.
 - **Nothing changes** for a registration with a stream of its own, or for registrations with the same subjects on one stream.
 - **Setup order:** services are now set up in name order, so which registration's other stream settings win no longer varies between starts.
+- **A configuration that used to start may now fail.** Two registrations on one stream whose subjects overlap without one covering the other (`a.*.c` and `a.b.*`) started before, because each write replaced the other's subjects, and one of them lost its messages. `Start` now fails with `ErrInvalidConfiguration`, naming both registrations. Give them subjects that do not overlap, or separate streams.
 
 See [Sharing a Stream Between Registrations](../api/container.md#sharing-a-stream-between-registrations).
 
 ### Leftover streams and consumers are reported (v0.2.13)
 
-*v0.2.13.* The framework adds a metadata entry (`mono.registration`) to the streams and durable consumers it creates, in place at the next start, and logs a warning at every start for each marked one that no registration uses any more (after a module, service or event was renamed or removed). Nothing is deleted. Leftovers from before v0.2.13 are not recognised. See [Renaming or Removing a Stream Registration](../api/container.md#renaming-or-removing-a-stream-registration).
+*v0.2.13.* The framework adds a metadata entry (`mono.registration`) to the streams and durable consumers it creates, in place at the next start, and logs a warning at every start for each marked one that no registration uses any more (after a module, service or event was renamed or removed). Nothing is deleted. Leftovers from before v0.2.13 are not recognised. The report runs during `Start` and can add up to 10 seconds when JetStream answers slowly, so allow for it in a startup probe. See [Renaming or Removing a Stream Registration](../api/container.md#renaming-or-removing-a-stream-registration).
 
 ## New Features
 
