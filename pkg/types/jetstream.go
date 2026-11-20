@@ -520,6 +520,13 @@ type StreamConfig struct {
 
 // ConsumerConfig configures a JetStream consumer.
 // This is the framework's internal type that abstracts the underlying JetStream configuration.
+//
+// NATS cannot change DeliverPolicy (with OptStartSeq and OptStartTime),
+// AckPolicy, ReplayPolicy, MaxWaiting or MemoryStorage on a consumer that
+// already exists. For the durable consumer of a stream consumer service or an
+// event stream consumer, a configuration that changes one of them keeps the
+// existing value and logs a warning; deleting the consumer applies the
+// change.
 type ConsumerConfig struct {
 	// Name is an optional name for the consumer. If not set, one is
 	// generated automatically. Name alone does not make the consumer durable;

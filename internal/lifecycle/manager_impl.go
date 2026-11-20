@@ -2530,7 +2530,13 @@ func (lm *lifecycleManager) setupEventStreamConsumer(ctx context.Context, entry 
 		return err
 	}
 
-	consumer, err := es.CreateOrUpdateConsumer(ctx, cfg.Stream.Name, consumerCfg)
+	// Settings NATS cannot change on an existing consumer are kept as they
+	// are, with a warning; the configuration applied is the one the legacy
+	// position carry-over below works with.
+	consumer, consumerCfg, err := lm.UpdateKeepingImmutable(ctx, es, cfg.Stream.Name, consumerCfg, owner,
+		func(c types.ConsumerConfig) (jetstream.Consumer, error) {
+			return es.CreateOrUpdateConsumer(ctx, cfg.Stream.Name, c)
+		})
 	if err != nil {
 		return fmt.Errorf("failed to create consumer %s: %w", consumerName, err)
 	}

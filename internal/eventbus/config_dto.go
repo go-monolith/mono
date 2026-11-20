@@ -282,3 +282,35 @@ func DeliverPolicyFromJetStream(policy jetstream.DeliverPolicy) (types.DeliverPo
 		return 0, fmt.Errorf("unknown JetStream deliver policy %d", policy)
 	}
 }
+
+// AckPolicyFromJetStream converts a JetStream ack policy, as reported in the
+// info of an existing consumer, to the framework's AckPolicy. It is the
+// inverse of the ack policy conversion in toJetStreamConsumerConfig. An
+// unknown policy returns an error.
+func AckPolicyFromJetStream(policy jetstream.AckPolicy) (types.AckPolicy, error) {
+	switch policy {
+	case jetstream.AckExplicitPolicy:
+		return types.AckExplicitPolicy, nil
+	case jetstream.AckAllPolicy:
+		return types.AckAllPolicy, nil
+	case jetstream.AckNonePolicy:
+		return types.AckNonePolicy, nil
+	default:
+		return 0, fmt.Errorf("unknown JetStream ack policy %d", policy)
+	}
+}
+
+// ReplayPolicyFromJetStream converts a JetStream replay policy, as reported
+// in the info of an existing consumer, to the framework's ReplayPolicy. It is
+// the inverse of the replay policy conversion in toJetStreamConsumerConfig.
+// An unknown policy returns an error.
+func ReplayPolicyFromJetStream(policy jetstream.ReplayPolicy) (types.ReplayPolicy, error) {
+	switch policy {
+	case jetstream.ReplayInstantPolicy:
+		return types.ReplayInstantPolicy, nil
+	case jetstream.ReplayOriginalPolicy:
+		return types.ReplayOriginalPolicy, nil
+	default:
+		return 0, fmt.Errorf("unknown JetStream replay policy %d", policy)
+	}
+}

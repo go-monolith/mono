@@ -383,6 +383,10 @@ The framework names the durable JetStream consumer `<consumer-module>-<event-mod
 - Event stream consumers for different events may name the same stream. Since v0.2.13 the stream stores all of their events and each handler receives only its own; before, only the last registration's event was stored. See [Sharing a Stream Between Registrations](container.md#sharing-a-stream-between-registrations).
 - Renaming the consuming module creates a new durable and leaves the old one on the server. Since v0.2.13 it is reported at every start. See [Renaming or Removing a Stream Registration](container.md#renaming-or-removing-a-stream-registration).
 
+**Consumer settings that cannot be changed:**
+
+`DeliverPolicy` (with `OptStartSeq` and `OptStartTime`), `AckPolicy`, `ReplayPolicy`, `MaxWaiting` and `MemoryStorage` of an existing durable cannot be changed. Since v0.2.15 a configuration that changes one starts, keeps the existing value and logs a warning; before, it failed `Start`. See [Changing a Consumer Setting That Cannot Be Changed](container.md#changing-a-consumer-setting-that-cannot-be-changed).
+
 **Storage type and retention of an existing stream:**
 
 NATS cannot change a stream's `Storage`, or change its `Retention` to or from `WorkQueuePolicy`, once the stream exists. Since v0.2.12 such a configuration fails `Start` with `ErrStreamConfigImmutable`, and so do two registrations of the same stream that disagree on one of them. The stream is never deleted. See [Changing a Stream's Storage Type or Retention](container.md#changing-a-streams-storage-type-or-retention) for the way out.

@@ -32,15 +32,31 @@ import (
 // (or sets the caller's InactiveThreshold). The first update sends the start
 // protection threshold (an hour) rather than none, so that a conversion
 // interrupted between the two updates leaves a durable the server keeps for an
-// hour instead of five seconds; the next start finishes it. The deliver policy and start
-// position of an existing consumer cannot be changed by an update; a
-// configuration that changes them fails, as it did before, and since the
-// consumer is durable it no longer disappears by itself: delete it (nats
-// consumer rm <stream> <consumer>) to apply them.
+// hour instead of five seconds; the next start finishes it.
+//
+// The deliver policy, start position, ack policy, replay policy, MaxWaiting
+// and MemoryStorage of an existing consumer cannot be changed by an update.
+// A configuration that changes one of them keeps the existing value and logs
+// a warning (see UpdateKeepingImmutable); since the consumer is durable it no
+// longer disappears by itself, so deleting it (nats consumer rm <stream>
+// <consumer>) is what applies the change.
 func (lm *lifecycleManager) ensureStreamConsumer(ctx context.Context, es types.EventStream, stream string, cfg types.ConsumerConfig, entry *types.ServiceEntry) (jetstream.Consumer, error) {
+	owner := "stream consumer service"
+	if entry != nil {
+		owner = StreamConsumerServiceOwner(entry)
+	}
+	// Settings NATS cannot change on an existing consumer are kept as they
+	// are, with a warning (see UpdateKeepingImmutable).
+	createOrUpdate := func(cfg types.ConsumerConfig) (jetstream.Consumer, error) {
+		consumer, _, err := lm.UpdateKeepingImmutable(ctx, es, stream, cfg, owner, func(c types.ConsumerConfig) (jetstream.Consumer, error) {
+			return lm.createOrUpdateStreamConsumer(ctx, es, stream, c)
+		})
+		return consumer, err
+	}
+
 	store, ok := es.(cronConsumerStore)
 	if !ok {
-		return lm.createOrUpdateStreamConsumer(ctx, es, stream, cfg)
+		return createOrUpdate(cfg)
 	}
 
 	info, err := store.ConsumerInfo(ctx, stream, cfg.Name)
@@ -52,18 +68,22 @@ func (lm *lifecycleManager) ensureStreamConsumer(ctx context.Context, es types.E
 	}
 	switch {
 	case isCronConsumerMissing(err):
-		return lm.createOrUpdateStreamConsumer(ctx, es, stream, cfg)
+		return createOrUpdate(cfg)
 	case err != nil:
 		return nil, fmt.Errorf("failed to look up consumer %s: %w", cfg.Name, err)
 	case info.Config.Durable != "":
-		return lm.createOrUpdateStreamConsumer(ctx, es, stream, cfg)
+		return createOrUpdate(cfg)
 	}
 
-	_, err = store.UpdateConsumer(ctx, stream, protectedConversion(cfg))
+	// The first update of the conversion decides which immutable settings
+	// are kept; the second one sends the same.
+	_, cfg, err = lm.UpdateKeepingImmutable(ctx, es, stream, cfg, owner, func(c types.ConsumerConfig) (jetstream.Consumer, error) {
+		return store.UpdateConsumer(ctx, stream, protectedConversion(c))
+	})
 	if isCronConsumerMissing(err) {
 		// Deleted between the lookup and the update (its inactivity
 		// threshold expired): create it instead.
-		return lm.createOrUpdateStreamConsumer(ctx, es, stream, cfg)
+		return createOrUpdate(cfg)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("failed to convert consumer %s to durable: %w", cfg.Name, err)

@@ -688,3 +688,36 @@ func TestDeliverPolicyFromJetStream(t *testing.T) {
 		t.Error("expected an error for an unknown deliver policy")
 	}
 }
+
+func TestAckPolicyFromJetStream(t *testing.T) {
+	for _, want := range []types.AckPolicy{types.AckExplicitPolicy, types.AckAllPolicy, types.AckNonePolicy} {
+		// Round trip through the forward conversion.
+		jsCfg, err := toJetStreamConsumerConfig(types.ConsumerConfig{Name: "consumer", AckPolicy: want})
+		if err != nil {
+			t.Fatalf("toJetStreamConsumerConfig(%d): %v", want, err)
+		}
+		got, err := AckPolicyFromJetStream(jsCfg.AckPolicy)
+		if err != nil || got != want {
+			t.Errorf("AckPolicyFromJetStream(%v) = %d, %v; want %d", jsCfg.AckPolicy, got, err, want)
+		}
+	}
+	if _, err := AckPolicyFromJetStream(jetstream.AckPolicy(99)); err == nil {
+		t.Error("an unknown ack policy must return an error")
+	}
+}
+
+func TestReplayPolicyFromJetStream(t *testing.T) {
+	for _, want := range []types.ReplayPolicy{types.ReplayInstantPolicy, types.ReplayOriginalPolicy} {
+		jsCfg, err := toJetStreamConsumerConfig(types.ConsumerConfig{Name: "consumer", ReplayPolicy: want})
+		if err != nil {
+			t.Fatalf("toJetStreamConsumerConfig(%d): %v", want, err)
+		}
+		got, err := ReplayPolicyFromJetStream(jsCfg.ReplayPolicy)
+		if err != nil || got != want {
+			t.Errorf("ReplayPolicyFromJetStream(%v) = %d, %v; want %d", jsCfg.ReplayPolicy, got, err, want)
+		}
+	}
+	if _, err := ReplayPolicyFromJetStream(jetstream.ReplayPolicy(99)); err == nil {
+		t.Error("an unknown replay policy must return an error")
+	}
+}
