@@ -71,15 +71,67 @@ func TestRollbackStart_HandlerStillWriting(t *testing.T) {
 	if err := m.Start(context.Background()); err == nil || !strings.Contains(err.Error(), "already started") {
 		t.Fatalf("Start beside the running handler = %v, want already started", err)
 	}
+	// Nobody calls RollbackStart a second time: once the handler has
+	// finished, Start completes what the rollback left and starts.
 	close(w.Release)
-	if err := m.RollbackStart(context.Background()); err != nil {
-		t.Fatalf("RollbackStart once the handler can finish: %v", err)
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		err := m.Start(context.Background())
+		if err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("Start after the handler finished: %v", err)
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
-	if err := m.Start(context.Background()); err != nil {
-		t.Fatalf("Start after the rollback: %v", err)
+	if n, err := adapter.SaveAuditTrail(context.Background(), customEntries(2)); n != 2 || err != nil {
+		t.Fatalf("SaveAuditTrail after the restart = %d, %v", n, err)
 	}
 	if err := m.Stop(context.Background()); err != nil {
 		t.Fatal(err)
+	}
+	if got := len(w.Entries(t)); got != 3 {
+		t.Fatalf("%d entries written, want the one of the first start and two of the second", got)
+	}
+}
+
+// TestSaveAuditTrail_TwoAdaptersOneConsumer: a module that builds two
+// adapters under its name gets one confirmation channel twice. Their saves
+// are serialised, so neither takes the other's confirmations.
+func TestSaveAuditTrail_TwoAdaptersOneConsumer(t *testing.T) {
+	out := &LockedBuffer{}
+	m, first := StartedAudit(t, out)
+	c := newMockContainer()
+	if err := c.RegisterChannelService("audit-trail", m.auditTrailIn, first.(*auditAdapter).outChan); err != nil {
+		t.Fatal(err)
+	}
+	second, err := NewAuditAdapter(c, "orders")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.(*auditAdapter).mu != second.(*auditAdapter).mu {
+		t.Fatal("two adapters on one confirmation channel do not share its lock")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	const perAdapter, rounds = 30, 10
+	var wg sync.WaitGroup
+	for _, adapter := range []AuditAdapterPort{first, second} {
+		wg.Add(1)
+		go func(adapter AuditAdapterPort) {
+			defer wg.Done()
+			for i := 0; i < rounds; i++ {
+				if n, err := adapter.SaveAuditTrail(ctx, customEntries(perAdapter)); n != perAdapter || err != nil {
+					t.Errorf("SaveAuditTrail = %d, %v", n, err)
+					return
+				}
+			}
+		}(adapter)
+	}
+	wg.Wait()
+	if got := len(out.Entries(t)); got != 2*perAdapter*rounds {
+		t.Fatalf("%d entries written, want %d", got, 2*perAdapter*rounds)
 	}
 }
 

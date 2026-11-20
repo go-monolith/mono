@@ -237,8 +237,38 @@ func TestRunStop(t *testing.T) {
 		if waited := time.Since(started); waited >= StopMinBudget {
 			t.Fatalf("waited %v for a Stop that took less", waited)
 		}
+	})
+
+	t.Run("the Stops called after the context ended share one budget", func(t *testing.T) {
+		lm.ResetStopBudget()
 		if lm.stopWaitAfterContext(true) != StopMinBudget || lm.stopWaitAfterContext(false) != StopAbandonGrace {
 			t.Fatal("unexpected default waits")
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		// One Stop that does not return uses the budget up, and is abandoned
+		// before the application's wait for an aborted start (2s) is over.
+		release := make(chan struct{})
+		defer close(release)
+		started := time.Now()
+		if _, err := lm.RunStop(ctx, "module", "stuck", func(context.Context) error { <-release; return nil }); !errors.Is(err, monoerrors.ErrStopAbandoned) {
+			t.Fatalf("RunStop = %v", err)
+		}
+		if waited := time.Since(started); waited < StopMinBudget || waited > StopMinBudget+500*time.Millisecond {
+			t.Fatalf("a Stop that does not return was waited for %v, want the budget of %v", waited, StopMinBudget)
+		}
+		// The Stops after it have the grace each, not another budget.
+		if got := lm.stopWaitAfterContext(true); got != StopAbandonGrace {
+			t.Fatalf("wait once the budget is used up = %v, want %v", got, StopAbandonGrace)
+		}
+		// A context that ended while the Stop ran never uses the budget.
+		if got := lm.stopWaitAfterContext(false); got != StopAbandonGrace {
+			t.Fatalf("wait for a Stop whose context ended while it ran = %v", got)
+		}
+		// The next stop or start has the whole budget again.
+		lm.ResetStopBudget()
+		if got := lm.stopWaitAfterContext(true); got != StopMinBudget {
+			t.Fatalf("wait after a reset = %v", got)
 		}
 	})
 
@@ -332,6 +362,51 @@ func TestStopRolledBackMiddleware(t *testing.T) {
 	}
 	if got := mw.Stops.Load(); got != 2 {
 		t.Fatalf("final Stops = %d, want the one of Stop added", got)
+	}
+}
+
+// HangingRollback is a rollback-aware middleware whose RollbackStart hangs.
+type HangingRollback struct {
+	RollbackAwareMock
+	*HangingStop
+}
+
+// RollbackStart hangs.
+func (m *HangingRollback) RollbackStart(ctx context.Context) error { return m.HangingStop.Stop(ctx) }
+
+// Stop counts a final stop.
+func (m *HangingRollback) Stop(ctx context.Context) error { return m.RollbackAwareMock.Stop(ctx) }
+
+// TestStopRolledBackMiddleware_AbandonedRollback: a middleware whose
+// RollbackStart was abandoned is still in it, so it is not given its final
+// Stop beside it.
+func TestStopRolledBackMiddleware_AbandonedRollback(t *testing.T) {
+	lm, _, reg := newBareManager(t, newMockEventBus())
+	lm.stopMinBudget = 50 * time.Millisecond
+	mw := &HangingRollback{
+		RollbackAwareMock: RollbackAwareMock{mockMiddlewareModule: mockMiddlewareModule{mockModule: mockModule{name: "audit"}}},
+		HangingStop:       NewHangingStop(t),
+	}
+	failing := &mockModule{name: "orders", startErr: errors.New("boom")}
+	for _, m := range []types.Module{mw, failing} {
+		if err := reg.Register(m); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// The rollback context is live, so the RollbackStart is abandoned only
+	// when it ends: give the start a context whose rollback budget is short.
+	budget := &RollbackBudget{Timeout: 100 * time.Millisecond}
+	if err := lm.Start(WithRollbackBudget(context.Background(), budget)); err == nil {
+		t.Fatal("Start succeeded")
+	}
+	if got := lm.AbandonedStops(); len(got) != 1 || got[0] != "middleware module audit" {
+		t.Fatalf("AbandonedStops = %v", got)
+	}
+	if err := lm.StopRolledBackMiddleware(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if got := mw.Stops.Load(); got != 0 {
+		t.Fatalf("final Stop called %d time(s) beside a running RollbackStart", got)
 	}
 }
 

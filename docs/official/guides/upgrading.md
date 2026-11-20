@@ -206,7 +206,7 @@ See [`Start`](../api/framework.md#start) and [`Stop`](../api/framework.md#stop).
 
 *v0.2.18.* The `Stop` of a module, middleware module or plugin that did not return kept the application's `Stop` blocked past the shutdown timeout: the modules after it were not stopped and NATS never was.
 
-- **Such a `Stop` is now abandoned** 250ms after its context ended (2 seconds after it was called, when the context had ended before that). It is left running in its goroutine, `Stop` goes on with the other modules and NATS, and returns an error wrapping `monoerrors.ErrStopAbandoned` that names the module.
+- **Such a `Stop` is now abandoned** 250ms after its context ended. The `Stop`s called after the context had already ended share one second before that. It is left running in its goroutine, `Stop` goes on with the other modules and NATS, and returns an error wrapping `monoerrors.ErrStopAbandoned` that names the module.
 - **A `Stop` that honours its context is not affected**: it returns when the context ends, and its own error is reported.
 - **`WrapModuleStopFailed` errors now wrap the `Stop`'s own error**, so `errors.Is(err, context.DeadlineExceeded)` and the like find it; the message is unchanged.
 

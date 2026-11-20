@@ -62,7 +62,8 @@ type lifecycleManager struct {
 	cronProgressInterval       time.Duration                 // interval of the in-progress signal of a running cron handler (0 = default)
 	abandonedStops             map[string]int                // Stops given up on that have not returned yet, by "<kind> <name>" (see RunStop)
 	cancelRouters              context.CancelFunc            // ends the channel routers of the current start (nil: none running)
-	stopMinBudget              time.Duration                 // wait for a Stop called with an ended context (0 = StopMinBudget)
+	stopMinBudget              time.Duration                 // time the Stops called with an ended context share (0 = StopMinBudget)
+	stopOvertime               time.Duration                 // how much of it the current stop or rollback has used
 	rolledBack                 []types.MiddlewareModule      // middleware stopped by RollbackStart and not started again: their final Stop is owed
 }
 
@@ -757,6 +758,8 @@ func (lm *lifecycleManager) Start(ctx context.Context) (err error) {
 		return fmt.Errorf("cannot start while an earlier Stop is still running (%s): %w",
 			strings.Join(abandoned, ", "), monoerrors.ErrStopAbandoned)
 	}
+	// The rollback of this start, should it fail, has a stop budget of its own.
+	lm.ResetStopBudget()
 
 	// A failed Start leaves the event registry as it found it, so that a
 	// retried Start registers the same events and consumers once more
@@ -1486,6 +1489,7 @@ func (lm *lifecycleManager) setupNATSSubscriptions(ctx context.Context) error {
 // Stop stops all modules in reverse dependency order
 func (lm *lifecycleManager) Stop(ctx context.Context) error {
 	lm.logger.Info("Stopping all modules")
+	lm.ResetStopBudget()
 
 	// 1. Stop taking new messages and wait for in-flight handlers, with the
 	//    runtime context still live so they can finish their work.
@@ -1911,12 +1915,14 @@ func (lm *lifecycleManager) rollback(ctx context.Context, started []string, orig
 func (lm *lifecycleManager) rollbackStartedInfrastructure(ctx context.Context, startedMiddleware []types.MiddlewareModule) {
 	for i := len(startedMiddleware) - 1; i >= 0; i-- {
 		mw := startedMiddleware[i]
-		if err := lm.stopMiddlewareModule(ctx, mw, true); err != nil {
+		err := lm.stopMiddlewareModule(ctx, mw, true)
+		if err != nil {
 			lm.logger.Error("Failed to stop middleware module during rollback", "module", mw.Name(), "error", err)
 		}
 		// Stopped through RollbackStart, it still owes its final Stop
-		// (see StopRolledBackMiddleware).
-		if _, aware := mw.(types.RollbackAwareMiddleware); aware {
+		// (see StopRolledBackMiddleware). Not one whose RollbackStart was
+		// abandoned: it is still running, and its Stop must not run beside it.
+		if _, aware := mw.(types.RollbackAwareMiddleware); aware && !errors.Is(err, monoerrors.ErrStopAbandoned) {
 			lm.mu.Lock()
 			lm.rolledBack = AppendMiddlewareOnce(lm.rolledBack, mw)
 			lm.mu.Unlock()
@@ -1948,16 +1954,23 @@ func RemoveMiddleware(list []types.MiddlewareModule, mw types.MiddlewareModule) 
 
 // StopRolledBackMiddleware calls Stop on the middleware modules a rollback
 // stopped through RollbackStart and that were not started again, in reverse
-// order. A middleware that was started again is stopped by Stop.
+// registration order. A middleware that was started again is stopped by
+// Stop; one whose RollbackStart was abandoned is not among them.
 func (lm *lifecycleManager) StopRolledBackMiddleware(ctx context.Context) error {
 	lm.mu.Lock()
 	rolledBack := lm.rolledBack
 	lm.rolledBack = nil
 	lm.mu.Unlock()
 
+	if len(rolledBack) == 0 {
+		return nil
+	}
+	lm.ResetStopBudget()
+	// The rollback recorded them in the order it stopped them, the reverse
+	// of their registration, which is the order Stop uses.
 	var errs []error
-	for i := len(rolledBack) - 1; i >= 0; i-- {
-		if err := lm.stopMiddlewareModule(ctx, rolledBack[i], false); err != nil {
+	for _, mw := range rolledBack {
+		if err := lm.stopMiddlewareModule(ctx, mw, false); err != nil {
 			errs = append(errs, err)
 		}
 	}

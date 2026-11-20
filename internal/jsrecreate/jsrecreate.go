@@ -261,12 +261,13 @@ func Open[T any](ctx context.Context, s Spec[T]) (T, error) {
 	if err := s.Streams.DeleteStream(ctx, streamName); err != nil && !errors.Is(err, jetstream.ErrStreamNotFound) {
 		return zero, fmt.Errorf("failed to delete stream %s of bucket %q to change its storage type: %w", streamName, s.Bucket, err)
 	}
+	h, err = s.Create(ctx)
 	// A backup an interrupted recreate left attached follows the stream by
 	// name, so it would copy everything the recreated bucket receives. Done
-	// before the create, so that it also happens when the create fails: the
-	// next Start then finds no mismatch and never comes here again.
+	// after the create, so that the time without a bucket is not prolonged,
+	// and whatever the create returned: after a failed one the next Start
+	// finds no mismatch and never comes here again.
 	detachLeftoverBackups(ctx, s, backup)
-	h, err = s.Create(ctx)
 	if err != nil {
 		return zero, fmt.Errorf("stream %s was deleted, but recreating bucket %q with %s storage failed (the next Start creates it): %w",
 			streamName, s.Bucket, want, err)
@@ -290,10 +291,11 @@ const (
 // the recreated bucket and copies whatever that receives, into file storage,
 // for as long as the backup lives. current, the backup just made, is skipped.
 //
-// It runs after the bucket's stream was deleted, so a copy another instance
-// is making at the same moment is not cut off before that instance can see
-// the repair (a missing stream counts as repaired, and completeBackup checks
-// for it again when it finds its source gone). A leftover is detached, never deleted: it holds part of what the
+// It runs after the bucket's stream was deleted and created again, so a copy
+// another instance is making at the same moment is not cut off before that
+// instance can see the repair (completeBackup checks for it again when it
+// finds its source gone, or cannot read the stream). The backup of such an
+// instance may be reported here as a leftover; that instance then deletes it. A leftover is detached, never deleted: it holds part of what the
 // bucket held, and whether that is still wanted is not for the plugin to
 // decide. Only names BackupName makes, with exactly this stream as their one
 // source, are touched; an application's own bucket that copies this one is
@@ -301,7 +303,9 @@ const (
 // recreate (Spec.AfterCopy). Best effort: a failure is logged and the bucket
 // stays open.
 func detachLeftoverBackups[T any](ctx context.Context, s Spec[T], current string) {
-	ctx, cancel := context.WithTimeout(ctx, leftoverTimeout)
+	// With a time of its own: the context of a create that just failed has
+	// often ended.
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), leftoverTimeout)
 	defer cancel()
 	streamName := s.StreamPrefix + s.Bucket
 
@@ -480,6 +484,11 @@ func completeBackup[T any](ctx context.Context, s Spec[T], backup string, info *
 		}
 		done, copied, err := backupCopied(ctx, s.JS, backupStream, binfo, streamName, info.State.LastSeq)
 		if err != nil {
+			// The stream it reads may have been deleted and recreated by
+			// another instance since the round began.
+			if bucketRepaired(ctx, s.Streams, streamName, info, s.Want) {
+				return true, nil
+			}
 			return false, err
 		}
 		if done {

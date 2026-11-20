@@ -38,7 +38,34 @@ type auditAdapter struct {
 	// synchronous request so the channel router delivers the confirmation
 	// to this consumer's out channel only.
 	consumer string
-	mu       sync.Mutex // Protects sync request/response pairs
+	// mu serialises the synchronous saves on outChan. It belongs to the
+	// channel, not to the adapter: a module that builds two adapters under
+	// one consumer name gets the same confirmation channel twice, and two
+	// saves reading it at the same time would each drop the other's
+	// confirmations.
+	mu *sync.Mutex
+}
+
+// confirmationLocks holds the mutex of every confirmation channel an
+// adapter was built on (see auditAdapter.mu). There is one channel per
+// consumer module of the audit trail, so it stays small.
+var confirmationLocks sync.Map // chan *types.Msg -> *sync.Mutex
+
+// ConfirmationLock returns the mutex that serialises the synchronous saves
+// reading the confirmation channel out.
+func ConfirmationLock(out chan *types.Msg) *sync.Mutex {
+	if mu, ok := confirmationLocks.Load(out); ok {
+		if lock, ok := mu.(*sync.Mutex); ok {
+			return lock
+		}
+	}
+	fresh := &sync.Mutex{}
+	if mu, loaded := confirmationLocks.LoadOrStore(out, fresh); loaded {
+		if lock, ok := mu.(*sync.Mutex); ok {
+			return lock
+		}
+	}
+	return fresh
 }
 
 // NewAuditAdapter creates a new audit adapter from a service container.
@@ -75,6 +102,7 @@ func NewAuditAdapter(container types.ServiceContainer, consumerModuleName string
 		inChan:   inChan,
 		outChan:  outChan,
 		consumer: consumerModuleName,
+		mu:       ConfirmationLock(outChan),
 	}, nil
 }
 
@@ -145,8 +173,11 @@ func (a *auditAdapter) SaveAuditTrail(ctx context.Context, entries []Entry) (int
 	// dropped the confirmations it could not deliver and the call waited
 	// for them until its context ended. No more entries are in flight than
 	// half of what the confirmation channel holds, which leaves the other
-	// half for late confirmations of an earlier call, so none is dropped
-	// for lack of room.
+	// half for late confirmations of an earlier call that gave up. Should
+	// more than that arrive at once (several calls in a row that gave up,
+	// and a reader that falls behind), the router drops what does not fit
+	// and this call waits until its context ends: it reports an error,
+	// never an entry as saved that was not confirmed.
 	window := max(cap(a.outChan)/2, 1)
 	sent, received, successCount := 0, 0, 0
 	var firstErr error

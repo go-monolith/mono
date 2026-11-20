@@ -15,31 +15,57 @@ import (
 // instead of the Stop being taken for one that hangs.
 const StopAbandonGrace = 250 * time.Millisecond
 
-// StopMinBudget is how long a Stop is waited for when its context had
-// already ended before it was called: one Stop that used up the shutdown's
-// time (or a caller that passes a cancelled context) must not leave the
-// Stops after it a quarter of a second each. A Stop that ignores its context
-// but finishes in a moment then still runs to its end, in order, as it did
-// before Stops were bounded; one that honours its context returns at once.
-const StopMinBudget = 2 * time.Second
+// StopMinBudget is the time the Stops called after their context had already
+// ended share: one Stop that used up the shutdown's time (or a caller that
+// passes a cancelled context) must not leave the Stops after it a quarter of
+// a second each. A Stop that ignores its context but finishes in a moment
+// then still runs to its end, in order, as it did before Stops were bounded;
+// one that honours its context returns at once.
+//
+// It is one budget for a whole stop or rollback, not one per Stop, and it is
+// shorter than the time the application's Stop waits for the rollback of a
+// start it aborted (AbortGrace, 2s): a single Stop that does not return must
+// not outlast that wait, or the server is stopped under the stops after it.
+// Once it is used up, each further Stop has StopAbandonGrace.
+const StopMinBudget = time.Second
+
+// ResetStopBudget makes the whole StopMinBudget available again. Called when
+// a stop or a start (whose rollback stops what it started) begins.
+func (lm *lifecycleManager) ResetStopBudget() {
+	lm.mu.Lock()
+	lm.stopOvertime = 0
+	lm.mu.Unlock()
+}
 
 // stopWaitAfterContext returns how long a Stop is waited for once its
-// context has ended: StopMinBudget when it had ended before the Stop was
-// called, StopAbandonGrace when it ended while the Stop ran.
+// context has ended: StopAbandonGrace when it ended while the Stop ran, and
+// what is left of StopMinBudget, but at least StopAbandonGrace, when it had
+// ended before the Stop was called.
 func (lm *lifecycleManager) stopWaitAfterContext(endedOnEntry bool) time.Duration {
 	if !endedOnEntry {
 		return StopAbandonGrace
 	}
-	if lm.stopMinBudget > 0 {
-		return lm.stopMinBudget
+	lm.mu.RLock()
+	budget, used := lm.stopMinBudget, lm.stopOvertime
+	lm.mu.RUnlock()
+	if budget <= 0 {
+		budget = StopMinBudget
 	}
-	return StopMinBudget
+	return max(budget-used, StopAbandonGrace)
+}
+
+// chargeStopBudget takes the time a Stop called with an ended context was
+// waited for off the budget the stops after it share.
+func (lm *lifecycleManager) chargeStopBudget(d time.Duration) {
+	lm.mu.Lock()
+	lm.stopOvertime += d
+	lm.mu.Unlock()
 }
 
 // RunStop calls stop, the Stop of a module, middleware module or plugin
 // (kind) named name, and waits for it until ctx ends and StopAbandonGrace
-// has passed (StopMinBudget when ctx had ended before the call). A Stop that
-// has not returned by then is abandoned: it is left
+// has passed (what is left of StopMinBudget when ctx had ended before the
+// call). A Stop that has not returned by then is abandoned: it is left
 // running in its goroutine, and RunStop returns an error wrapping
 // errors.ErrStopAbandoned, so that the shutdown goes on to the modules after
 // it and to the NATS server. Before, one Stop that ignored its context held
@@ -60,7 +86,11 @@ func (lm *lifecycleManager) RunStop(ctx context.Context, kind, name string, stop
 	}
 	done := make(chan outcome, 1)
 	started := time.Now()
-	wait := lm.stopWaitAfterContext(ctx.Err() != nil)
+	endedOnEntry := ctx.Err() != nil
+	wait := lm.stopWaitAfterContext(endedOnEntry)
+	if endedOnEntry {
+		defer func() { lm.chargeStopBudget(time.Since(started)) }()
+	}
 	go func() {
 		var out outcome
 		defer func() {

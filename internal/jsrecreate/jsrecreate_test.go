@@ -19,6 +19,13 @@ var errMismatch = errors.New("test storage mismatch")
 
 func startJetStream(t *testing.T) jetstream.JetStream {
 	t.Helper()
+	js, _ := startJetStreamConn(t)
+	return js
+}
+
+// startJetStreamConn is startJetStream that also returns the connection.
+func startJetStreamConn(t *testing.T) (jetstream.JetStream, *nats.Conn) {
+	t.Helper()
 	s, err := server.NewServer(&server.Options{JetStream: true, Port: -1, StoreDir: t.TempDir()})
 	if err != nil {
 		t.Fatal(err)
@@ -37,7 +44,7 @@ func startJetStream(t *testing.T) jetstream.JetStream {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return js
+	return js, nc
 }
 
 // fileBucket creates KV bucket name with file storage and n keys.
@@ -675,9 +682,12 @@ func TestOpen_DetachesLeftoverBackups(t *testing.T) {
 // fails the bucket that was just recreated.
 func TestDetachLeftoverBackups_Failures(t *testing.T) {
 	t.Run("the listing fails", func(t *testing.T) {
-		js := startJetStream(t)
+		js, nc := startJetStreamConn(t)
 		var logs bytes.Buffer
 		spec := kvSpec(js, StreamAPI{JS: js}, "locks", Options{Recreate: true}, &logs)
+		nc.Close()
+		// A context that has ended does not stop the search (the create
+		// before it may have used it up); a closed connection does.
 		ctx, cancel := context.WithCancel(context.Background())
 		cancel()
 		detachLeftoverBackups(ctx, spec, "")

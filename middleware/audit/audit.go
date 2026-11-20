@@ -54,10 +54,11 @@ type AuditModule struct {
 	auditTrailOut chan *types.Msg
 
 	// Lifecycle management. lifecycleMu serialises Start, Stop and
-	// RollbackStart and guards cancel and started. mu guards the writer,
-	// the chain and the two flags below; a write holds it, so a handler
-	// stuck in a write holds it too, and nothing waits for it but another
-	// write.
+	// RollbackStart and guards cancel, handlerDone and started. mu guards
+	// the writer, the chain and the two flags below; a write holds it, so
+	// a handler stuck in a write holds it too. Start and stop take it,
+	// with lifecycleMu held, only once the handler has exited (or was
+	// never started), so they do not wait behind such a write.
 	lifecycleMu sync.Mutex
 	cancel      context.CancelFunc
 	// handlerDone is closed when the handler goroutine of the current
@@ -135,8 +136,9 @@ func (m *AuditModule) Name() string {
 
 // Start initializes the audit module and starts the channel handler goroutine.
 //
-// It fails when the module is already started, and with ErrOutputClosed when
-// an earlier Stop closed the output. A module stopped by RollbackStart, or
+// It fails when the module is already started (also while the handler a
+// RollbackStart gave up on is still in a write), and with ErrOutputClosed
+// when an earlier Stop closed the output. A module stopped by RollbackStart, or
 // whose output Stop does not close (os.Stdout, os.Stderr, a writer that is
 // not an io.Closer), can be started again.
 func (m *AuditModule) Start(_ context.Context) error {
@@ -145,7 +147,20 @@ func (m *AuditModule) Start(_ context.Context) error {
 
 	// Prevent multiple starts
 	if m.started {
-		return fmt.Errorf("audit module already started")
+		if !m.handlerStopped() {
+			return fmt.Errorf("audit module already started")
+		}
+		// A RollbackStart gave up on a handler that was still in a write,
+		// and the handler has finished since: what that stop left undone
+		// is done now. Nobody would call it again, and without this every
+		// later Start would fail.
+		m.started = false
+		m.mu.Lock()
+		err := output.Flush(m.writer, "audit log")
+		m.mu.Unlock()
+		if err != nil {
+			return err
+		}
 	}
 	m.mu.Lock()
 	closed := m.outputClosed
@@ -234,6 +249,20 @@ func (m *AuditModule) stop(ctx context.Context, closeOutput bool) error {
 	// the rest of the process keeps using (see output.FlushAndClose).
 	m.outputClosed = output.Closes(m.writer)
 	return output.FlushAndClose(m.writer, "audit log")
+}
+
+// handlerStopped reports whether the handler of the current start was told
+// to stop and has exited. Called with lifecycleMu held.
+func (m *AuditModule) handlerStopped() bool {
+	if m.handlerDone == nil {
+		return false
+	}
+	select {
+	case <-m.handlerDone:
+		return true
+	default:
+		return false
+	}
 }
 
 // handlerDrainGrace is how long the handler is still waited for after the
