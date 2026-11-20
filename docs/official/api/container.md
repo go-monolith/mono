@@ -281,7 +281,7 @@ The handler acknowledges each message itself, using `Ack()`, `Nak()`, `NakWithDe
 
 - **Stream replicas:** a `Stream.Replicas` of 0 takes the framework default ([`WithJetStreamDefaultReplicas`](framework.md#withjetstreamdefaultreplicas), otherwise one replica). The consumer follows the stream unless `Consumer.Replicas` is set.
 - **Durable consumer:** the service is consumed through the durable consumer `<module>-<service>` (sanitized: spaces and `.` become `-`, other characters outside `[a-zA-Z0-9_-]` are removed). The framework sends it as both `Name` and `Durable`, so the server keeps the consumer, and its delivery position, across restarts and idle periods. A `Name` or `Durable` set in `Consumer` is replaced.
-- **Deliver policy and start position** of an existing consumer cannot be changed by an update: a configuration that changes them fails `Start`. Since the consumer is durable it no longer disappears by itself; delete it with `nats consumer rm <stream> <consumer>` to apply the change (the new consumer starts from the configured deliver policy).
+- **Settings that cannot be changed on an existing consumer:** `DeliverPolicy` with `OptStartSeq` and `OptStartTime`, `AckPolicy`, `ReplayPolicy`, `MaxWaiting` and `MemoryStorage`. See [Changing a Consumer Setting That Cannot Be Changed](#changing-a-consumer-setting-that-cannot-be-changed).
 - **Upgrading from v0.1.x or earlier:** those versions sent only a `Name`, which the server treats as non-durable and deletes after about 5s without a pull; the next start then recreated it from its deliver policy and, with the default (all), replayed the stream. An existing consumer of that kind is converted to a durable in place at startup, keeping its position, and `Stream consumer converted to durable` is logged.
 
 **Example:**
@@ -317,6 +317,40 @@ func (m *AnalyticsModule) handleEventBatch(ctx context.Context, msgs []*mono.Msg
     return nil
 }
 ```
+
+### Changing a Consumer Setting That Cannot Be Changed
+
+NATS cannot change these settings of a consumer that already exists:
+
+| `ConsumerConfig` setting | Notes |
+|---|---|
+| `DeliverPolicy`, `OptStartSeq`, `OptStartTime` | They only decide where a *new* consumer starts. |
+| `AckPolicy` | |
+| `ReplayPolicy` | |
+| `MaxWaiting` | Leaving it at zero asks for the server default (512). |
+| `MemoryStorage` | |
+
+This applies to the durable consumer of a stream consumer service and of an [event stream consumer](eventregistry.md#registereventstreamconsumer). The consumer is durable, so it does not go away by itself.
+
+Since v0.2.15 a configuration that changes one of them **starts, keeps the value the consumer has, and logs a warning** at every start while the configuration differs:
+
+```text
+WARN Consumer setting cannot be changed on an existing consumer; the existing value is kept and the configured one is not applied. ...
+     registration="stream consumer service orders.ingest" stream=ORDERS consumer=orders-ingest
+     setting=DeliverPolicy configured=new kept=all apply_with="nats consumer rm ORDERS orders-ingest"
+```
+
+Before v0.2.15 such a configuration failed `Start` on every restart with the server's error (`deliver policy can not be updated`).
+
+- **The consumer keeps its position.** Nothing it acknowledged is delivered again.
+- **The configured value is not in effect.** Watch for the warning after changing one of these settings; the application starting is not a sign that the change was applied.
+- **To apply the change, delete the consumer:** `nats consumer rm <stream> <consumer>`. The next start creates it with the configured values. It then starts from its deliver policy, so with the default (all) the stream is delivered again.
+- **`AckPolicy` decides what the handler must do.** While the existing policy is kept, the handler has to acknowledge the way *that* policy requires. A handler that stops acknowledging because the configuration now says `AckNonePolicy` gets each message redelivered until `MaxDeliver` is reached. So plan the consumer's deletion into a deployment that changes the ack policy: run `nats consumer rm <stream> <consumer>` once the instances with the old handler have stopped, and the new version creates the consumer with the new policy.
+- **A start time computed at startup** (`time.Now().Add(-time.Hour)`) differs on every start, so it is warned about at every start and the first value is kept. Use a fixed time.
+- **Other settings are still applied** in the same update: `FilterSubject`, `MaxDeliver`, `AckWait`, `MaxAckPending`, `InactiveThreshold` and the rest can be changed in place.
+- **If another setting does not fit a kept policy**, the server rejects the update and `Start` fails with that error.
+
+A healthy start is not affected: the consumer is only read back after the server rejected the update.
 
 ### Changing a Stream's Storage Type or Retention
 

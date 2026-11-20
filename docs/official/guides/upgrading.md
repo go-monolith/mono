@@ -143,6 +143,17 @@ See [Changing a Stream's Storage Type or Retention](../api/container.md#changing
 
 A `SourceSubject` under the service's own subjects (`services.<module>.<name>.<anything>`) is accepted as well; before, the server rejected the stream. A `SourceSubject` with a wildcard, which the scheduler never accepted, is now rejected when the service is registered instead of failing `Start` after the stream was written.
 
+### Immutable consumer settings are kept instead of failing `Start` (v0.2.15)
+
+*v0.2.15.* `DeliverPolicy` (with `OptStartSeq` and `OptStartTime`), `AckPolicy`, `ReplayPolicy`, `MaxWaiting` and `MemoryStorage` cannot be changed on an existing consumer. A configuration that changed one failed `Start` on every restart, because the consumers are durable since v0.2.0 and no longer disappear.
+
+- **`Start` now succeeds.** The existing value is kept, the consumer keeps its position, and a warning is logged at every start while the configuration differs, with the command that applies the change (`nats consumer rm <stream> <consumer>`).
+- **The configured value is not in effect** until the consumer is deleted. Deleting it makes the stream be delivered again from the consumer's deliver policy.
+- **`AckPolicy`:** the handler must keep acknowledging the way the kept policy requires.
+- **A start time computed at startup** no longer fails the second start; it is warned about at every start. Use a fixed time.
+
+See [Changing a Consumer Setting That Cannot Be Changed](../api/container.md#changing-a-consumer-setting-that-cannot-be-changed).
+
 ## New Features
 
 All optional.
