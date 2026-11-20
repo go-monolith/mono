@@ -2518,6 +2518,12 @@ func (lm *lifecycleManager) setupEventStreamConsumer(ctx context.Context, entry 
 		durable.legacy = nil
 	}
 
+	// A filter the consumer was given while its stream was shared is kept
+	// once the stream is no longer shared.
+	if consumerCfg, err = KeepExistingFilter(ctx, stream, cfg.Stream.Subjects, consumerCfg); err != nil {
+		return err
+	}
+
 	consumer, err := es.CreateOrUpdateConsumer(ctx, cfg.Stream.Name, consumerCfg)
 	if err != nil {
 		return fmt.Errorf("failed to create consumer %s: %w", consumerName, err)

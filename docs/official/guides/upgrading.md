@@ -118,6 +118,10 @@ This includes non-durable consumers your application creates itself. The server 
 
 See [Sharing a Stream Between Registrations](../api/container.md#sharing-a-stream-between-registrations).
 
+### Adding several filters to an existing consumer no longer fails once (v0.2.13)
+
+*v0.2.13.* Adding `Consumer.FilterSubjects` with two or more subjects to a consumer that already existed failed the first `Start` after a restart with `multiple consumer filter subjects not supported by nats-server`, and the next `Start` succeeded: the server had applied the filters but answered with the earlier configuration. The framework now reads the consumer back and accepts the update when the filters are in place.
+
 ### Leftover streams and consumers are reported (v0.2.13)
 
 *v0.2.13.* The framework adds a metadata entry (`mono.registration`) to the streams and durable consumers it creates, in place at the next start, and logs a warning at every start for each marked one that no registration uses any more (after a module, service or event was renamed or removed). Nothing is deleted. Leftovers from before v0.2.13 are not recognised. The report runs during `Start` and can add up to 10 seconds when JetStream answers slowly, so allow for it in a startup probe. See [Renaming or Removing a Stream Registration](../api/container.md#renaming-or-removing-a-stream-registration).

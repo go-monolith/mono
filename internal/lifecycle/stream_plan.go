@@ -11,6 +11,7 @@ import (
 
 	"github.com/nats-io/nats.go/jetstream"
 
+	"github.com/go-monolith/mono/internal/eventbus"
 	monoerrors "github.com/go-monolith/mono/pkg/errors"
 	"github.com/go-monolith/mono/pkg/types"
 )
@@ -24,6 +25,17 @@ import (
 // application itself, or by a version before the entry existed, do not carry
 // it.
 const RegistrationMetadataKey = "mono.registration"
+
+// FilterMetadataKey is the metadata entry the framework writes on a durable
+// consumer whose subject filter it set itself, because the consumer's stream
+// was shared with registrations on other subjects (see FilterConsumer). It
+// tells such a filter from one the caller configured, so that the framework
+// keeps it, on the registration's current subjects, once the stream is no
+// longer shared (see KeepRegistrationFilter).
+const FilterMetadataKey = "mono.filter"
+
+// FilterMetadataValue is the value of FilterMetadataKey.
+const FilterMetadataValue = "registration"
 
 // StreamRegistration is one registration that puts a durable consumer on a
 // stream: a stream consumer service or an event stream consumer.
@@ -236,16 +248,87 @@ func (p *StreamPlan) Marker(stream, own string) string {
 // filter the consumer would hand them to the wrong handler.
 //
 // cfg is returned unchanged when the registrations of the stream all listen
-// on the same subjects (the consumer is then sent exactly as before, and a
-// filter set while the stream was shared is removed by the update), and when
-// the caller set a filter of its own.
+// on the same subjects (a consumer that never had a filter is then sent
+// exactly as before; one filtered while the stream was shared keeps its
+// filter, see KeepRegistrationFilter), and when the caller set a filter of
+// its own.
 func (p *StreamPlan) FilterConsumer(stream string, own []string, cfg types.ConsumerConfig) types.ConsumerConfig {
 	planned := p.Stream(stream)
 	if planned == nil || !planned.Shared || hasSubjectFilter(cfg) {
 		return cfg
 	}
-	cfg.FilterSubject, cfg.FilterSubjects = splitFilters(MinimiseSubjects(own))
+	return withRegistrationFilter(cfg, MinimiseSubjects(own))
+}
+
+// withRegistrationFilter returns cfg filtered on filters and marked as
+// filtered by the framework. The caller's metadata map is copied, not
+// modified.
+func withRegistrationFilter(cfg types.ConsumerConfig, filters []string) types.ConsumerConfig {
+	cfg.FilterSubject, cfg.FilterSubjects = splitFilters(filters)
+	cfg.Metadata = withMetadata(cfg.Metadata, FilterMetadataKey, FilterMetadataValue)
 	return cfg
+}
+
+// KeepRegistrationFilter returns cfg filtered on own, the subjects of the
+// registration, when cfg carries no filter and the existing consumer has a
+// filter the framework set: one marked with FilterMetadataKey, or one that is
+// exactly own.
+//
+// A consumer is given such a filter while its stream is shared (see
+// FilterConsumer). When the other registrations are removed, the stream is
+// no longer shared and the plan asks for no filter, but the stream may still
+// hold the removed registrations' messages after the consumer's position.
+// Removing the filter would deliver them to this registration's handler, so
+// the filter stays, and follows the registration's subjects when they change.
+// For the messages the stream stores from now on it changes nothing: they are
+// the registration's own subjects.
+//
+// An unmarked filter on other subjects is one the caller configured earlier
+// and has now removed; it is not kept, as before.
+func KeepRegistrationFilter(cfg types.ConsumerConfig, existing jetstream.ConsumerConfig, own []string) types.ConsumerConfig {
+	if hasSubjectFilter(cfg) {
+		return cfg
+	}
+	want := MinimiseSubjects(own)
+	if len(want) == 0 {
+		return cfg
+	}
+	marked := existing.Metadata[FilterMetadataKey] == FilterMetadataValue && hasJetStreamSubjectFilter(existing)
+	if !marked && !slices.Equal(sortedSubjects(consumerFilters(existing)), sortedSubjects(want)) {
+		return cfg
+	}
+	return withRegistrationFilter(cfg, want)
+}
+
+// hasJetStreamSubjectFilter reports whether a consumer as the server holds it
+// carries a subject filter.
+func hasJetStreamSubjectFilter(cfg jetstream.ConsumerConfig) bool {
+	return cfg.FilterSubject != "" || len(cfg.FilterSubjects) > 0
+}
+
+// KeepExistingFilter looks up the consumer cfg names on stream and returns
+// cfg with the registration's own filter kept when the consumer has it (see
+// KeepRegistrationFilter). It makes no request when cfg already carries a
+// filter, and none when stream is nil (an EventStream that returns no
+// handle). A consumer that does not exist yet leaves cfg unchanged; any other
+// lookup failure is returned, since going on without the filter could deliver
+// another registration's messages.
+func KeepExistingFilter(ctx context.Context, stream jetstream.Stream, own []string, cfg types.ConsumerConfig) (types.ConsumerConfig, error) {
+	if stream == nil || hasSubjectFilter(cfg) {
+		return cfg, nil
+	}
+	consumer, err := stream.Consumer(ctx, cfg.Name)
+	if errors.Is(err, jetstream.ErrConsumerNotFound) {
+		return cfg, nil
+	}
+	if err != nil {
+		return cfg, fmt.Errorf("failed to look up consumer %s: %w", cfg.Name, err)
+	}
+	info := consumer.CachedInfo()
+	if info == nil {
+		return cfg, nil
+	}
+	return KeepRegistrationFilter(cfg, info.Config, own), nil
 }
 
 // splitFilters returns the filters as a consumer configuration takes them: a
@@ -299,14 +382,14 @@ func (p *StreamPlan) FilterExistingConsumers(ctx context.Context, name string, s
 			continue
 		}
 		cfg.FilterSubject, cfg.FilterSubjects = splitFilters(want)
+		cfg.Metadata = withMetadata(cfg.Metadata, FilterMetadataKey, FilterMetadataValue)
 		_, err = stream.UpdateConsumer(ctx, cfg)
 		if errors.Is(err, jetstream.ErrConsumerMultipleFilterSubjectsNotSupported) {
-			// The client reports this when the answer to the update does not
-			// carry the filters. A server that recovered the consumer from
-			// its store answers the first update that adds several filters
-			// with the configuration from before, although it applied them;
-			// read the consumer back to tell.
-			err = confirmFilters(ctx, stream, reg.Consumer, want, err)
+			// A server that recovered the consumer from its store answers
+			// the first update that adds several filters with the
+			// configuration from before, although it applied them; the
+			// consumer is read back to tell.
+			_, err = eventbus.AppliedDespiteStaleAnswer(ctx, cfg, err, stream.Consumer)
 		}
 		if err != nil {
 			return fmt.Errorf("failed to filter consumer %s on shared stream %s: %w", reg.Consumer, name, err)
@@ -325,28 +408,18 @@ func consumerFilters(cfg jetstream.ConsumerConfig) []string {
 	return filters
 }
 
-// confirmFilters reads the consumer back and returns nil when it is filtered
-// on want, and updateErr, the error of the update that should have set the
-// filters, when it is not or cannot be read.
-func confirmFilters(ctx context.Context, stream jetstream.Stream, consumer string, want []string, updateErr error) error {
-	current, err := stream.Consumer(ctx, consumer)
-	if err != nil {
-		return fmt.Errorf("%w (reading the consumer back failed: %w)", updateErr, err)
-	}
-	info := current.CachedInfo()
-	if info == nil || !slices.Equal(sortedSubjects(consumerFilters(info.Config)), sortedSubjects(want)) {
-		return updateErr
-	}
-	return nil
-}
-
 // WithRegistrationMarker returns a copy of metadata with
 // RegistrationMetadataKey set to value. The map passed in, which belongs to
 // the caller's configuration, is not modified.
 func WithRegistrationMarker(metadata map[string]string, value string) map[string]string {
+	return withMetadata(metadata, RegistrationMetadataKey, value)
+}
+
+// withMetadata returns a copy of metadata with key set to value.
+func withMetadata(metadata map[string]string, key, value string) map[string]string {
 	marked := make(map[string]string, len(metadata)+1)
 	maps.Copy(marked, metadata)
-	marked[RegistrationMetadataKey] = value
+	marked[key] = value
 	return marked
 }
 

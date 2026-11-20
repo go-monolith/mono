@@ -44,6 +44,12 @@ func (lm *lifecycleManager) ensureStreamConsumer(ctx context.Context, es types.E
 	}
 
 	info, err := store.ConsumerInfo(ctx, stream, cfg.Name)
+	if err == nil && info != nil && entry != nil && entry.StreamConsumerConfig != nil {
+		// A filter the consumer was given while its stream was shared is
+		// kept once the stream is no longer shared (the lookup is the one
+		// this function makes anyway).
+		cfg = KeepRegistrationFilter(cfg, info.Config, entry.StreamConsumerConfig.Stream.Subjects)
+	}
 	switch {
 	case isCronConsumerMissing(err):
 		return lm.createOrUpdateStreamConsumer(ctx, es, stream, cfg)

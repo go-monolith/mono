@@ -630,6 +630,186 @@ func TestIntegration_SharedStream_WorkQueueSharingEnds(t *testing.T) {
 	}
 }
 
+// TestIntegration_SharedStream_SharingEndsKeepsFilter: when a stream stops
+// being shared, messages of the removed registration that are stored after
+// the remaining consumer's position are not delivered to it, for events and
+// for services.
+func TestIntegration_SharedStream_SharingEndsKeepsFilter(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("events", func(t *testing.T) {
+		dir := t.TempDir()
+		_, stop := startShared(t, dir, &noOpsLogger{}, &sharedModule{name: "billing", regs: []*sharedReg{
+			sharedEvent(sharedAlpha.ToBase(), "EVENTS", mono.LimitsPolicy),
+			sharedEvent(sharedBeta.ToBase(), "EVENTS", mono.LimitsPolicy),
+		}})
+		stop()
+
+		// While nothing consumes, two Beta events and one Alpha event arrive.
+		app, stop := startShared(t, dir, &noOpsLogger{}, &sharedModule{name: "billing"})
+		es, err := app.EventBus("billing").EventStream()
+		if err != nil {
+			t.Fatalf("EventStream: %v", err)
+		}
+		for _, subject := range []string{sharedBeta.Subject, sharedBeta.Subject, sharedAlpha.Subject} {
+			if _, err := es.Publish(ctx, subject, []byte(`{}`)); err != nil {
+				t.Fatalf("publish to %s: %v", subject, err)
+			}
+		}
+		stop()
+
+		for start := 1; start <= 2; start++ {
+			alpha := sharedEvent(sharedAlpha.ToBase(), "EVENTS", mono.LimitsPolicy)
+			_, stop := startShared(t, dir, &noOpsLogger{}, &sharedModule{name: "billing", regs: []*sharedReg{alpha}})
+			want := 1
+			if start == 2 {
+				want = 0 // already handled
+			}
+			requireReceived(t, fmt.Sprintf("alpha, start %d", start), alpha, want, sharedAlpha.Subject)
+			stop()
+		}
+	})
+
+	t.Run("services", func(t *testing.T) {
+		dir := t.TempDir()
+		_, stop := startShared(t, dir, &noOpsLogger{}, &sharedModule{name: "orders", regs: []*sharedReg{
+			sharedService("first", "SHARED", mono.LimitsPolicy),
+			sharedService("second", "SHARED", mono.LimitsPolicy),
+		}})
+		stop()
+
+		app, stop := startShared(t, dir, &noOpsLogger{}, &sharedModule{name: "orders"})
+		es, err := app.EventBus("orders").EventStream()
+		if err != nil {
+			t.Fatalf("EventStream: %v", err)
+		}
+		for _, subject := range []string{"services.orders.second", "services.orders.second", "services.orders.first"} {
+			if _, err := es.Publish(ctx, subject, []byte("1")); err != nil {
+				t.Fatalf("publish to %s: %v", subject, err)
+			}
+		}
+		stop()
+
+		for start := 1; start <= 2; start++ {
+			first := sharedService("first", "SHARED", mono.LimitsPolicy)
+			_, stop := startShared(t, dir, &noOpsLogger{}, &sharedModule{name: "orders", regs: []*sharedReg{first}})
+			want := 1
+			if start == 2 {
+				want = 0
+			}
+			requireReceived(t, fmt.Sprintf("first, start %d", start), first, want, "services.orders.first")
+			stop()
+		}
+	})
+}
+
+// TestIntegration_SharedStream_SharingEndsWithChangedSubjects: in one
+// deployment the other registration of a shared stream is removed and the
+// remaining one gets another subject. Its filter follows its subjects, so the
+// removed registration's stored messages are still not delivered to it.
+func TestIntegration_SharedStream_SharingEndsWithChangedSubjects(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	service := func(name string, subjects ...string) *sharedReg {
+		return &sharedReg{service: name, stream: mono.StreamConfig{Name: "WORK", Subjects: subjects}}
+	}
+	_, stop := startShared(t, dir, &noOpsLogger{}, &sharedModule{name: "work", regs: []*sharedReg{
+		service("alpha", "work.alpha.>"), service("beta", "work.beta.>"),
+	}})
+	stop()
+
+	app, stop := startShared(t, dir, &noOpsLogger{}, &sharedModule{name: "work"})
+	es, err := app.EventBus("work").EventStream()
+	if err != nil {
+		t.Fatalf("EventStream: %v", err)
+	}
+	for _, subject := range []string{"work.beta.x", "work.beta.x", "work.alpha.x"} {
+		if _, err := es.Publish(ctx, subject, []byte("1")); err != nil {
+			t.Fatalf("publish to %s: %v", subject, err)
+		}
+	}
+	stop()
+
+	alpha := service("alpha", "work.alpha.>", "work.gamma.>")
+	app, _ = startShared(t, dir, &noOpsLogger{}, &sharedModule{name: "work", regs: []*sharedReg{alpha}})
+	es, err = app.EventBus("work").EventStream()
+	if err != nil {
+		t.Fatalf("EventStream: %v", err)
+	}
+	if _, err := es.Publish(ctx, "work.gamma.x", []byte("1")); err != nil {
+		t.Fatalf("publish to the new subject: %v", err)
+	}
+	requireReceived(t, "alpha", alpha, 2, "work.alpha.x", "work.gamma.x")
+	want := []string{"work.alpha.>", "work.gamma.>"}
+	if got := consumerFilters(t, sharedStream(t, app, "work", "WORK"), "work-alpha"); !slices.Equal(got, want) {
+		t.Errorf("filters of work-alpha = %v, want %v", got, want)
+	}
+}
+
+// filteredServiceModule registers one stream consumer service whose consumer
+// carries the filters, as a caller configures them.
+type filteredServiceModule struct {
+	filters []string
+}
+
+func (m *filteredServiceModule) Name() string                { return "orders" }
+func (m *filteredServiceModule) Start(context.Context) error { return nil }
+func (m *filteredServiceModule) Stop(context.Context) error  { return nil }
+func (m *filteredServiceModule) RegisterServices(c mono.ServiceContainer) error {
+	return c.RegisterStreamConsumerService("ingest", mono.StreamConsumerConfig{
+		Stream:   mono.StreamConfig{Name: "ORDERS"},
+		Consumer: mono.ConsumerConfig{FilterSubjects: m.filters},
+		Fetch:    mono.FetchConfig{BatchSize: 1, Timeout: time.Second},
+	}, func(_ context.Context, msgs []*mono.Msg) error {
+		for _, msg := range msgs {
+			_ = msg.Ack()
+		}
+		return nil
+	})
+}
+
+// TestIntegration_StreamConsumerService_FiltersAddedAfterRestart: a caller
+// adds several FilterSubjects to a consumer that already exists. The first
+// Start after the restart succeeds, although the server answers the update of
+// a consumer it recovered from its store with the earlier configuration.
+func TestIntegration_StreamConsumerService_FiltersAddedAfterRestart(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	start := func(filters []string) (mono.MonoApplication, error) {
+		app, err := mono.NewMonoApplication(
+			mono.WithCustomLogger(&noOpsLogger{}),
+			mono.WithJetStreamStorageDir(dir),
+			mono.WithNATSDontListen(),
+			mono.WithNATSInProcessConn(),
+		)
+		if err != nil {
+			t.Fatalf("NewMonoApplication: %v", err)
+		}
+		if err := app.Register(&filteredServiceModule{filters: filters}); err != nil {
+			t.Fatalf("Register: %v", err)
+		}
+		startCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		defer cancel()
+		return app, app.Start(startCtx)
+	}
+
+	app, err := start(nil)
+	if err != nil {
+		t.Fatalf("first Start: %v", err)
+	}
+	_ = app.Stop(ctx)
+
+	filters := []string{"services.orders.ingest", "services.orders.ingest.eu"}
+	app, err = start(filters)
+	t.Cleanup(func() { _ = app.Stop(ctx) })
+	if err != nil {
+		t.Fatalf("Start with filters added: %v", err)
+	}
+	if got := consumerFilters(t, sharedStream(t, app, "orders", "ORDERS"), "orders-ingest"); !slices.Equal(got, filters) {
+		t.Errorf("filters = %v, want %v", got, filters)
+	}
+}
+
 // TestIntegration_Leftovers_RenamedConsumerModule: after the consuming module
 // of an event stream consumer is renamed, the durable of the old name is
 // reported once, with the command that removes it, and is not deleted.
@@ -663,8 +843,8 @@ func TestIntegration_Leftovers_RenamedConsumerModule(t *testing.T) {
 // TestIntegration_Leftovers_RemovedRegistrations: a removed stream consumer
 // service leaves its stream, and an event no longer registered on a shared
 // stream leaves its durable. Both are reported and kept; the remaining
-// consumer loses its filter again. What the application created itself is
-// not reported.
+// consumer keeps its filter. What the application created itself is not
+// reported.
 func TestIntegration_Leftovers_RemovedRegistrations(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
@@ -716,8 +896,10 @@ func TestIntegration_Leftovers_RemovedRegistrations(t *testing.T) {
 	if info, err := sharedStream(t, app, "billing", "ORDERS").Info(ctx); err != nil || info == nil {
 		t.Errorf("the stream ORDERS must not be deleted: %v", err)
 	}
-	if filters := consumerFilters(t, events, alphaDurable); len(filters) != 0 {
-		t.Errorf("consumer %s still has filters %v after the stream is no longer shared", alphaDurable, filters)
+	// The remaining consumer keeps the filter it was given while the stream
+	// was shared: the stream may still hold the removed event's messages.
+	if filters := consumerFilters(t, events, alphaDurable); !slices.Equal(filters, []string{sharedAlpha.Subject}) {
+		t.Errorf("filters of %s = %v after the stream is no longer shared, want %v", alphaDurable, filters, []string{sharedAlpha.Subject})
 	}
 	stop()
 

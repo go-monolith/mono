@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"time"
 
 	"github.com/go-monolith/mono/internal/jsprotect"
@@ -112,6 +113,11 @@ func (j *NatsJetStream) CreateOrUpdateConsumer(ctx context.Context, streamName s
 
 	// Create or update the consumer
 	consumer, err := stream.CreateOrUpdateConsumer(ctx, jsCfg)
+	if errors.Is(err, jetstream.ErrConsumerMultipleFilterSubjectsNotSupported) {
+		consumer, err = AppliedDespiteStaleAnswer(ctx, jsCfg, err, func(ctx context.Context, name string) (jetstream.Consumer, error) {
+			return stream.Consumer(ctx, name)
+		})
+	}
 	if err != nil {
 		return nil, fmt.Errorf("failed to create/update consumer on stream %s: %w", streamName, err)
 	}
@@ -310,6 +316,11 @@ func (j *NatsJetStream) UpdateConsumer(ctx context.Context, streamName string, c
 		return nil, fmt.Errorf("failed to convert consumer config %s on stream %s: %w", cfg.Name, streamName, err)
 	}
 	consumer, err := j.js.UpdateConsumer(ctx, streamName, jsCfg)
+	if errors.Is(err, jetstream.ErrConsumerMultipleFilterSubjectsNotSupported) {
+		consumer, err = AppliedDespiteStaleAnswer(ctx, jsCfg, err, func(ctx context.Context, name string) (jetstream.Consumer, error) {
+			return j.js.Consumer(ctx, streamName, name)
+		})
+	}
 	if err != nil {
 		return nil, fmt.Errorf("failed to update consumer %s on stream %s: %w", cfg.Name, streamName, err)
 	}
@@ -378,4 +389,46 @@ func (j *NatsJetStream) Ready(ctx context.Context) error {
 // consumer could be checked.
 func (j *NatsJetStream) ProtectConsumers(ctx context.Context, d time.Duration) (int, bool) {
 	return jsprotect.Protect(ctx, j.js, d)
+}
+
+// AppliedDespiteStaleAnswer decides what a consumer create or update that
+// failed with jetstream.ErrConsumerMultipleFilterSubjectsNotSupported really
+// did. nats.go returns that error when the answer to a request with several
+// FilterSubjects does not carry them. A server that recovered the consumer
+// from its store answers the first create or update after its start with the
+// configuration from before the request, although it applied the request, so
+// the first Start after a restart that adds several filters to an existing
+// consumer would fail and the next one succeed.
+//
+// The consumer is read back with lookup. When its filters are the requested
+// ones the update was applied and the consumer is returned; otherwise
+// updateErr is returned, so a server that really lacks the feature still
+// fails.
+func AppliedDespiteStaleAnswer(
+	ctx context.Context,
+	requested jetstream.ConsumerConfig,
+	updateErr error,
+	lookup func(ctx context.Context, name string) (jetstream.Consumer, error),
+) (jetstream.Consumer, error) {
+	name := requested.Durable
+	if name == "" {
+		name = requested.Name
+	}
+	consumer, err := lookup(ctx, name)
+	if err != nil {
+		return nil, fmt.Errorf("%w (reading the consumer back failed: %w)", updateErr, err)
+	}
+	info := consumer.CachedInfo()
+	if info == nil || !sameSubjects(info.Config.FilterSubjects, requested.FilterSubjects) {
+		return nil, updateErr
+	}
+	return consumer, nil
+}
+
+// sameSubjects reports whether a and b hold the same subjects, in any order.
+func sameSubjects(a, b []string) bool {
+	x, y := slices.Clone(a), slices.Clone(b)
+	slices.Sort(x)
+	slices.Sort(y)
+	return slices.Equal(x, y)
 }

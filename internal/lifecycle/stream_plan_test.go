@@ -363,8 +363,24 @@ func TestStreamPlan_FilterConsumer(t *testing.T) {
 			if got.MaxDeliver != 7 {
 				t.Errorf("MaxDeliver = %d, the rest of the configuration must be kept", got.MaxDeliver)
 			}
+			// Only a filter the framework set is marked as such.
+			frameworkSet := hasSubjectFilter(got) && !hasSubjectFilter(tt.cfg)
+			if marked := got.Metadata[FilterMetadataKey] == FilterMetadataValue; marked != frameworkSet {
+				t.Errorf("filter marker = %v, want %v (metadata %v)", marked, frameworkSet, got.Metadata)
+			}
 		})
 	}
+
+	t.Run("the caller's metadata map is not modified", func(t *testing.T) {
+		caller := map[string]string{"team": "orders"}
+		got := plan.FilterConsumer("SHARED", []string{"services.orders.second"}, types.ConsumerConfig{Metadata: caller})
+		if got.Metadata["team"] != "orders" || got.Metadata[FilterMetadataKey] != FilterMetadataValue {
+			t.Errorf("metadata = %v, want the caller's entry and the marker", got.Metadata)
+		}
+		if len(caller) != 1 {
+			t.Errorf("the caller's map was modified: %v", caller)
+		}
+	})
 }
 
 func TestWithRegistrationMarker(t *testing.T) {
@@ -473,6 +489,11 @@ func TestStreamPlan_FilterExistingConsumers(t *testing.T) {
 		}
 		if second.Durable != "orders-second" || second.FilterSubject != "services.orders.second" || len(second.FilterSubjects) != 0 {
 			t.Errorf("update of orders-second = %+v", second)
+		}
+		for _, update := range stream.updates {
+			if update.Metadata[FilterMetadataKey] != FilterMetadataValue {
+				t.Errorf("update of %s is not marked as filtered by the framework: %v", update.Durable, update.Metadata)
+			}
 		}
 		if slices.Contains(stream.lookups, "orders-audit") {
 			t.Error("a consumer whose caller set a filter must not be looked up")
@@ -830,4 +851,178 @@ func TestLifecycleManager_SharedStreamPlannedBeforeFirstWrite(t *testing.T) {
 			t.Fatalf("Stop: %v", err)
 		}
 	}
+}
+
+func TestKeepRegistrationFilter(t *testing.T) {
+	own := []string{"services.orders.ingest", "services.orders.ingest.>"}
+	tests := []struct {
+		name         string
+		cfg          types.ConsumerConfig
+		existing     jetstream.ConsumerConfig
+		own          []string
+		wantSubject  string
+		wantSubjects []string
+	}{
+		{name: "the registration's own filters are kept", own: own,
+			existing:     jetstream.ConsumerConfig{FilterSubjects: []string{"services.orders.ingest.>", "services.orders.ingest"}},
+			wantSubjects: own},
+		{name: "a single own filter is kept", own: []string{"events.a"},
+			existing: jetstream.ConsumerConfig{FilterSubject: "events.a"}, wantSubject: "events.a"},
+		{name: "an unfiltered consumer stays unfiltered", own: own},
+		{name: "another filter is not kept", own: own, existing: jetstream.ConsumerConfig{FilterSubject: "services.orders.ingest"}},
+		{name: "an unmarked filter on other subjects was the caller's and is not kept", own: []string{"events.b"},
+			existing: jetstream.ConsumerConfig{FilterSubject: "events.a"}},
+		{name: "a marked filter follows the registration's new subjects", own: []string{"events.a", "events.c"},
+			existing: jetstream.ConsumerConfig{FilterSubject: "events.a",
+				Metadata: map[string]string{FilterMetadataKey: FilterMetadataValue}},
+			wantSubjects: []string{"events.a", "events.c"}},
+		{name: "a marker without a filter keeps nothing", own: []string{"events.a"},
+			existing: jetstream.ConsumerConfig{Metadata: map[string]string{FilterMetadataKey: FilterMetadataValue}}},
+		{name: "the configured filter wins", own: []string{"events.a"}, cfg: types.ConsumerConfig{FilterSubject: "caller"},
+			existing: jetstream.ConsumerConfig{FilterSubject: "events.a"}, wantSubject: "caller"},
+		{name: "a registration without subjects", existing: jetstream.ConsumerConfig{}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tt.cfg.MaxDeliver = 7
+			got := KeepRegistrationFilter(tt.cfg, tt.existing, tt.own)
+			if got.FilterSubject != tt.wantSubject || !slices.Equal(got.FilterSubjects, tt.wantSubjects) {
+				t.Errorf("filters = %q / %v, want %q / %v", got.FilterSubject, got.FilterSubjects, tt.wantSubject, tt.wantSubjects)
+			}
+			if got.MaxDeliver != 7 {
+				t.Error("the rest of the configuration must be kept")
+			}
+			kept := hasSubjectFilter(got) && !hasSubjectFilter(tt.cfg)
+			if marked := got.Metadata[FilterMetadataKey] == FilterMetadataValue; marked != kept {
+				t.Errorf("filter marker = %v, want %v", marked, kept)
+			}
+		})
+	}
+}
+
+func TestKeepExistingFilter(t *testing.T) {
+	own := []string{"events.a"}
+	cfg := types.ConsumerConfig{Name: "billing-a", Durable: "billing-a"}
+	filtered := func() *planTestStream {
+		return &planTestStream{consumers: map[string]*jetstream.ConsumerInfo{
+			"billing-a": {Config: jetstream.ConsumerConfig{Durable: "billing-a", FilterSubject: "events.a"}},
+		}}
+	}
+
+	t.Run("keeps the filter of the existing consumer", func(t *testing.T) {
+		got, err := KeepExistingFilter(context.Background(), filtered(), own, cfg)
+		if err != nil || got.FilterSubject != "events.a" {
+			t.Fatalf("got filter %q, error %v", got.FilterSubject, err)
+		}
+	})
+
+	t.Run("makes no request without a stream handle or with a configured filter", func(t *testing.T) {
+		if got, err := KeepExistingFilter(context.Background(), nil, own, cfg); err != nil || hasSubjectFilter(got) {
+			t.Fatalf("nil stream: filter %q, error %v", got.FilterSubject, err)
+		}
+		stream := filtered()
+		configured := cfg
+		configured.FilterSubject = "caller"
+		got, err := KeepExistingFilter(context.Background(), stream, own, configured)
+		if err != nil || got.FilterSubject != "caller" || len(stream.lookups) != 0 {
+			t.Fatalf("configured filter: filter %q, error %v, lookups %v", got.FilterSubject, err, stream.lookups)
+		}
+	})
+
+	t.Run("a consumer that does not exist or has no info leaves the configuration unchanged", func(t *testing.T) {
+		for name, stream := range map[string]*planTestStream{
+			"missing": {consumers: map[string]*jetstream.ConsumerInfo{}},
+			"no info": {consumers: map[string]*jetstream.ConsumerInfo{"billing-a": nil}},
+		} {
+			if got, err := KeepExistingFilter(context.Background(), stream, own, cfg); err != nil || hasSubjectFilter(got) {
+				t.Errorf("%s: filter %q, error %v", name, got.FilterSubject, err)
+			}
+		}
+	})
+
+	t.Run("a failed lookup is returned", func(t *testing.T) {
+		boom := errors.New("no responders")
+		_, err := KeepExistingFilter(context.Background(), &planTestStream{lookupErr: boom}, own, cfg)
+		if !errors.Is(err, boom) {
+			t.Fatalf("error = %v, want %v", err, boom)
+		}
+	})
+}
+
+// Both setup paths keep the registration's own filter on a consumer that has
+// it, once its stream is no longer shared.
+func TestSetupStreamConsumers_KeepFilterAfterSharing(t *testing.T) {
+	t.Run("stream consumer service", func(t *testing.T) {
+		store := &streamConsumerStore{newFakeCronStore()}
+		store.consumer = &jetstream.ConsumerInfo{Config: jetstream.ConsumerConfig{
+			Name: "orders-ingest", Durable: "orders-ingest",
+			FilterSubjects: []string{"services.orders.ingest", "services.orders.ingest.>"},
+		}}
+		lm, _ := newReadyTestManager(store)
+		entry := planService("orders", "ingest", "ORDERS", "services.orders.ingest", "services.orders.ingest.>")
+		cfg := types.ConsumerConfig{Name: "orders-ingest", Durable: "orders-ingest", AckPolicy: types.AckExplicitPolicy}
+		if _, err := lm.ensureStreamConsumer(context.Background(), store, "ORDERS", cfg, entry); err != nil {
+			t.Fatalf("ensureStreamConsumer: %v", err)
+		}
+		if len(store.configs) != 1 || !slices.Equal(store.configs[0].FilterSubjects, []string{"services.orders.ingest", "services.orders.ingest.>"}) {
+			t.Errorf("consumer configurations sent = %+v, want the filters kept", store.configs)
+		}
+	})
+
+	t.Run("stream consumer service converted from a non-durable consumer", func(t *testing.T) {
+		store := &streamConsumerStore{newFakeCronStore()}
+		store.consumer = &jetstream.ConsumerInfo{Config: jetstream.ConsumerConfig{
+			Name:           "orders-ingest",
+			FilterSubjects: []string{"services.orders.ingest", "services.orders.ingest.>"},
+		}}
+		lm, _ := newReadyTestManager(store)
+		entry := planService("orders", "ingest", "ORDERS", "services.orders.ingest", "services.orders.ingest.>")
+		cfg := types.ConsumerConfig{Name: "orders-ingest", Durable: "orders-ingest", AckPolicy: types.AckExplicitPolicy}
+		if _, err := lm.ensureStreamConsumer(context.Background(), store, "ORDERS", cfg, entry); err != nil {
+			t.Fatalf("ensureStreamConsumer: %v", err)
+		}
+		if len(store.configs) != 2 {
+			t.Fatalf("consumer configurations sent = %+v, want the two updates of a conversion", store.configs)
+		}
+		for i, sent := range store.configs {
+			if !slices.Equal(sent.FilterSubjects, []string{"services.orders.ingest", "services.orders.ingest.>"}) ||
+				sent.Metadata[FilterMetadataKey] != FilterMetadataValue {
+				t.Errorf("update %d = filters %v, metadata %v; want the filters kept and marked", i, sent.FilterSubjects, sent.Metadata)
+			}
+		}
+	})
+
+	t.Run("event stream consumer", func(t *testing.T) {
+		entry := streamEntry("billing", "EVENTS", paymentProcessedV1)
+		durable := "billing-billing-PaymentProcessed-v1"
+		es := &recordingEventStream{stream: &planTestStream{consumers: map[string]*jetstream.ConsumerInfo{
+			durable: {Config: jetstream.ConsumerConfig{Durable: durable, FilterSubject: paymentProcessedV1.Subject}},
+		}}}
+		lm, _ := newMigrationTestManager(es)
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		lm.runtimeCtx = ctx
+		if err := lm.setupEventStreamConsumer(ctx, entry, eventStreamDurable{name: durable}); err != nil {
+			t.Fatalf("setupEventStreamConsumer: %v", err)
+		}
+		for _, stop := range lm.streamConsumers {
+			stop()
+		}
+		if len(es.consumers) != 1 || es.consumers[0].FilterSubject != paymentProcessedV1.Subject {
+			t.Errorf("consumer configurations sent = %+v, want the filter kept", es.consumers)
+		}
+	})
+
+	t.Run("event stream consumer, failed lookup", func(t *testing.T) {
+		es := &recordingEventStream{stream: &planTestStream{lookupErr: errors.New("no responders")}}
+		lm, _ := newMigrationTestManager(es)
+		err := lm.setupEventStreamConsumer(context.Background(), streamEntry("billing", "EVENTS", paymentProcessedV1),
+			eventStreamDurable{name: "billing-billing-PaymentProcessed-v1"})
+		if err == nil || !strings.Contains(err.Error(), "failed to look up consumer") {
+			t.Fatalf("error = %v, want the lookup failure", err)
+		}
+		if len(es.consumers) != 0 {
+			t.Error("the consumer must not be written without knowing its filter")
+		}
+	})
 }

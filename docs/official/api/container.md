@@ -400,7 +400,7 @@ Details:
 - **Other stream settings** (`MaxAge`, limits, `Description`) are not merged. Every registration writes them, and the one set up last wins. Services are set up in name order, modules first by name, then event stream consumers in registration order, so the result is the same on every start. Give the registrations of one stream the same settings.
 - **`Storage` and work-queue retention** must agree across the registrations of a stream, or `Start` fails with `ErrStreamConfigImmutable` (see above).
 - **Work-queue streams** accept one consumer per subject. Registrations with different subjects can share one; registrations whose subjects are the same or cover each other cannot.
-- **When a stream stops being shared** (the other registrations are removed), the remaining consumers lose their filter again. Messages of a removed registration that are still stored after a consumer's position are then delivered to it. Purge them first if a handler must not see them (`nats stream purge <stream> --subject <subject>`).
+- **When a stream stops being shared** (the other registrations are removed), the remaining consumers keep the filter on their own subjects, also when those subjects change. The stream may still hold the removed registrations' messages, and they are not delivered to the remaining handlers. To free the space, purge them (`nats stream purge <stream> --subject <subject>`).
 - **Rolling deploy from an earlier version:** an instance of the earlier version that starts later overwrites the subjects again, until every instance runs v0.2.13 or later. The next start of a newer instance repairs them.
 
 ### Renaming or Removing a Stream Registration
