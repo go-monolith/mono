@@ -59,6 +59,7 @@ type lifecycleManager struct {
 	strictBoundaries           bool                          // reject boundary violations instead of recording them
 	boundaries                 map[string]*boundary.Recorder // boundary observations by module, for ModuleBoundaries
 	moduleBuses                map[string]types.EventBus     // the scoped event bus handed to each module
+	cronProgressInterval       time.Duration                 // interval of the in-progress signal of a running cron handler (0 = default)
 }
 
 // subscriptionRecord ties a framework-managed subscription to the worker pool
@@ -2435,8 +2436,15 @@ func (lm *lifecycleManager) runCronConsumerLoop(ctx context.Context, consumer je
 
 // dispatchCronTick invokes the cron handler and acknowledges the occurrence on
 // the handler's behalf: Ack on nil, Nak on error (including a recovered panic).
+// While the handler runs the server is told that the occurrence is in
+// progress, so one that takes longer than AckWait is not delivered again
+// (see KeepCronOccurrence).
 func (lm *lifecycleManager) dispatchCronTick(ctx context.Context, entry *types.ServiceEntry, msg *types.Msg) {
-	if err := lm.invokeCronHandler(ctx, entry, msg); err != nil {
+	stopProgress := KeepCronOccurrence(msg, lm.cronProgressEvery(), lm.logger,
+		"service", entry.Name, "module", entry.ModuleName, "subject", entry.Subject)
+	err := lm.invokeCronHandler(ctx, entry, msg)
+	stopProgress()
+	if err != nil {
 		lm.logger.Error("Cron handler error",
 			append([]any{"service", entry.Name, "module", entry.ModuleName, "subject", entry.Subject}, handlerErrorFields(err)...)...)
 		if nakErr := msg.Nak(); nakErr != nil {
