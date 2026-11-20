@@ -404,28 +404,35 @@ func (m *AccessLogModule) wrapEventConsumerHandler(
 			reqID = requestid.GetRequestID(ctx)
 		}
 
+		// The line is written when the handler returns and also when it
+		// panics: a deferred function runs in both cases. The panic is not
+		// recovered here, so it reaches the framework with its own stack.
+		completed := false
+		var err error
+		defer func() {
+			duration := time.Since(start)
+			status := StatusSuccess
+			if err != nil || !completed {
+				status = StatusError
+			}
+
+			entry := Entry{
+				Timestamp:   start.UTC(),
+				RequestID:   reqID,
+				Module:      moduleName,
+				Service:     eventName,
+				ServiceType: "event_consumer",
+				DurationMS:  duration.Milliseconds(),
+				Status:      status,
+				RequestSize: requestSize,
+				// ResponseSize is 0 for event_consumer (no response)
+			}
+			m.writeEntry(entry)
+		}()
+
 		// Call the original handler
-		err := original(ctx, msg)
-
-		duration := time.Since(start)
-		status := StatusSuccess
-		if err != nil {
-			status = StatusError
-		}
-
-		entry := Entry{
-			Timestamp:   start.UTC(),
-			RequestID:   reqID,
-			Module:      moduleName,
-			Service:     eventName,
-			ServiceType: "event_consumer",
-			DurationMS:  duration.Milliseconds(),
-			Status:      status,
-			RequestSize: requestSize,
-			// ResponseSize is 0 for event_consumer (no response)
-		}
-		m.writeEntry(entry)
-
+		err = original(ctx, msg)
+		completed = true
 		return err
 	}
 }
@@ -442,28 +449,36 @@ func (m *AccessLogModule) wrapRequestReplyHandler(
 		if requestID == "" {
 			requestID = requestid.GetRequestID(ctx)
 		}
+		// The line is written when the handler returns and also when it
+		// panics: a deferred function runs in both cases. The panic is not
+		// recovered here, so it reaches the framework with its own stack.
+		completed := false
+		var response []byte
+		var err error
+		defer func() {
+			duration := time.Since(start)
+			status := StatusSuccess
+			if err != nil || !completed {
+				status = StatusError
+			}
+
+			entry := Entry{
+				Timestamp:    start.UTC(),
+				RequestID:    requestID,
+				Module:       moduleName,
+				Service:      serviceName,
+				ServiceType:  "request_reply",
+				DurationMS:   duration.Milliseconds(),
+				Status:       status,
+				RequestSize:  requestSize,
+				ResponseSize: len(response),
+			}
+			m.writeEntry(entry)
+		}()
+
 		// Call the original handler
-		response, err := original(ctx, req)
-
-		duration := time.Since(start)
-		status := StatusSuccess
-		if err != nil {
-			status = StatusError
-		}
-
-		entry := Entry{
-			Timestamp:    start.UTC(),
-			RequestID:    requestID,
-			Module:       moduleName,
-			Service:      serviceName,
-			ServiceType:  "request_reply",
-			DurationMS:   duration.Milliseconds(),
-			Status:       status,
-			RequestSize:  requestSize,
-			ResponseSize: len(response),
-		}
-		m.writeEntry(entry)
-
+		response, err = original(ctx, req)
+		completed = true
 		return response, err
 	}
 }
@@ -478,28 +493,35 @@ func (m *AccessLogModule) wrapQueueGroupHandler(
 		requestSize := len(msg.Data)
 		requestID := m.extractRequestID(msg)
 
+		// The line is written when the handler returns and also when it
+		// panics: a deferred function runs in both cases. The panic is not
+		// recovered here, so it reaches the framework with its own stack.
+		completed := false
+		var err error
+		defer func() {
+			duration := time.Since(start)
+			status := StatusSuccess
+			if err != nil || !completed {
+				status = StatusError
+			}
+
+			entry := Entry{
+				Timestamp:   start.UTC(),
+				RequestID:   requestID,
+				Module:      moduleName,
+				Service:     serviceName,
+				ServiceType: "queue_group",
+				DurationMS:  duration.Milliseconds(),
+				Status:      status,
+				RequestSize: requestSize,
+				// ResponseSize is 0 for queue_group (fire-and-forget)
+			}
+			m.writeEntry(entry)
+		}()
+
 		// Call the original handler
-		err := original(ctx, msg)
-
-		duration := time.Since(start)
-		status := StatusSuccess
-		if err != nil {
-			status = StatusError
-		}
-
-		entry := Entry{
-			Timestamp:   start.UTC(),
-			RequestID:   requestID,
-			Module:      moduleName,
-			Service:     serviceName,
-			ServiceType: "queue_group",
-			DurationMS:  duration.Milliseconds(),
-			Status:      status,
-			RequestSize: requestSize,
-			// ResponseSize is 0 for queue_group (fire-and-forget)
-		}
-		m.writeEntry(entry)
-
+		err = original(ctx, msg)
+		completed = true
 		return err
 	}
 }
@@ -525,28 +547,35 @@ func (m *AccessLogModule) wrapStreamConsumerHandler(
 			requestID = m.extractRequestID(msgs[0])
 		}
 
+		// The line is written when the handler returns and also when it
+		// panics: a deferred function runs in both cases. The panic is not
+		// recovered here, so it reaches the framework with its own stack.
+		completed := false
+		var err error
+		defer func() {
+			duration := time.Since(start)
+			status := StatusSuccess
+			if err != nil || !completed {
+				status = StatusError
+			}
+
+			entry := Entry{
+				Timestamp:   start.UTC(),
+				RequestID:   requestID,
+				Module:      moduleName,
+				Service:     serviceName,
+				ServiceType: "stream_consumer",
+				DurationMS:  duration.Milliseconds(),
+				Status:      status,
+				RequestSize: requestSize,
+				// ResponseSize is 0 for stream_consumer
+			}
+			m.writeEntry(entry)
+		}()
+
 		// Call the original handler
-		err := original(ctx, msgs)
-
-		duration := time.Since(start)
-		status := StatusSuccess
-		if err != nil {
-			status = StatusError
-		}
-
-		entry := Entry{
-			Timestamp:   start.UTC(),
-			RequestID:   requestID,
-			Module:      moduleName,
-			Service:     serviceName,
-			ServiceType: "stream_consumer",
-			DurationMS:  duration.Milliseconds(),
-			Status:      status,
-			RequestSize: requestSize,
-			// ResponseSize is 0 for stream_consumer
-		}
-		m.writeEntry(entry)
-
+		err = original(ctx, msgs)
+		completed = true
 		return err
 	}
 }
@@ -575,28 +604,35 @@ func (m *AccessLogModule) wrapEventStreamConsumerHandler(
 			requestID = requestid.GetRequestID(ctx)
 		}
 
+		// The line is written when the handler returns and also when it
+		// panics: a deferred function runs in both cases. The panic is not
+		// recovered here, so it reaches the framework with its own stack.
+		completed := false
+		var err error
+		defer func() {
+			duration := time.Since(start)
+			status := StatusSuccess
+			if err != nil || !completed {
+				status = StatusError
+			}
+
+			entry := Entry{
+				Timestamp:   start.UTC(),
+				RequestID:   requestID,
+				Module:      moduleName,
+				Service:     eventName,
+				ServiceType: "event_stream_consumer",
+				DurationMS:  duration.Milliseconds(),
+				Status:      status,
+				RequestSize: requestSize,
+				// ResponseSize is 0 for event_stream_consumer
+			}
+			m.writeEntry(entry)
+		}()
+
 		// Call the original handler
-		err := original(ctx, msgs)
-
-		duration := time.Since(start)
-		status := StatusSuccess
-		if err != nil {
-			status = StatusError
-		}
-
-		entry := Entry{
-			Timestamp:   start.UTC(),
-			RequestID:   requestID,
-			Module:      moduleName,
-			Service:     eventName,
-			ServiceType: "event_stream_consumer",
-			DurationMS:  duration.Milliseconds(),
-			Status:      status,
-			RequestSize: requestSize,
-			// ResponseSize is 0 for event_stream_consumer
-		}
-		m.writeEntry(entry)
-
+		err = original(ctx, msgs)
+		completed = true
 		return err
 	}
 }

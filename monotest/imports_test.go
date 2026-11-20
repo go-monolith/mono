@@ -389,3 +389,23 @@ func TestImportViolationsStopWithTheContext(t *testing.T) {
 		t.Fatalf("expected an error naming the cancelled context, got %v", err)
 	}
 }
+
+// A pattern is an argument of the go command: one that starts with "-" would
+// be read as a flag of it (-toolexec makes it run a program).
+func TestImportViolationsRefuseAPatternThatIsAFlag(t *testing.T) {
+	useShop(t)
+	marker := filepath.Join(t.TempDir(), "ran")
+	for _, pattern := range []string{"-toolexec=touch " + marker, "-mod=mod", "--", "-", ""} {
+		_, err := monotest.ImportViolations(context.Background(), monotest.WithImportDir(shopDir), monotest.WithImportPatterns(pattern, "./..."))
+		if err == nil || !strings.Contains(err.Error(), "is not a package pattern") {
+			t.Errorf("pattern %q: err = %v, want it refused", pattern, err)
+		}
+	}
+	if _, err := os.Stat(marker); err == nil {
+		t.Fatal("the go command ran the program named in a pattern")
+	}
+	// Patterns that only contain a dash are fine.
+	if _, err := monotest.ImportViolations(context.Background(), monotest.WithImportDir(shopDir), monotest.WithImportPatterns("./...")); err != nil {
+		t.Fatalf("./...: %v", err)
+	}
+}
