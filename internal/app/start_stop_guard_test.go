@@ -382,3 +382,76 @@ func TestStop_DuringStop(t *testing.T) {
 		t.Errorf("Stop after Stop = %v, want already stopped", err)
 	}
 }
+
+// A Stop that arrives while a failed Start is already stopping what it had
+// started bounds that rollback too: it ends when the Stop's context does, at
+// its deadline or when the caller cancels it, so that the server is not
+// stopped under modules that are still being stopped.
+func TestStop_DuringStart_BoundsRunningRollback(t *testing.T) {
+	startFailed := errors.New("module failed to start")
+	tests := []struct {
+		name string
+		// stopContext returns the context Stop is called with, and what ends it.
+		stopContext func() (context.Context, context.CancelFunc, func())
+	}{
+		{
+			name: "at the deadline of the Stop",
+			stopContext: func() (context.Context, context.CancelFunc, func()) {
+				ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+				return ctx, cancel, func() {}
+			},
+		},
+		{
+			name: "when the caller cancels the Stop",
+			stopContext: func() (context.Context, context.CancelFunc, func()) {
+				ctx, cancel := context.WithCancel(context.Background())
+				return ctx, cancel, func() {
+					time.AfterFunc(50*time.Millisecond, cancel)
+				}
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rollingBack := make(chan struct{})
+			rollbackEnded := make(chan time.Time, 1)
+			lm := &GuardLifecycle{}
+			lm.StartFunc = func(ctx context.Context) error {
+				// The start failed by itself and is stopping its modules,
+				// which take until their context ends.
+				rollback, release := lifecycle.RollbackContext(ctx)
+				defer release()
+				close(rollingBack)
+				<-rollback.Done()
+				rollbackEnded <- time.Now()
+				return startFailed
+			}
+			// A shutdown timeout the test would not survive: the rollback
+			// must be bounded by the Stop, not by it.
+			fw := NewGuardApp(lm, time.Hour)
+
+			startErr := make(chan error, 1)
+			go func() { startErr <- fw.Start(context.Background()) }()
+			<-rollingBack
+
+			ctx, cancel, arm := tt.stopContext()
+			defer cancel()
+			arm()
+			begin := time.Now()
+			if err := fw.Stop(ctx); err != nil {
+				t.Errorf("Stop = %v, want nil: the start returned within its grace", err)
+			}
+			if took := time.Since(begin); took > AbortGrace {
+				t.Errorf("Stop took %s, want the rollback to end with its context", took)
+			}
+			select {
+			case <-rollbackEnded:
+			default:
+				t.Error("Stop returned before the rollback had ended")
+			}
+			if err := <-startErr; !errors.Is(err, startFailed) || !errors.Is(err, context.Canceled) {
+				t.Errorf("Start = %v, want the start's error and context.Canceled", err)
+			}
+		})
+	}
+}

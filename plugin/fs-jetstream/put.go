@@ -101,7 +101,8 @@ func (k *KeyedMutex) Lock(ctx context.Context, key string) (func(), error) {
 //
 // A reader that blocks cannot be interrupted: the upload, and with it every
 // later upload or delete of that name, waits until the Read returns. The
-// callers that wait give up with their own context.
+// callers that wait give up with their own context; the variants without one
+// (Set, PutReader, Delete, Reset) wait for as long as it takes.
 //
 // A nil reader stores an empty object, as the store does.
 //

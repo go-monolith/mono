@@ -58,9 +58,9 @@ Starts plugins, middleware and all registered modules in dependency order (the e
 - `application is already starting` for a second `Start` while one is running, and `application is stopping, cannot start` during `Stop`. Only one `Start` runs at a time.
 - An error wrapping `context.Canceled` when `Stop` was called while `Start` was running (see [`Stop`](#stop)).
 
-When `Start` fails, what it had started is stopped with a context of its own, not with `ctx`: `ctx` has usually ended by then, and a module's `Stop` given an ended context would skip its cleanup. That context is bounded by the shutdown timeout ([`WithShutdownTimeout`](#withshutdowntimeout), default 30 seconds) or, when a `Stop` aborted the start, by the deadline of that `Stop`.
+When `Start` fails, what it had started is stopped with a context of its own, not with `ctx`: `ctx` has usually ended by then, and a module's `Stop` given an ended context would skip its cleanup. That context is bounded by the shutdown timeout ([`WithShutdownTimeout`](#withshutdowntimeout), default 30 seconds). A `Stop` that aborts the start hands over its own bound: the stopping ends when that `Stop`'s context does.
 
-The context a module's `Start` receives stays live after `Start` has returned, so a module may keep it for the goroutines it starts. It ends once `Stop` has finished.
+The context a module's `Start` receives is derived from `ctx` and stays live after `Start` has returned, so a module may keep it for the goroutines it starts. It ends once `Stop` has finished, or when `ctx` ends.
 
 #### Stop
 
@@ -79,7 +79,7 @@ The configured shutdown timeout bounds the whole operation when `ctx` has no dea
 
 **Calls that overlap** (since v0.2.17; before, each of them ran, see the [upgrade guide](../guides/upgrading.md#start-and-stop-are-guarded-against-each-other-v0217)):
 
-- **`Stop` while `Start` is running** (a termination signal during a slow start) aborts the start: the context the modules are started with is cancelled, `Start` stops what it had started and returns an error wrapping `context.Canceled`, and only then is NATS stopped. This holds also when the modules ignored the cancellation and all of them started. `Stop` waits for `Start` within its own context; when that ends first, `Stop` stops NATS anyway and returns an error saying that the start did not return.
+- **`Stop` while `Start` is running** (a termination signal during a slow start) aborts the start: the context the modules are started with is cancelled, `Start` stops what it had started and returns an error wrapping `context.Canceled`, and only then is NATS stopped. This holds also when the modules ignored the cancellation and all of them started. `Stop` waits for `Start` within its own context and two seconds beyond it; a start that has not returned by then is left behind, and `Stop` stops NATS and returns an error saying that the start did not return.
 - **`Stop` while another `Stop` is running** waits for it and returns its result. It does not stop NATS under the handlers the first one is waiting for.
 - **`Stop` after `Stop` has finished** returns `application already stopped`.
 

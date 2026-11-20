@@ -222,8 +222,13 @@ func (fw *frameworkApplication) Plugin(alias string) types.PluginModule {
 // when the modules did not react to the cancellation and all of them started.
 //
 // What a failed or aborted Start had started is stopped with a context of its
-// own, bounded by ShutdownTimeout (30 seconds without one) or, when a Stop
-// aborted the start, by the deadline of that Stop.
+// own, bounded by ShutdownTimeout (30 seconds without one). A Stop that
+// aborts the start hands over its own bound: the stopping ends when that
+// Stop's context does. A start that returns only after that Stop has given
+// up waiting has the whole timeout again.
+//
+// The context the modules are started with is derived from ctx. It stays live
+// after a Start that succeeded, until Stop has finished or ctx ends.
 func (fw *frameworkApplication) Start(ctx context.Context) error {
 	fw.mu.Lock()
 	switch fw.state {
@@ -293,8 +298,9 @@ func (fw *frameworkApplication) Start(ctx context.Context) error {
 // module started regardless. In that case nothing was rolled back, and the
 // Stop that is waiting only stops the NATS server, so the lifecycle is
 // stopped here, with the budget a rollback has (startCtx carries it): it ends
-// when that Stop stops waiting. An error of that stop is kept for the Stop
-// (abortErr), which would otherwise report success.
+// when that Stop's context does, or has the whole timeout when that Stop has
+// given up already. An error of that stop is kept for the Stop (abortErr),
+// which would otherwise report success.
 //
 // The returned error always wraps context.Canceled, whatever the modules
 // returned when their context was cancelled.
@@ -337,10 +343,14 @@ func (fw *frameworkApplication) shutdownContext(ctx context.Context) (context.Co
 // stopping the NATS server under the handlers the first one is still waiting
 // for. A Stop after one has finished fails ("application already stopped").
 //
-// A Stop called while Start is running aborts the start (see Start) and waits,
-// within ctx, until Start has stopped what it had started, before it stops
-// the NATS server. Stop must not be called from a module's own Start or Stop:
-// it would wait for itself until ctx ends.
+// A Stop called while Start is running aborts the start (see Start) and waits
+// until Start has stopped what it had started, before it stops the NATS
+// server. It waits within ctx and AbortGrace beyond it; a start that has not
+// returned by then is left behind, the server is stopped and an error says
+// so. Errors of the modules the aborted start stopped are logged, as for any
+// failed Start; Stop returns one only when the start had completed and was
+// stopped as a whole. Stop must not be called from a module's own Start or
+// Stop: it would wait for itself until ctx ends.
 func (fw *frameworkApplication) Stop(ctx context.Context) error {
 	defer finalizeShutdown(fw.logger)
 
@@ -361,6 +371,14 @@ func (fw *frameworkApplication) Stop(ctx context.Context) error {
 	}
 	previous := fw.state
 	startCancel, startDone, startBudget := fw.startCancel, fw.startDone, fw.startBudget
+	if previous == types.StateStarting {
+		// What the start stops, it stops until this Stop stops waiting for
+		// it. Handed over before the state changes hands, so that a Start
+		// that returns in this moment already finds it.
+		if deadline, ok := ctx.Deadline(); ok {
+			startBudget.SetDeadline(deadline)
+		}
+	}
 	fw.state = types.StateStopping
 	done := make(chan struct{})
 	fw.stopDone = done
@@ -379,11 +397,11 @@ func (fw *frameworkApplication) Stop(ctx context.Context) error {
 		// Abort the start and wait until it has stopped what it started:
 		// stopping the NATS server first would pull it from under modules
 		// that are still starting or being stopped.
-		// What the start stops, it stops until this Stop stops waiting.
 		fw.logger.Info("Stop called while starting; aborting the start")
-		if deadline, ok := ctx.Deadline(); ok {
-			startBudget.SetDeadline(deadline)
-		}
+		// A context that ends before its deadline (cancelled by the caller)
+		// ends the waiting just the same.
+		stopHandOver := context.AfterFunc(ctx, func() { startBudget.SetDeadline(time.Now()) })
+		defer stopHandOver()
 		startCancel()
 		if fw.waitForAbortedStart(ctx, startDone) {
 			fw.mu.RLock()

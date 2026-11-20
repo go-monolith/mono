@@ -29,7 +29,8 @@ type JetStreamBackend struct {
 	bucketTTL  time.Duration
 	store      jetstream.ObjectStore
 	logger     *slog.Logger
-	// puts serialises the uploads of one object name (see PutObject).
+	// puts serialises the uploads and deletes of one object name (see
+	// PutObject and DeleteObject).
 	puts KeyedMutex
 }
 
