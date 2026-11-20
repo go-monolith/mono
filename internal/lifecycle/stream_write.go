@@ -164,10 +164,9 @@ func (lm *lifecycleManager) ExplainStreamWriteError(ctx context.Context, es type
 // the stream's limit (StreamConfig.ConsumerLimits.MaxAckPending), and returns
 // how many it changed. Nothing else of a consumer is changed.
 //
-// It changes something only when that alone lets the stream be written, so
-// that a Start that fails anyway leaves every consumer as it was (an instance
-// of the previous version may still be pulling from it). Nothing is lowered
-// when:
+// Nothing is changed unless every violator qualifies, so that a Start that
+// cannot succeed leaves every consumer as it was (an instance of the
+// previous version may still be pulling from it). Nothing is lowered when:
 //
 //   - one of the violators is not the durable of a registration of the
 //     stream: another application's consumer, or one left behind by a renamed
@@ -178,7 +177,9 @@ func (lm *lifecycleManager) ExplainStreamWriteError(ctx context.Context, es type
 //
 // Lowering MaxAckPending only slows delivery down, and each registration
 // sends its own value right after its stream is written, which the server
-// then holds to the limit. A violator that is gone by now is skipped.
+// then holds to the limit. A violator that is gone by now is skipped. Once
+// the updates have begun, one that fails leaves the consumers before it
+// lowered; the next start lowers the rest.
 func (lm *lifecycleManager) LowerMaxAckPending(ctx context.Context, es types.EventStream, cfg types.StreamConfig, violators []string) (int, error) {
 	limit := cfg.ConsumerLimits.MaxAckPending
 	planned := lm.streamPlan.Stream(cfg.Name)
