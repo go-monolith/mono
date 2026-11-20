@@ -79,11 +79,15 @@ func NewFatalCapture(logger types.Logger, forward server.Logger) *FatalCapture {
 	return &FatalCapture{
 		logger:  logger.With("component", "nats-server"),
 		forward: forward,
-		fatal:   make(chan string, 1),
+		fatal:   make(chan string, fatalBacklog),
 	}
 }
 
-// Fatal delivers the first fatal message the server reports.
+// fatalBacklog is how many fatal messages are kept for Fatal until they are
+// read; more than that are logged and kept as Last only.
+const fatalBacklog = 16
+
+// Fatal delivers the fatal messages the server reports, in order.
 func (c *FatalCapture) Fatal() <-chan string { return c.fatal }
 
 // Last returns the last fatal message, or "" when there was none.

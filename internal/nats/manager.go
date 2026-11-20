@@ -787,45 +787,40 @@ func ListenAddress(addr net.Addr, fallbackHost string, fallbackPort int) (string
 	return tcp.IP.String(), tcp.Port
 }
 
-// fatalReadyGrace is how long a server that reported a fatal message is
-// still given to become ready. Not everything nats-server calls fatal stops
-// it from starting (a profiling port that is in use does not), and such a
-// server started before the message was captured; one that cannot listen
-// never becomes ready.
-const fatalReadyGrace = time.Second
+// IsListenFailure reports whether a fatal message of the server says that
+// one of its listeners could not be opened (the client port, or a route,
+// gateway, leafnode, websocket or MQTT port). The server waits for every
+// configured listener before it is ready, so after such a message it never
+// is. Other messages the server calls fatal do not all stop it from starting
+// (a profiling port that is in use does not).
+func IsListenFailure(message string) bool {
+	return strings.HasPrefix(message, "Error listening on") || strings.HasPrefix(message, "Unable to listen for")
+}
 
-// AwaitServerReady waits until ns accepts connections. It returns an error
-// with the server's fatal message when the server reported one and is not
-// ready fatalReadyGrace later, without waiting for the whole timeout, and an
-// error when the server is not ready after timeout.
+// AwaitServerReady waits until ns accepts connections, for at most timeout.
+// When the server reports that a listener could not be opened, it returns
+// that at once instead of waiting for a readiness that cannot come. Any
+// other fatal message does not end the wait: the server may start all the
+// same, however long it takes (the message is logged, and is the reason
+// given when the server is not ready in time).
 func AwaitServerReady(ns *server.Server, fatal *FatalCapture, timeout time.Duration) error {
 	ready := make(chan bool, 1)
 	go func() { ready <- ns.ReadyForConnections(timeout) }()
 
-	failed := func() error {
-		if reason := fatal.Last(); reason != "" {
-			return fmt.Errorf("NATS server failed to start: %s", RedactURLText(reason))
+	for {
+		select {
+		case ok := <-ready:
+			if ok {
+				return nil
+			}
+			if reason := fatal.Last(); reason != "" {
+				return fmt.Errorf("NATS server failed to start: %s", RedactURLText(reason))
+			}
+			return fmt.Errorf("NATS server not ready after %s timeout", timeout)
+		case reason := <-fatal.Fatal():
+			if IsListenFailure(reason) {
+				return fmt.Errorf("NATS server failed to start: %s", RedactURLText(reason))
+			}
 		}
-		return fmt.Errorf("NATS server not ready after %s timeout", timeout)
-	}
-	select {
-	case ok := <-ready:
-		if !ok {
-			return failed()
-		}
-		return nil
-	case <-fatal.Fatal():
-	}
-	grace := time.NewTimer(fatalReadyGrace)
-	defer grace.Stop()
-	select {
-	case ok := <-ready:
-		if !ok {
-			return failed()
-		}
-		// It started all the same; the message is in the log.
-		return nil
-	case <-grace.C:
-		return failed()
 	}
 }

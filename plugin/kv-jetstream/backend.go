@@ -125,7 +125,10 @@ func (b *JetStreamKVBackend) Set(key string, val []byte, exp time.Duration) erro
 // The lookup is made only for a bucket with one replica. A read of a
 // replicated bucket may be answered by a replica that has not caught up, so
 // a key written a moment ago could be reported missing and then not be
-// deleted; there the marker is written as before.
+// deleted; there the marker is written as before. The same could happen to
+// a bucket that another stream mirrors with direct access (mirror_direct),
+// which also answers reads for it: the plugin creates no such mirror, and a
+// bucket that has one should not rely on the lookup being exact.
 func (b *JetStreamKVBackend) DeleteWithContext(ctx context.Context, key string) error {
 	if b.SingleReplica(ctx) {
 		if _, err := b.kv.Get(ctx, key); errors.Is(err, jetstream.ErrKeyNotFound) {

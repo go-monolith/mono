@@ -280,7 +280,7 @@ See [A Request Always Gets a Reply](error-handling.md#a-request-always-gets-a-re
 
 ### Other fixes in v0.2.19
 
-- **A NATS server that cannot start says why.** With the port in use, `NewMonoApplication` waited the whole startup timeout and returned `NATS server not ready`. It now returns within a second with the server's reason (`Error listening on port: ... address already in use`), which is also logged.
+- **A NATS server that cannot start says why.** With the port in use, `NewMonoApplication` waited the whole startup timeout and returned `NATS server not ready`. It now returns at once with the server's reason (`Error listening on port: ... address already in use`), which is also logged.
 - **IPv6:** `WithNATSHost("::1")` works; the framework's client URL and `ServerInfo` put the address in brackets.
 - **Config file errors** no longer quote a route URL that fails to parse, which included its password.
 - **`EventBus.ChanSubscribe`** left one goroutine behind for every subscription; it now ends with the subscription. The channel is not closed (it never was). Messages delivered before an `Unsubscribe` or `Drain` are still handed over, but one that is not taken within a second is dropped with the rest, with a warning; keep reading until the channel is empty.

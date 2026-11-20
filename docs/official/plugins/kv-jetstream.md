@@ -423,7 +423,9 @@ To remove a key, use one of:
 // Delete (soft delete - leaves tombstone). In a bucket with one replica a
 // key that does not exist is left alone: no tombstone is written for it
 // (since v0.2.19). A replicated bucket is not asked first, since a replica
-// that is behind could report a key just written as missing.
+// that is behind could report a key just written as missing; the same
+// holds for a bucket you mirror with mirror_direct, where the lookup is
+// still made.
 err = bucket.Delete("user.123")
 
 // Or Purge (hard delete - removes all history)

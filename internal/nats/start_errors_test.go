@@ -75,7 +75,7 @@ func TestNATSManager_StartReportsTheServersFatalError(t *testing.T) {
 	if !strings.Contains(err.Error(), "address already in use") || !strings.Contains(err.Error(), fmt.Sprint(port)) {
 		t.Errorf("error = %v, want the server's reason and the port", err)
 	}
-	if waited := time.Since(started); waited > 5*time.Second {
+	if waited := time.Since(started); waited > 3*time.Second {
 		t.Errorf("Start waited %v for a server that had already failed", waited)
 	}
 }
@@ -316,5 +316,23 @@ func TestAwaitServerReady_FatalThatDoesNotStopTheServer(t *testing.T) {
 	defer func() { _ = manager.Stop(context.Background()) }()
 	if !logger.hasMessage("ERROR", "[FATAL]") {
 		t.Error("the server's message was not logged")
+	}
+}
+
+func TestIsListenFailure(t *testing.T) {
+	for message, want := range map[string]bool{
+		`Error listening on port: 127.0.0.1:4222, "listen tcp 127.0.0.1:4222: bind: address already in use"`: true,
+		"Error listening on router port: 6222 - bind: address already in use":                                true,
+		"Error listening on leafnode port: 7422 - x":                                                         true,
+		"Error listening on gateway port: 7222 - x":                                                          true,
+		"Unable to listen for websocket connections: x":                                                      true,
+		"Unable to listen for MQTT connections: x":                                                           true,
+		"error starting profiler: listen tcp :6060: bind: address already in use":                            false,
+		"Can't start JetStream: storage directory is not writable":                                           false,
+		"": false,
+	} {
+		if got := IsListenFailure(message); got != want {
+			t.Errorf("IsListenFailure(%q) = %v, want %v", message, got, want)
+		}
 	}
 }
