@@ -63,15 +63,16 @@ func TestDispatcherErrorHeadersAndPanics(t *testing.T) {
 		t.Errorf("a panicking handler still counts as a run")
 	}
 
-	// A nil response is not answered, as in the framework: the caller times out.
+	// A nil response is answered with an empty reply, as in the framework.
 	client, err = c.GetRequestReplyService("nil-reply")
 	if err != nil {
 		t.Fatal(err)
 	}
-	shortCtx, cancel := context.WithTimeout(ctx, 100*time.Millisecond)
+	shortCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
-	if _, err := client.Call(shortCtx, nil); err == nil {
-		t.Fatal("expected a timeout for a nil response")
+	reply, err := client.Call(shortCtx, nil)
+	if err != nil || len(reply.Data) != 0 {
+		t.Fatalf("a nil response: reply = %v, err = %v, want an empty reply", reply, err)
 	}
 }
 

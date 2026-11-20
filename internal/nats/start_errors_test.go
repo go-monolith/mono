@@ -114,6 +114,10 @@ func TestNATSManager_ConfigFileRouteErrorHidesCredentials(t *testing.T) {
 		"hash":            "nats://admin:s3cr#et@10.0.0.1:6222",
 		"at and bad port": "nats://admin:s3cr@et@10.0.0.1:notaport",
 		"space":           "nats://admin:s3cr et@10.0.0.1:6222",
+		// Without a scheme the error holds no "://".
+		"no scheme":         "route_admin:s3cret@10.0.0.1:6222",
+		"no scheme, digit":  "1admin:s3cret@10.0.0.1:6222",
+		"scheme-less slash": "//admin:s3cr%zzet@10.0.0.1:6222",
 	} {
 		t.Run(name, func(t *testing.T) {
 			port, err := findAvailablePort()
@@ -212,6 +216,13 @@ func TestRedactConfigError(t *testing.T) {
 		`nats.conf:4:13: error parsing route url ["nats://admin:s3cr et@10.0.0.1:6222"]`,
 		`nats://admin:hunter2@host`)
 	got := RedactConfigError(in).Error()
+	// The parser's marker is enough, also for a URL without a scheme.
+	if got := RedactURLText(`nats.conf:4:13: error parsing route url ["route_admin:s3cret@10.0.0.1:6222"]`); strings.Contains(got, "s3cret") || !strings.Contains(got, "error parsing route url") {
+		t.Fatalf("scheme-less URL: %s", got)
+	}
+	if got := RedactURLText("Error listening on port: 127.0.0.1:4222"); got != "Error listening on port: 127.0.0.1:4222" {
+		t.Fatalf("a message without a URL was changed: %s", got)
+	}
 	for _, secret := range []string{"s3cr", "et@", "hunter2", "admin"} {
 		if strings.Contains(got, secret) {
 			t.Fatalf("redacted error still holds %q: %s", secret, got)
@@ -277,5 +288,33 @@ func TestClusterCAFileOfConfig(t *testing.T) {
 	}
 	if _, err := ClusterCAFileOfConfig(filepath.Join(t.TempDir(), "missing.conf")); err == nil {
 		t.Error("a missing file is not an error")
+	}
+}
+
+// TestAwaitServerReady_FatalThatDoesNotStopTheServer: not every message the
+// server calls fatal keeps it from starting (a profiling port in use). Such
+// a server started before the message was captured, and still does.
+func TestAwaitServerReady_FatalThatDoesNotStopTheServer(t *testing.T) {
+	busy, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = busy.Close() }()
+	port, err := findAvailablePort()
+	if err != nil {
+		t.Fatal(err)
+	}
+	logger := newMockLogger()
+	conf := fmt.Sprintf("prof_port: %d\n", busy.Addr().(*net.TCPAddr).Port)
+	manager, err := NewNATSManager(logger, WithPort(port), WithInProcessConn(), WithConfigFile(writeConfigFile(t, conf)))
+	if err != nil {
+		t.Fatalf("NewNATSManager() error = %v", err)
+	}
+	if err := manager.Start(context.Background()); err != nil {
+		t.Fatalf("Start() with a profiling port that is in use: %v", err)
+	}
+	defer func() { _ = manager.Stop(context.Background()) }()
+	if !logger.hasMessage("ERROR", "[FATAL]") {
+		t.Error("the server's message was not logged")
 	}
 }

@@ -221,11 +221,11 @@ func ClusterCAFileOfConfig(path string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("failed to parse NATS config file %q: %w", path, RedactConfigError(err))
 	}
-	cluster, ok := configBlock(m, "cluster")
+	cluster, ok := ConfigBlock(m, "cluster")
 	if !ok {
 		return "", nil
 	}
-	tlsBlock, ok := configBlock(cluster, "tls")
+	tlsBlock, ok := ConfigBlock(cluster, "tls")
 	if !ok {
 		return "", nil
 	}
@@ -239,9 +239,9 @@ func ClusterCAFileOfConfig(path string) (string, error) {
 	return "", nil
 }
 
-// configBlock returns the block named name (case-insensitive) of a parsed
+// ConfigBlock returns the block named name (case-insensitive) of a parsed
 // config map.
-func configBlock(m map[string]any, name string) (map[string]any, bool) {
+func ConfigBlock(m map[string]any, name string) (map[string]any, bool) {
 	for k, v := range m {
 		if strings.EqualFold(k, name) {
 			block, ok := v.(map[string]any)

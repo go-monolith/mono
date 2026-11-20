@@ -492,7 +492,7 @@ func completeBackup[T any](ctx context.Context, s Spec[T], backup string, info *
 			return false, err
 		}
 		if done {
-			if err := checkNothingSkipped(ctx, s, backupStream, backup, streamName, info.State.LastSeq); err != nil {
+			if err := CheckNothingSkipped(ctx, s, backupStream, backup, streamName, info.State.LastSeq); err != nil {
 				return false, err
 			}
 			bcfg := binfo.Config
@@ -520,7 +520,7 @@ func completeBackup[T any](ctx context.Context, s Spec[T], backup string, info *
 	}
 }
 
-// checkNothingSkipped refuses a backup that holds fewer messages than the
+// CheckNothingSkipped refuses a backup that holds fewer messages than the
 // bucket. The copy counts as complete by the source sequence of the backup's
 // last message, which does not see a message skipped before it: the backup
 // stream drops a message that carries the Nats-Msg-Id of another one it
@@ -536,7 +536,7 @@ func completeBackup[T any](ctx context.Context, s Spec[T], backup string, info *
 // bucket was written to in the meantime, as by instances of another version
 // during a rolling deploy, the check is skipped, as it cannot tell a skipped
 // message from one that is yet to be copied; that case is as it was.
-func checkNothingSkipped[T any](ctx context.Context, s Spec[T], backupStream jetstream.Stream, backup, streamName string, lastSeq uint64) error {
+func CheckNothingSkipped[T any](ctx context.Context, s Spec[T], backupStream jetstream.Stream, backup, streamName string, lastSeq uint64) error {
 	cur, err := s.Streams.StreamInfo(ctx, streamName)
 	if err != nil || cur == nil {
 		// A stream that is gone, or cannot be read, is dealt with by the
@@ -553,8 +553,8 @@ func checkNothingSkipped[T any](ctx context.Context, s Spec[T], backupStream jet
 	if binfo.State.Msgs >= cur.State.Msgs {
 		return nil
 	}
-	return fmt.Errorf("backup bucket %q holds fewer messages (%d) than stream %s (%d): some were not copied, "+
-		"as happens to a message that reuses the Nats-Msg-Id of another one (the backup drops it as a duplicate). "+
+	return fmt.Errorf("backup bucket %q holds fewer messages (%d) than stream %s (%d): some were not copied. "+
+		"One possible cause is a message that reuses the Nats-Msg-Id of another one (the backup drops it as a duplicate). "+
 		"The %s cannot be backed up this way: remove stream %s by hand, or set SkipBackupOnRecreate",
 		backup, binfo.State.Msgs, streamName, cur.State.Msgs, s.Kind, streamName)
 }

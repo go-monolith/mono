@@ -375,22 +375,10 @@ func (m *natsManager) Start(ctx context.Context) error {
 	go ns.Start()
 
 	// Wait for the server to be ready, or to say that it will not be.
-	ready := make(chan bool, 1)
-	go func() { ready <- ns.ReadyForConnections(m.config.StartupReadyTimeout) }()
-	select {
-	case ok := <-ready:
-		if !ok {
-			ns.Shutdown()
-			m.server = nil
-			if reason := fatal.Last(); reason != "" {
-				return fmt.Errorf("NATS server failed to start: %s", reason)
-			}
-			return fmt.Errorf("NATS server not ready after %s timeout", m.config.StartupReadyTimeout)
-		}
-	case reason := <-fatal.Fatal():
+	if err := AwaitServerReady(ns, fatal, m.config.StartupReadyTimeout); err != nil {
 		ns.Shutdown()
 		m.server = nil
-		return fmt.Errorf("NATS server failed to start: %s", reason)
+		return err
 	}
 
 	// The address the server is listening on, not the configured one: with
@@ -797,4 +785,47 @@ func ListenAddress(addr net.Addr, fallbackHost string, fallbackPort int) (string
 		return fallbackHost, fallbackPort
 	}
 	return tcp.IP.String(), tcp.Port
+}
+
+// fatalReadyGrace is how long a server that reported a fatal message is
+// still given to become ready. Not everything nats-server calls fatal stops
+// it from starting (a profiling port that is in use does not), and such a
+// server started before the message was captured; one that cannot listen
+// never becomes ready.
+const fatalReadyGrace = time.Second
+
+// AwaitServerReady waits until ns accepts connections. It returns an error
+// with the server's fatal message when the server reported one and is not
+// ready fatalReadyGrace later, without waiting for the whole timeout, and an
+// error when the server is not ready after timeout.
+func AwaitServerReady(ns *server.Server, fatal *FatalCapture, timeout time.Duration) error {
+	ready := make(chan bool, 1)
+	go func() { ready <- ns.ReadyForConnections(timeout) }()
+
+	failed := func() error {
+		if reason := fatal.Last(); reason != "" {
+			return fmt.Errorf("NATS server failed to start: %s", RedactURLText(reason))
+		}
+		return fmt.Errorf("NATS server not ready after %s timeout", timeout)
+	}
+	select {
+	case ok := <-ready:
+		if !ok {
+			return failed()
+		}
+		return nil
+	case <-fatal.Fatal():
+	}
+	grace := time.NewTimer(fatalReadyGrace)
+	defer grace.Stop()
+	select {
+	case ok := <-ready:
+		if !ok {
+			return failed()
+		}
+		// It started all the same; the message is in the log.
+		return nil
+	case <-grace.C:
+		return failed()
+	}
 }

@@ -258,7 +258,7 @@ See [Request ID Middleware](../middleware/requestid.md#how-it-works).
 
 *v0.2.19.*
 
-- **A handler that returns `(nil, nil)`** now answers with an empty reply. Before, nothing was sent and the caller waited for its timeout. A caller that relied on that timeout to mean "no result" now gets an empty response at once.
+- **A handler that returns `(nil, nil)`** now answers with an empty reply. Before, nothing was sent and the caller waited for its timeout. A caller that relied on that timeout to mean "no result" now gets an empty response at once, and a typed call (`def.Call`, `helper.CallRequestReplyService`) fails to decode it (`unexpected end of JSON input`) instead of timing out: return a value from such a handler.
 - **A response that cannot be sent** (larger than the server's maximum payload) is answered with an error of type `reply-failed`. Before, the caller waited for its timeout.
 - **A panic** is reported to the caller as `handler panicked`; the value the handler panicked with was sent to the caller in `Mono-Error-Message` and shown in the `last_error` of the service statistics. It is in the log only now.
 - **A handler error type named like a framework type** (`OverloadedError`) is sent as `overloaded-error`. Before, it arrived as `ErrServiceOverloaded`, which means "not handled, retry", although the handler had run.
@@ -280,11 +280,11 @@ See [A Request Always Gets a Reply](error-handling.md#a-request-always-gets-a-re
 
 ### Other fixes in v0.2.19
 
-- **A NATS server that cannot start says why.** With the port in use, `NewMonoApplication` waited the whole startup timeout and returned `NATS server not ready`. It now returns at once with the server's reason (`Error listening on port: ... address already in use`), which is also logged.
+- **A NATS server that cannot start says why.** With the port in use, `NewMonoApplication` waited the whole startup timeout and returned `NATS server not ready`. It now returns within a second with the server's reason (`Error listening on port: ... address already in use`), which is also logged.
 - **IPv6:** `WithNATSHost("::1")` works; the framework's client URL and `ServerInfo` put the address in brackets.
 - **Config file errors** no longer quote a route URL that fails to parse, which included its password.
-- **`EventBus.ChanSubscribe`** left one goroutine behind for every subscription; it now ends with the subscription. The channel is not closed (it never was).
-- **kv-jetstream:** `Delete` of a key that does not exist no longer writes a delete marker (it costs one read per delete). A `Reset` that fails no longer leaves goroutines behind, and one cut short by its context returns the context's error.
+- **`EventBus.ChanSubscribe`** left one goroutine behind for every subscription; it now ends with the subscription. The channel is not closed (it never was). Messages delivered before an `Unsubscribe` or `Drain` are still handed over, but one that is not taken within a second is dropped with the rest, with a warning; keep reading until the channel is empty.
+- **kv-jetstream:** in a bucket with one replica, `Delete` of a key that does not exist no longer writes a delete marker (it costs one read per delete; a replicated bucket is deleted from as before). A `Reset` that fails no longer leaves goroutines behind, and one cut short by its context returns the context's error.
 - **Access log:** a request whose handler panics is logged, with status `error`. Two modules with a channel service of the same name no longer share one proxy entry (the first one's goroutines were never stopped).
 - **`pkg/certreload`:** the certificate files are read without holding the reloader's lock, so a file system that stalls no longer blocks every TLS handshake, and a certificate that expired without being renewed is warned about.
 - **Channel services:** a nil message on a provider's out channel is dropped with a warning; it crashed the process.

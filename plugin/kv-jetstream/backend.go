@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sync/atomic"
 	"time"
 
 	"github.com/go-monolith/mono/pkg/storage"
@@ -26,6 +27,9 @@ type JetStreamKVBackend struct {
 	bucketTTL  time.Duration
 	kv         jetstream.KeyValue
 	logger     *slog.Logger
+	// replicas is the bucket's replica count once it was read from its
+	// status (0: not read yet); see SingleReplica.
+	replicas atomic.Int32
 }
 
 // Compile-time interface checks.
@@ -117,11 +121,18 @@ func (b *JetStreamKVBackend) Set(key string, val []byte, exp time.Duration) erro
 // marker whether or not there is anything to delete, so every delete of a
 // missing key added a message to the bucket that Reset does not reclaim. The
 // key is therefore looked up first, which costs one read per delete.
+//
+// The lookup is made only for a bucket with one replica. A read of a
+// replicated bucket may be answered by a replica that has not caught up, so
+// a key written a moment ago could be reported missing and then not be
+// deleted; there the marker is written as before.
 func (b *JetStreamKVBackend) DeleteWithContext(ctx context.Context, key string) error {
-	if _, err := b.kv.Get(ctx, key); errors.Is(err, jetstream.ErrKeyNotFound) {
-		return nil
+	if b.SingleReplica(ctx) {
+		if _, err := b.kv.Get(ctx, key); errors.Is(err, jetstream.ErrKeyNotFound) {
+			return nil
+		}
+		// Any other lookup error is left to the delete to report.
 	}
-	// Any other lookup error is left to the delete to report.
 	if err := b.kv.Delete(ctx, key); err != nil {
 		if errors.Is(err, jetstream.ErrKeyNotFound) {
 			return nil // Key not found is not an error per storage.Storage contract
@@ -129,6 +140,33 @@ func (b *JetStreamKVBackend) DeleteWithContext(ctx context.Context, key string) 
 		return fmt.Errorf("failed to delete key %s: %w", key, err)
 	}
 	return nil
+}
+
+// SingleReplica reports whether the bucket is known to have one replica,
+// which is read from the bucket's status once. While the status cannot be
+// read the answer is no, and it is asked again.
+func (b *JetStreamKVBackend) SingleReplica(ctx context.Context) bool {
+	switch b.replicas.Load() {
+	case 0:
+	case 1:
+		return true
+	default:
+		return false
+	}
+	status, err := b.kv.Status(ctx)
+	if err != nil {
+		return false
+	}
+	bucket, ok := status.(*jetstream.KeyValueBucketStatus)
+	if !ok || bucket.StreamInfo() == nil {
+		return false
+	}
+	replicas := bucket.StreamInfo().Config.Replicas
+	if replicas < 1 {
+		replicas = 1
+	}
+	b.replicas.Store(int32(replicas)) //nolint:gosec // G115: a stream has at most 5 replicas
+	return replicas == 1
 }
 
 // Delete deletes the value for the given key.

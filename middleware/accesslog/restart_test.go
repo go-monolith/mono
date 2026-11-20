@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/go-monolith/mono/pkg/types"
 )
@@ -132,5 +133,42 @@ func TestChannelProxiesOfTwoModulesWithOneServiceName(t *testing.T) {
 		if p.ctx.Err() == nil {
 			t.Errorf("the proxy of %s/%s was not stopped", p.moduleName, p.serviceName)
 		}
+	}
+}
+
+// TestChannelProxyForwardsANilMessage: a nil message on a channel service
+// has nothing to log. The proxies used to dereference it in a goroutine
+// nothing recovers; they pass it on, and the channel router drops it.
+func TestChannelProxyForwardsANilMessage(t *testing.T) {
+	buf := &syncWriter{}
+	m, err := New(WithOutput(buf))
+	if err != nil {
+		t.Fatal(err)
+	}
+	in, out := make(chan *types.Msg, 2), make(chan *types.Msg, 2)
+	proxyIn, proxyOut := m.wrapChannelService(in, out, "orders", "jobs")
+	defer func() { _ = m.Stop(context.Background()) }()
+
+	// Towards the provider.
+	proxyIn <- nil
+	proxyIn <- &types.Msg{Data: []byte("request")}
+	// From the provider.
+	out <- nil
+	out <- &types.Msg{Data: []byte("response")}
+
+	for name, ch := range map[string]chan *types.Msg{"provider": in, "consumer": proxyOut} {
+		for i, wantNil := range []bool{true, false} {
+			select {
+			case msg := <-ch:
+				if (msg == nil) != wantNil {
+					t.Fatalf("%s: message %d = %v", name, i, msg)
+				}
+			case <-time.After(2 * time.Second):
+				t.Fatalf("%s: message %d was not forwarded", name, i)
+			}
+		}
+	}
+	if lines := buf.Lines(); len(lines) != 2 {
+		t.Fatalf("%d lines logged, want one per real message", len(lines))
 	}
 }

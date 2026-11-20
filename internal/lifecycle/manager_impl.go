@@ -693,12 +693,12 @@ func frameworkErrorReply(reply, errorType, message string) *types.Msg {
 //
 // It returns true when the pool accepted the job.
 func submitToPool(pool *workerpool.Pool, eventBus types.EventBus, logger types.Logger, reporter *overloadReporter, msg *types.Msg, job workerpool.Job) bool {
-	return submitToPoolWait(pool, eventBus, logger, reporter, msg, job, msg.Reply == "")
+	return SubmitToPoolWait(pool, eventBus, logger, reporter, msg, job, msg.Reply == "")
 }
 
-// submitToPoolWait is submitToPool with the choice whether the caller waits
+// SubmitToPoolWait is submitToPool with the choice whether the caller waits
 // for room in the pool.
-func submitToPoolWait(pool *workerpool.Pool, eventBus types.EventBus, logger types.Logger, reporter *overloadReporter, msg *types.Msg, job workerpool.Job, wait bool) bool {
+func SubmitToPoolWait(pool *workerpool.Pool, eventBus types.EventBus, logger types.Logger, reporter *overloadReporter, msg *types.Msg, job workerpool.Job, wait bool) bool {
 	err := pool.Submit(job, wait)
 	if err == nil {
 		return true
@@ -1300,7 +1300,7 @@ func (lm *lifecycleManager) setupNATSSubscriptions(ctx context.Context) error {
 				// Create NATS request-reply subscription with queue group for "at most one" delivery
 				sub, err := eventBus.QueueSubscribe(entry.Subject, queueGroup, func(reqCtx context.Context, msg *types.Msg) {
 					arrival := time.Now()
-					submitRequestToPool(pool, eventBus, logger, reporter, msg, func() { handleRequest(reqCtx, msg, arrival) })
+					SubmitRequestToPool(pool, eventBus, logger, reporter, msg, func() { handleRequest(reqCtx, msg, arrival) })
 				})
 				if err != nil {
 					return fmt.Errorf("failed to subscribe to %s: %w", entry.Subject, err)

@@ -274,9 +274,18 @@ func (eb *natsEventBus) ChanSubscribe(subject string, ch chan *types.Msg) (types
 	// It only signals: it runs under the subscription's lock.
 	ended := make(chan struct{})
 	var once sync.Once
-	natsSub.SetClosedHandler(func(string) { once.Do(func() { close(ended) }) })
+	end := func() { once.Do(func() { close(ended) }) }
+	natsSub.SetClosedHandler(func(string) { end() })
+	// A subscription that ended before the handler was set (the connection
+	// closed in between) never calls it.
+	if !natsSub.IsValid() {
+		end()
+	}
 
-	go ForwardChanSubscription(natsCh, ch, ended)
+	go ForwardChanSubscription(natsCh, ch, ended, func(dropped int) {
+		eb.logger.Warn("Messages of a channel subscription that has ended were not taken and are dropped",
+			"subject", subject, "dropped", dropped, "waited", chanForwardGrace)
+	})
 
 	return wrapSubscription(natsSub), nil
 }
@@ -284,8 +293,9 @@ func (eb *natsEventBus) ChanSubscribe(subject string, ch chan *types.Msg) (types
 // ForwardChanSubscription forwards the messages of a channel subscription
 // from in to out until ended is closed, then hands over what is still in in
 // and returns. A message the caller does not take within chanForwardGrace
-// once the subscription has ended is given up, with the rest.
-func ForwardChanSubscription(in <-chan *nats.Msg, out chan<- *types.Msg, ended <-chan struct{}) {
+// once the subscription has ended is given up, with the rest; their number
+// is reported to dropped (nil: not reported).
+func ForwardChanSubscription(in <-chan *nats.Msg, out chan<- *types.Msg, ended <-chan struct{}, dropped func(n int)) {
 	convert := func(natsMsg *nats.Msg) *types.Msg {
 		return &types.Msg{
 			Subject: natsMsg.Subject,
@@ -293,6 +303,17 @@ func ForwardChanSubscription(in <-chan *nats.Msg, out chan<- *types.Msg, ended <
 			Data:    natsMsg.Data,
 			Header:  types.Header(natsMsg.Header),
 		}
+	}
+	// handOver gives the caller a message of a subscription that has
+	// ended, and reports whether to go on.
+	handOver := func(natsMsg *nats.Msg) bool {
+		if ForwardWithin(out, convert(natsMsg)) {
+			return true
+		}
+		if dropped != nil {
+			dropped(1 + len(in))
+		}
+		return false
 	}
 	for {
 		select {
@@ -302,7 +323,7 @@ func ForwardChanSubscription(in <-chan *nats.Msg, out chan<- *types.Msg, ended <
 			case <-ended:
 				// The caller may still be reading: give it this message and
 				// the delivered ones behind it, but do not wait for good.
-				if !forwardWithin(out, convert(natsMsg)) {
+				if !handOver(natsMsg) {
 					return
 				}
 			}
@@ -310,7 +331,7 @@ func ForwardChanSubscription(in <-chan *nats.Msg, out chan<- *types.Msg, ended <
 			for {
 				select {
 				case natsMsg := <-in:
-					if !forwardWithin(out, convert(natsMsg)) {
+					if !handOver(natsMsg) {
 						return
 					}
 				default:
@@ -321,9 +342,9 @@ func ForwardChanSubscription(in <-chan *nats.Msg, out chan<- *types.Msg, ended <
 	}
 }
 
-// forwardWithin sends msg to out and reports whether the caller took it
+// ForwardWithin sends msg to out and reports whether the caller took it
 // within chanForwardGrace.
-func forwardWithin(out chan<- *types.Msg, msg *types.Msg) bool {
+func ForwardWithin(out chan<- *types.Msg, msg *types.Msg) bool {
 	timer := time.NewTimer(chanForwardGrace)
 	defer timer.Stop()
 	select {

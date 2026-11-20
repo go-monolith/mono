@@ -420,8 +420,10 @@ fmt.Printf("Value: %s, Revision: %d\n", string(entry.Value), entry.Revision)
 To remove a key, use one of:
 
 ```go
-// Delete (soft delete - leaves tombstone). A key that does not exist is
-// left alone: no tombstone is written for it (since v0.2.19).
+// Delete (soft delete - leaves tombstone). In a bucket with one replica a
+// key that does not exist is left alone: no tombstone is written for it
+// (since v0.2.19). A replicated bucket is not asked first, since a replica
+// that is behind could report a key just written as missing.
 err = bucket.Delete("user.123")
 
 // Or Purge (hard delete - removes all history)

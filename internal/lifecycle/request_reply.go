@@ -82,13 +82,13 @@ func (r *overloadReporter) replyless() {
 		r.withFields("messages", n)...)
 }
 
-// submitRequestToPool hands a request-reply message to the pool without ever
+// SubmitRequestToPool hands a request-reply message to the pool without ever
 // waiting for room: the subscription callback delivers the calls behind it,
 // and a call must get its overloaded answer at once. A message without a
 // reply subject cannot be answered, so when the pool is full it is dropped
 // and counted with the rejected ones (submitToPool, used for queue groups
 // and events, holds such a message back instead, which is their documented
 // back-pressure; a request-reply subject has callers waiting).
-func submitRequestToPool(pool *workerpool.Pool, eventBus types.EventBus, logger types.Logger, reporter *overloadReporter, msg *types.Msg, job workerpool.Job) bool {
-	return submitToPoolWait(pool, eventBus, logger, reporter, msg, job, false)
+func SubmitRequestToPool(pool *workerpool.Pool, eventBus types.EventBus, logger types.Logger, reporter *overloadReporter, msg *types.Msg, job workerpool.Job) bool {
+	return SubmitToPoolWait(pool, eventBus, logger, reporter, msg, job, false)
 }

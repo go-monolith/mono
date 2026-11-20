@@ -4,6 +4,7 @@ import (
 	"os"
 	"runtime"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -83,9 +84,29 @@ func TestReloader_StalledFileSystem(t *testing.T) {
 	dir := t.TempDir()
 	ca := newTestCA(t, "route-ca")
 	certFile, keyFile := ca.issue(t, dir, leaf{serial: 10, usages: both})
-	r, err := New(Config{CertFile: certFile, KeyFile: keyFile, Roots: ca.pool(), Usages: both, CheckInterval: time.Nanosecond})
+	logger := &testLogger{}
+	r, err := New(Config{CertFile: certFile, KeyFile: keyFile, Roots: ca.pool(), Usages: both, CheckInterval: time.Nanosecond, Logger: logger})
 	if err != nil {
 		t.Fatal(err)
+	}
+	var clockMu sync.Mutex
+	clock := time.Now()
+	r.now = func() time.Time {
+		clockMu.Lock()
+		defer clockMu.Unlock()
+		clock = clock.Add(time.Millisecond)
+		return clock
+	}
+	stallWarnings := func() int {
+		logger.mu.Lock()
+		defer logger.mu.Unlock()
+		n := 0
+		for _, w := range logger.warns {
+			if strings.Contains(w, "has not returned") {
+				n++
+			}
+		}
+		return n
 	}
 	certPEM, err := os.ReadFile(certFile)
 	if err != nil {
@@ -115,6 +136,20 @@ func TestReloader_StalledFileSystem(t *testing.T) {
 		case <-time.After(2 * time.Second):
 			t.Fatal("a handshake waited behind the stalled read of the certificate file")
 		}
+	}
+
+	if stallWarnings() != 0 {
+		t.Fatal("a check that has only just begun was reported as stalled")
+	}
+	// It has been reading for a while: said once, not per handshake.
+	clockMu.Lock()
+	clock = clock.Add(2 * StalledCheckAfter)
+	clockMu.Unlock()
+	for i := 0; i < 5; i++ {
+		r.Certificate()
+	}
+	if got := stallWarnings(); got != 1 {
+		t.Fatalf("%d warnings about the stalled read, want 1", got)
 	}
 
 	// The file system answers again.

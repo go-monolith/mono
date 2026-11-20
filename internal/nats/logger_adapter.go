@@ -142,30 +142,55 @@ func (c *FatalCapture) Tracef(format string, v ...any) {
 	}
 }
 
-// RedactConfigError returns err unless its text holds a URL: a route,
+// RedactConfigError returns err unless its text may hold a URL: a route,
 // gateway or leafnode URL the config file parser rejects is quoted in its
 // error, credentials included. Such a line is cut before the URL, which is
 // malformed and so cannot be parsed to remove the password from it; the file
-// position at its start says where to look.
+// position at its start says where to look. The returned error carries the
+// text only.
 func RedactConfigError(err error) error {
 	if err == nil {
 		return nil
 	}
 	text := err.Error()
-	if !strings.Contains(text, "://") {
+	redacted := RedactURLText(text)
+	if redacted == text {
 		return err
+	}
+	return errors.New(redacted)
+}
+
+// urlErrorMarker is how nats-server introduces a URL it could not parse
+// ("error parsing route url [...]"), whatever the URL looks like.
+const urlErrorMarker = " url ["
+
+// urlNotShown replaces what is cut from a line.
+const urlNotShown = " (the URL is not shown: it may hold credentials)"
+
+// RedactURLText cuts every line of text before a URL it may quote: after
+// the parser's own marker for a URL it rejected (which need not have a
+// scheme: "user:pass@host:6222" is rejected for its first colon), and before
+// anything with "://" in it.
+func RedactURLText(text string) string {
+	if !strings.Contains(text, "://") && !strings.Contains(text, urlErrorMarker) {
+		return text
 	}
 	lines := strings.Split(text, "\n")
 	for i, line := range lines {
-		at := strings.Index(line, "://")
-		if at < 0 {
+		cut := -1
+		if at := strings.Index(line, urlErrorMarker); at >= 0 {
+			cut = at + len(" url")
+		}
+		if at := strings.Index(line, "://"); at >= 0 {
+			before := max(strings.LastIndexByte(line[:at], ' '), 0)
+			if cut < 0 || before < cut {
+				cut = before
+			}
+		}
+		if cut < 0 {
 			continue
 		}
-		cut := strings.LastIndexByte(line[:at], ' ')
-		if cut < 0 {
-			cut = 0
-		}
-		lines[i] = strings.TrimRight(line[:cut], " ") + " (the URL is not shown: it may hold credentials)"
+		lines[i] = strings.TrimRight(line[:cut], " ") + urlNotShown
 	}
-	return errors.New(strings.Join(lines, "\n"))
+	return strings.Join(lines, "\n")
 }

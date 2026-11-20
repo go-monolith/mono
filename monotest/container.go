@@ -175,10 +175,8 @@ func (c *Container) dispatchRequestReply(_ context.Context, entry *types.Service
 		case err != nil:
 			pubErr = c.bus.PublishMsg(errorReply(msg.Reply, err))
 		case response == nil:
-			// The framework sends nothing for a nil response, so the caller
-			// times out; do the same and say why.
-			c.logger.Error("monotest: handler returned a nil response, no reply sent; in production the caller times out",
-				"service", name)
+			// The framework answers a nil response with an empty reply.
+			pubErr = c.bus.Publish(msg.Reply, []byte{})
 		default:
 			pubErr = c.bus.Publish(msg.Reply, response)
 		}
@@ -244,16 +242,27 @@ func (e *handlerPanicError) Error() string { return fmt.Sprintf("handler panic: 
 
 // errorReply builds the error response the framework sends for a handler
 // error: Mono-Error, Mono-Error-Message and Mono-Error-Type (the error's type
-// name, lower-cased and without the Error suffix; a recovered panic maps to
-// the framework's handler-panic type).
+// name, lower-cased and without the Error suffix, and with the suffix -error
+// when that would be one of the framework's own types). A recovered panic
+// maps to the framework's handler-panic type and the fixed text the
+// framework sends for it: the panic value stays in the log.
 func errorReply(reply string, err error) *types.Msg {
+	message := err.Error()
+	_, isPanic := err.(*handlerPanicError)
+	if isPanic {
+		message = "handler panicked"
+	}
 	header := types.Header{
 		types.HeaderError:        []string{"true"},
-		types.HeaderErrorMessage: []string{err.Error()},
+		types.HeaderErrorMessage: []string{message},
 	}
-	if _, isPanic := err.(*handlerPanicError); isPanic {
+	if isPanic {
 		header[types.HeaderErrorType] = []string{types.ErrorTypeHandlerPanic}
 	} else if name := errorTypeName(err); name != "" {
+		switch name {
+		case types.ErrorTypeOverloaded, types.ErrorTypeShuttingDown, types.ErrorTypeHandlerPanic, types.ErrorTypeReplyFailed:
+			name += "-error"
+		}
 		header[types.HeaderErrorType] = []string{name}
 	}
 	return &types.Msg{Subject: reply, Header: header}

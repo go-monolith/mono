@@ -97,8 +97,12 @@ type Reloader struct {
 	cert    *tls.Certificate
 	digest  [sha256.Size]byte // of the certificate and key files' contents
 	checked time.Time
-	// checking is set while one caller reads the files (without the lock).
-	checking bool
+	// checking is set while one caller reads the files (without the lock),
+	// since checkStarted. A read that never returns leaves it set: nothing
+	// is reloaded until it does, which stallWarned records being said.
+	checking     bool
+	checkStarted time.Time
+	stallWarned  time.Time
 	// expiryWarned is when the expiry of the current certificate was last
 	// warned about.
 	expiryWarned time.Time
@@ -144,13 +148,18 @@ func New(cfg Config) (*Reloader, error) {
 // update has written the certificate but not yet the key, keeps the previous
 // certificate and is retried at the next check, so a certificate is always
 // returned. Only the caller that makes a check waits for the files; callers
-// that arrive meanwhile get the current certificate at once. A certificate
+// that arrive meanwhile get the current certificate at once; a read that
+// does not return (a file system that hangs) is warned about after
+// StalledCheckAfter, and nothing is reloaded until it returns. A certificate
 // that has expired without being renewed is warned about (see
 // ExpiryWarnInterval).
 func (r *Reloader) Certificate() *tls.Certificate {
 	r.mu.Lock()
 	now := r.now()
 	if r.checking || now.Sub(r.checked) < r.cfg.CheckInterval {
+		if r.checking {
+			r.warnIfStalled(now)
+		}
 		cert := r.cert
 		r.mu.Unlock()
 		return cert
@@ -160,6 +169,7 @@ func (r *Reloader) Certificate() *tls.Certificate {
 	// one. While a check runs, the others get the current certificate.
 	r.checking = true
 	r.checked = now
+	r.checkStarted = now
 	current := r.digest
 	r.mu.Unlock()
 
@@ -204,6 +214,27 @@ func (r *Reloader) load(current [sha256.Size]byte) (cert *tls.Certificate, diges
 // ExpiryWarnInterval is the least time between two warnings that the
 // certificate being served has expired.
 const ExpiryWarnInterval = time.Hour
+
+// StalledCheckAfter is how long a check of the files may run before it is
+// warned about (at most every ExpiryWarnInterval). Until it returns the
+// certificate is not reloaded.
+const StalledCheckAfter = time.Minute
+
+// warnIfStalled warns that the check of the files has not returned, and,
+// as that check cannot, that the certificate has expired. Called with the
+// lock held, by the callers that find a check in progress.
+func (r *Reloader) warnIfStalled(now time.Time) {
+	if now.Sub(r.checkStarted) < StalledCheckAfter {
+		return
+	}
+	r.warnIfExpired(now)
+	if r.cfg.Logger == nil || (!r.stallWarned.IsZero() && now.Sub(r.stallWarned) < ExpiryWarnInterval) {
+		return
+	}
+	r.stallWarned = now
+	r.cfg.Logger.Warn("Reading the "+r.cfg.Name+" certificate files has not returned; the certificate is not reloaded until it does",
+		"cert_file", r.cfg.CertFile, "key_file", r.cfg.KeyFile, "reading_for", now.Sub(r.checkStarted))
+}
 
 // warnIfExpired warns, at most every ExpiryWarnInterval, that the
 // certificate has expired and its files still hold it. A certificate is

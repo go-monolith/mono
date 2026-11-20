@@ -119,8 +119,9 @@ func TestForwardChanSubscription_GivesUpOnACallerThatStoppedReading(t *testing.T
 		in <- &nats.Msg{Subject: "x"}
 	}
 	done := make(chan struct{})
+	droppedCount := make(chan int, 1)
 	go func() {
-		ForwardChanSubscription(in, out, ended)
+		ForwardChanSubscription(in, out, ended, func(n int) { droppedCount <- n })
 		close(done)
 	}()
 	time.Sleep(50 * time.Millisecond) // blocked handing over the first message
@@ -129,5 +130,14 @@ func TestForwardChanSubscription_GivesUpOnACallerThatStoppedReading(t *testing.T
 	case <-done:
 	case <-time.After(chanForwardGrace + 3*time.Second):
 		t.Fatal("the forwarder did not end although the subscription had")
+	}
+	// What was given up is counted, so that it can be logged.
+	select {
+	case n := <-droppedCount:
+		if n != 3 {
+			t.Fatalf("%d messages reported as dropped, want 3", n)
+		}
+	default:
+		t.Fatal("the messages given up were not reported")
 	}
 }

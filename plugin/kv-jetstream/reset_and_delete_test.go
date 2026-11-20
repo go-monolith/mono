@@ -114,3 +114,72 @@ func TestDelete_MissingKeyWritesNothing(t *testing.T) {
 		t.Fatalf("deleting one key twice wrote %d messages", after-before)
 	}
 }
+
+// ReplicatedStatusKV is a KeyValue whose Get never finds a key and whose
+// status reports three replicas, as a replica that has not caught up would
+// answer for a replicated bucket.
+type ReplicatedStatusKV struct {
+	jetstream.KeyValue
+	Replicas int
+	Gets     int
+}
+
+// Get never finds the key.
+func (k *ReplicatedStatusKV) Get(context.Context, string) (jetstream.KeyValueEntry, error) {
+	k.Gets++
+	return nil, jetstream.ErrKeyNotFound
+}
+
+// Status reports the bucket with Replicas replicas.
+func (k *ReplicatedStatusKV) Status(ctx context.Context) (jetstream.KeyValueStatus, error) {
+	status, err := k.KeyValue.Status(ctx)
+	if err != nil {
+		return nil, err
+	}
+	bucket, ok := status.(*jetstream.KeyValueBucketStatus)
+	if !ok {
+		return status, nil
+	}
+	bucket.StreamInfo().Config.Replicas = k.Replicas
+	return bucket, nil
+}
+
+// TestDelete_ReplicatedBucketIsNotLookedUp: a read of a replicated bucket
+// may be answered by a replica that is behind, so a key written a moment ago
+// could be reported missing. There the delete is made without the lookup.
+func TestDelete_ReplicatedBucketIsNotLookedUp(t *testing.T) {
+	_, js := setupBackendTestNATS(t)
+	kv := createBackendTestKV(t, js, "delete-replicated")
+	ctx := context.Background()
+	if _, err := kv.Put(ctx, "lock", []byte("held")); err != nil {
+		t.Fatal(err)
+	}
+
+	stale := &ReplicatedStatusKV{KeyValue: kv, Replicas: 3}
+	backend := NewJetStreamKVBackend("delete-replicated", stale, 0, testLogger())
+	if backend.SingleReplica(ctx) {
+		t.Fatal("a bucket with three replicas is taken for one with a single replica")
+	}
+	if err := backend.DeleteWithContext(ctx, "lock"); err != nil {
+		t.Fatal(err)
+	}
+	if stale.Gets != 0 {
+		t.Fatalf("the key was looked up %d time(s) on a replicated bucket", stale.Gets)
+	}
+	if _, err := kv.Get(ctx, "lock"); !errors.Is(err, jetstream.ErrKeyNotFound) {
+		t.Fatalf("the key was not deleted: %v", err)
+	}
+
+	// With one replica the lookup is made, and trusted.
+	single := &ReplicatedStatusKV{KeyValue: kv, Replicas: 1}
+	backend = NewJetStreamKVBackend("delete-replicated", single, 0, testLogger())
+	if !backend.SingleReplica(ctx) {
+		t.Fatal("a bucket with one replica is not recognised")
+	}
+	if err := backend.DeleteWithContext(ctx, "missing"); err != nil {
+		t.Fatal(err)
+	}
+	if single.Gets != 1 {
+		t.Fatalf("lookups = %d, want 1", single.Gets)
+	}
+}

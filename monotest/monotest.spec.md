@@ -32,7 +32,7 @@ Test support for mono modules without NATS. Implements the "monotest harness" it
 - Rule 9 ("consumed but never used") reads `ModuleBoundaryReport.UnusedContracts`, so it covers contracts of declared dependencies only (plugin containers are not observed); a contract reached on the scoped bus counts as used; `WithUnexercisedContract` exempts a contract the exercise cannot reach. Rules 5 and 9 together make `ConsumeServices()` exact for what goes through the container and the bus (JetStream publishes through `EventStream()` are not observed).
 - Rule 8 hands `Stop` a context with the stop timeout as deadline, as the framework always gives modules a live deadline; `CheckModule` forces non-strict mode so violations are recorded rather than rejected inside the module.
 - A call to a dependency service from `Start` finds no responder (`ErrServiceUnavailable`), exactly as in production, because dispatch happens after `Start`.
-- A request-reply handler returning a nil response gets no reply (the caller times out), as in the framework; the harness logs why.
+- A request-reply handler returning a nil response is answered with an empty reply, as in the framework. An error reply carries the fixed text `handler panicked` for a panic, and a handler error type whose name equals a framework error type gets the suffix `-error`, as in the framework.
 - The bus delivers a copy of each message per subscription, requires at least one token after `>`, refuses publishes and subscriptions after `Close`, and reports handler panics through `PanicHandler` and `Panics()`.
 
 ## Import rule (`CheckImports`)
