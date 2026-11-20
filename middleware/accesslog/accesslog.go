@@ -18,6 +18,7 @@ package accesslog
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -74,6 +75,9 @@ type AccessLogModule struct {
 	mu              sync.Mutex
 	shutdown        atomic.Bool
 	wg              sync.WaitGroup
+	// outputClosed is set (under mu) once Stop closed the writer: nothing
+	// can be written after that, so the module cannot be started again.
+	outputClosed bool
 
 	// Channel proxy management
 	channelProxies   map[string]*channelProxy
@@ -82,6 +86,15 @@ type AccessLogModule struct {
 
 // Ensure Module implements MiddlewareModule.
 var _ types.MiddlewareModule = (*AccessLogModule)(nil)
+
+// Ensure Module can be stopped by the rollback of a failed Start and started
+// again.
+var _ types.RollbackAwareMiddleware = (*AccessLogModule)(nil)
+
+// ErrOutputClosed is returned by Start after Stop closed the module's output.
+// A stopped module whose output was closed cannot be started again: build a
+// new one with New.
+var ErrOutputClosed = errors.New("access log output was closed by Stop")
 
 // New creates a new access log module with the given options.
 //
@@ -129,13 +142,41 @@ func (m *AccessLogModule) Name() string {
 }
 
 // Start initializes the access log module.
+//
+// It fails with ErrOutputClosed when an earlier Stop closed the output. A
+// module stopped by RollbackStart, or whose output Stop does not close
+// (os.Stdout, os.Stderr, a writer that is not an io.Closer), can be started
+// again: Start clears the shutdown state Stop left, which used to make a
+// restarted module log nothing.
 func (m *AccessLogModule) Start(_ context.Context) error {
-	// No initialization required for access log module
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.outputClosed {
+		return fmt.Errorf("access log module cannot be started again: %w", ErrOutputClosed)
+	}
+	m.shutdown.Store(false)
 	return nil
 }
 
-// Stop closes the access log module.
+// Stop stops the channel proxies, waits for the writes in flight, then
+// flushes and closes the access log (see output.FlushAndClose: os.Stdout and
+// os.Stderr are never closed).
 func (m *AccessLogModule) Stop(ctx context.Context) error {
+	return m.stop(ctx, true)
+}
+
+// RollbackStart stops the module like Stop but only flushes the access log
+// and leaves it open, so the module can be started again. The framework calls
+// it instead of Stop when the application's Start failed after this module
+// had started (types.RollbackAwareMiddleware): Stop would close the log file,
+// and the application's next Start would have nothing to write to.
+func (m *AccessLogModule) RollbackStart(ctx context.Context) error {
+	return m.stop(ctx, false)
+}
+
+// stop stops the proxies and writes, flushes the writer and, with
+// closeOutput, closes it.
+func (m *AccessLogModule) stop(ctx context.Context, closeOutput bool) error {
 	// Signal shutdown to prevent new writes
 	m.shutdown.Store(true)
 
@@ -185,8 +226,15 @@ func (m *AccessLogModule) Stop(ctx context.Context) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
+	if m.outputClosed {
+		return nil // an earlier Stop closed it
+	}
+	if !closeOutput {
+		return output.Flush(m.writer, "access log")
+	}
 	// Flush and close the writer, except os.Stdout and os.Stderr, which the
 	// rest of the process keeps using (see output.FlushAndClose).
+	m.outputClosed = output.Closes(m.writer)
 	return output.FlushAndClose(m.writer, "access log")
 }
 

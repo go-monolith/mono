@@ -48,6 +48,31 @@ func (h *HashChain) AddEntry(entry Entry) Entry {
 	return entry
 }
 
+// Next returns entry with its hashes populated as the next entry of the chain,
+// without advancing the chain. The caller writes the entry and calls Commit
+// once it is in the log: a chain that advanced over an entry that was never
+// written makes every later entry fail verification.
+//
+// Next and Commit are each thread-safe; a caller that writes from several
+// goroutines must hold its own lock from Next to Commit.
+func (h *HashChain) Next(entry Entry) Entry {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	entry.PrevHash = h.lastHash
+	entry.EntryHash = ComputeEntryHash(entry)
+	return entry
+}
+
+// Commit advances the chain to entry, which Next returned and the caller has
+// written.
+func (h *HashChain) Commit(entry Entry) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	h.lastHash = entry.EntryHash
+}
+
 // ComputeEntryHash computes the SHA-256 hash of an audit entry.
 // The hash is computed from a deterministic representation of the entry fields.
 // The EntryHash field itself is excluded from the computation.

@@ -51,6 +51,36 @@ func FlushAndClose(w io.Writer, what string) error {
 	return nil
 }
 
+// Flush flushes w without closing it, for a middleware that stops but may be
+// started again (the rollback of a failed application Start): a regular file
+// is synced, another writer when it implements Sync() error.
+func Flush(w io.Writer, what string) error {
+	if f, ok := w.(*os.File); ok {
+		if isRegular(f) {
+			if err := f.Sync(); err != nil {
+				return fmt.Errorf("failed to sync %s: %w", what, err)
+			}
+		}
+		return nil
+	}
+	if s, ok := w.(syncer); ok {
+		if err := s.Sync(); err != nil {
+			return fmt.Errorf("failed to sync %s: %w", what, err)
+		}
+	}
+	return nil
+}
+
+// Closes reports whether FlushAndClose closes w: any io.Closer but os.Stdout
+// and os.Stderr. A middleware whose writer was closed cannot write again.
+func Closes(w io.Writer) bool {
+	if f, ok := w.(*os.File); ok {
+		return !IsStdStream(f)
+	}
+	_, ok := w.(io.Closer)
+	return ok
+}
+
 // IsStdStream reports whether f is os.Stdout or os.Stderr.
 func IsStdStream(f *os.File) bool {
 	return f == os.Stdout || f == os.Stderr

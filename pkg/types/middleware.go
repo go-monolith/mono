@@ -95,6 +95,22 @@ type MiddlewareModule interface {
 	OnEventStreamConsumerRegistration(ctx context.Context, entry EventStreamConsumerEntry) EventStreamConsumerEntry
 }
 
+// RollbackAwareMiddleware is an optional interface of a MiddlewareModule that
+// must tell the rollback of a failed application Start from the final Stop.
+//
+// When Start of the application fails after a middleware's Start succeeded,
+// the framework stops that middleware again, and the application may then be
+// started once more with the same middleware. A middleware whose Stop gives
+// up something it cannot get back (the built-in audit and access log
+// middleware close the log file they were given) implements this interface:
+// the framework then calls RollbackStart instead of Stop for that rollback,
+// and Stop only when the application stops.
+type RollbackAwareMiddleware interface {
+	// RollbackStart stops the middleware after a failed application Start
+	// and leaves it able to be started again.
+	RollbackStart(ctx context.Context) error
+}
+
 // ModuleLifecycleEventType represents the type of module lifecycle event.
 type ModuleLifecycleEventType string
 

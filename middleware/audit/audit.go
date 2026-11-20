@@ -19,6 +19,7 @@ package audit
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -52,16 +53,32 @@ type AuditModule struct {
 	auditTrailIn  chan *types.Msg
 	auditTrailOut chan *types.Msg
 
-	// Lifecycle management
-	ctx      context.Context
-	cancel   context.CancelFunc
-	wg       sync.WaitGroup
-	started  bool
-	stopOnce sync.Once
+	// Lifecycle management. lifecycleMu serialises Start, Stop and
+	// RollbackStart; mu guards the fields below and every write.
+	lifecycleMu sync.Mutex
+	cancel      context.CancelFunc
+	wg          sync.WaitGroup
+	started     bool
+	// outputClosed is set once Stop closed the writer: nothing can be
+	// written after that, so the module cannot be started again.
+	outputClosed bool
 }
+
+// ErrOutputClosed is returned by Start, and for an entry that arrives, after
+// Stop closed the module's output. A stopped module whose output was closed
+// cannot be started again: build a new one with New.
+var ErrOutputClosed = errors.New("audit log output was closed by Stop")
+
+// handlerStopTimeout bounds how long Stop waits for the audit-trail handler
+// to write the entries it accepted.
+const handlerStopTimeout = 5 * time.Second
 
 // Ensure Module implements MiddlewareModule.
 var _ types.MiddlewareModule = (*AuditModule)(nil)
+
+// Ensure Module can be stopped by the rollback of a failed Start and started
+// again.
+var _ types.RollbackAwareMiddleware = (*AuditModule)(nil)
 
 // New creates a new audit module with the given options.
 //
@@ -109,7 +126,14 @@ func (m *AuditModule) Name() string {
 }
 
 // Start initializes the audit module and starts the channel handler goroutine.
+//
+// It fails when the module is already started, and with ErrOutputClosed when
+// an earlier Stop closed the output. A module stopped by RollbackStart, or
+// whose output Stop does not close (os.Stdout, os.Stderr, a writer that is
+// not an io.Closer), can be started again.
 func (m *AuditModule) Start(_ context.Context) error {
+	m.lifecycleMu.Lock()
+	defer m.lifecycleMu.Unlock()
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -117,61 +141,85 @@ func (m *AuditModule) Start(_ context.Context) error {
 	if m.started {
 		return fmt.Errorf("audit module already started")
 	}
+	if m.outputClosed {
+		return fmt.Errorf("audit module cannot be started again: %w", ErrOutputClosed)
+	}
 
 	// Create cancellable context for graceful shutdown
-	m.ctx, m.cancel = context.WithCancel(context.Background()) //nolint:gosec // G118: cancel is stored in m.cancel and called in Stop()
+	ctx, cancel := context.WithCancel(context.Background())
+	m.cancel = cancel
 
 	// Start handler goroutine for channel service
 	m.wg.Add(1)
-	go m.handleAuditTrailChannel()
+	go m.handleAuditTrailChannel(ctx)
 
 	m.started = true
 	return nil
 }
 
-// Stop flushes and closes the audit log.
-// If the writer implements io.Closer, it will be closed.
-// Stop is idempotent - multiple calls will have no effect.
-func (m *AuditModule) Stop(_ context.Context) error {
-	var stopErr error
+// Stop writes the entries the audit-trail service has accepted, then flushes
+// and closes the audit log (see output.FlushAndClose: os.Stdout and os.Stderr
+// are never closed). Stop is idempotent - multiple calls will have no effect.
+//
+// The channels of the audit-trail service are not closed: other modules send
+// on them, and a send on a closed channel panics. An entry sent after Stop is
+// not written: SaveAuditTrail waits for a confirmation until its context ends
+// and returns an error, AsyncSaveAuditTrail cannot tell.
+func (m *AuditModule) Stop(ctx context.Context) error {
+	return m.stop(ctx, true)
+}
 
-	m.stopOnce.Do(func() {
-		// Signal shutdown to handler goroutine
-		m.mu.Lock()
-		if m.cancel != nil {
-			m.cancel()
-		}
+// RollbackStart stops the module like Stop but only flushes the audit log and
+// leaves it open, so the module can be started again. The framework calls it
+// instead of Stop when the application's Start failed after this module had
+// started (types.RollbackAwareMiddleware): Stop would close the log file, and
+// the application's next Start would have nothing to write to.
+func (m *AuditModule) RollbackStart(ctx context.Context) error {
+	return m.stop(ctx, false)
+}
+
+// stop stops the handler goroutine after it wrote what it had accepted, then
+// flushes the writer and, with closeOutput, closes it.
+func (m *AuditModule) stop(ctx context.Context, closeOutput bool) error {
+	m.lifecycleMu.Lock()
+	defer m.lifecycleMu.Unlock()
+
+	m.mu.Lock()
+	if !m.started {
 		m.mu.Unlock()
+		return nil
+	}
+	cancel := m.cancel
+	m.mu.Unlock()
 
-		// Close input channel to stop receiving new requests
-		close(m.auditTrailIn)
+	// Tell the handler to stop; it first writes what is in the channel.
+	cancel()
+	done := make(chan struct{})
+	go func() {
+		m.wg.Wait()
+		close(done)
+	}()
+	var stopErr error
+	timer := time.NewTimer(handlerStopTimeout)
+	defer timer.Stop()
+	select {
+	case <-done:
+	case <-timer.C:
+		stopErr = fmt.Errorf("audit-trail handler still writing after %v; entries it accepted may not be in the log", handlerStopTimeout)
+	case <-ctx.Done():
+		stopErr = fmt.Errorf("audit-trail handler still writing when Stop was given up; entries it accepted may not be in the log: %w", ctx.Err())
+	}
 
-		// Wait for handler to complete with timeout
-		done := make(chan struct{})
-		go func() {
-			m.wg.Wait()
-			close(done)
-		}()
-
-		select {
-		case <-done:
-			// Handler exited cleanly
-		case <-time.After(5 * time.Second):
-			// Handler shutdown timeout - continue with cleanup
-		}
-
-		// Close output channel after handler completes
-		close(m.auditTrailOut)
-
-		m.mu.Lock()
-		defer m.mu.Unlock()
-
-		// Flush and close the writer, except os.Stdout and os.Stderr, which
-		// the rest of the process keeps using (see output.FlushAndClose).
-		stopErr = output.FlushAndClose(m.writer, "audit log")
-	})
-
-	return stopErr
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.started = false
+	if !closeOutput {
+		return errors.Join(stopErr, output.Flush(m.writer, "audit log"))
+	}
+	// Flush and close the writer, except os.Stdout and os.Stderr, which
+	// the rest of the process keeps using (see output.FlushAndClose).
+	m.outputClosed = output.Closes(m.writer)
+	return errors.Join(stopErr, output.FlushAndClose(m.writer, "audit log"))
 }
 
 // OnModuleLifecycle intercepts module lifecycle events and logs them.
@@ -212,7 +260,7 @@ func (m *AuditModule) OnModuleLifecycle(ctx context.Context, event types.ModuleL
 		return event
 	}
 
-	m.writeEntry(ctx, entry)
+	m.recordEntry(ctx, entry)
 	return event // Pass through unchanged
 }
 
@@ -229,7 +277,7 @@ func (m *AuditModule) OnServiceRegistration(ctx context.Context, reg types.Servi
 		},
 	}
 
-	m.writeEntry(ctx, entry)
+	m.recordEntry(ctx, entry)
 	return reg // Pass through unchanged
 }
 
@@ -248,7 +296,7 @@ func (m *AuditModule) OnConfigurationChange(ctx context.Context, event types.Con
 		},
 	}
 
-	m.writeEntry(ctx, entry)
+	m.recordEntry(ctx, entry)
 	return event // Pass through unchanged
 }
 
@@ -274,7 +322,7 @@ func (m *AuditModule) OnEventConsumerRegistration(ctx context.Context, entry typ
 			"queue_group":  entry.QueueGroup,
 		},
 	}
-	m.writeEntry(ctx, auditEntry)
+	m.recordEntry(ctx, auditEntry)
 	return entry // Pass through unchanged
 }
 
@@ -302,44 +350,58 @@ func (m *AuditModule) OnEventStreamConsumerRegistration(ctx context.Context, ent
 			"sequence_id":     entry.SequenceID,
 		},
 	}
-	m.writeEntry(ctx, auditEntry)
+	m.recordEntry(ctx, auditEntry)
 	return entry // Pass through unchanged
 }
 
-// writeEntry writes an audit entry with optional hash chaining.
-func (m *AuditModule) writeEntry(ctx context.Context, entry Entry) {
+// recordEntry writes an entry of the framework's own events. A hook has
+// nobody to return an error to, so a failed write is reported on stderr.
+func (m *AuditModule) recordEntry(ctx context.Context, entry Entry) {
+	if err := m.writeEntry(ctx, entry); err != nil {
+		fmt.Fprintf(os.Stderr, "CRITICAL: Failed to write audit entry: %v\n", err)
+	}
+}
+
+// writeEntry writes an audit entry with optional hash chaining and returns
+// the error of a write that failed.
+//
+// The chain advances only once the entry is in the log: an entry that was
+// never written must not be the predecessor of the next one, or every later
+// entry fails verification. The line and its newline go out in one Write, so
+// a failure between them cannot leave two entries on one line.
+func (m *AuditModule) writeEntry(ctx context.Context, entry Entry) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+
+	if m.outputClosed {
+		return ErrOutputClosed
+	}
 
 	// Add user context if available
 	entry.UserContext = m.userCtxFunc(ctx)
 
 	// Add hash chaining if enabled
 	if m.hashChain != nil {
-		entry = m.hashChain.AddEntry(entry)
+		entry = m.hashChain.Next(entry)
 	}
 
-	// Write to audit log as JSON
 	data, err := json.Marshal(entry)
 	if err != nil {
-		// This should not happen in practice, but log to stderr if it does
-		if _, writeErr := fmt.Fprintf(m.writer, "{\"error\":\"failed to marshal audit entry: %v\"}\n", err); writeErr != nil {
-			// Critical: Cannot write to audit log
-			fmt.Fprintf(os.Stderr, "CRITICAL: Audit log write failure: marshal_err=%v, write_err=%v\n", err, writeErr)
-			return
+		// Details that cannot be encoded: the log gets a line saying that an
+		// entry is missing here, and the chain stays where it was.
+		marshalErr := fmt.Errorf("failed to marshal audit entry: %w", err)
+		if _, writeErr := fmt.Fprintf(m.writer, "{\"error\":%q}\n", marshalErr.Error()); writeErr != nil {
+			return errors.Join(marshalErr, fmt.Errorf("failed to write audit entry: %w", writeErr))
 		}
-		return
+		return marshalErr
 	}
-
-	// Write JSON line
-	if _, err := m.writer.Write(data); err != nil {
-		fmt.Fprintf(os.Stderr, "CRITICAL: Failed to write audit entry: %v\n", err)
-		return
+	if _, err := m.writer.Write(append(data, '\n')); err != nil {
+		return fmt.Errorf("failed to write audit entry: %w", err)
 	}
-	if _, err := m.writer.Write([]byte("\n")); err != nil {
-		fmt.Fprintf(os.Stderr, "CRITICAL: Failed to write audit entry newline: %v\n", err)
-		return
+	if m.hashChain != nil {
+		m.hashChain.Commit(entry)
 	}
+	return nil
 }
 
 // RegisterServices registers the channel-based audit-trail service.
@@ -350,39 +412,68 @@ func (m *AuditModule) RegisterServices(container types.ServiceContainer) error {
 	return container.RegisterChannelService("audit-trail", m.auditTrailIn, m.auditTrailOut)
 }
 
+// responseSendTimeout bounds how long the handler waits to hand a
+// confirmation to the channel router.
+const responseSendTimeout = time.Second
+
 // handleAuditTrailChannel is the goroutine that processes channel requests
-// for custom audit trail entries.
-func (m *AuditModule) handleAuditTrailChannel() {
+// for custom audit trail entries, until ctx ends. It then writes the entries
+// still in the channel, so that what the module accepted before Stop is in
+// the log when Stop returns.
+func (m *AuditModule) handleAuditTrailChannel(ctx context.Context) {
 	defer m.wg.Done()
 
 	for {
 		select {
-		case <-m.ctx.Done():
-			// Graceful shutdown requested
+		case <-ctx.Done():
+			m.drainAuditTrail()
 			return
 
-		case msg, ok := <-m.auditTrailIn:
-			if !ok {
-				// Channel closed, exit gracefully
-				return
+		case msg := <-m.auditTrailIn:
+			if msg == nil {
+				continue
 			}
-
-			// Process the single entry
 			response := m.processAuditTrailEntry(msg)
 
 			// Only send response if this is a sync request (has Reply subject)
-			if response != nil && msg.Reply != "" {
-				// Send response with timeout to avoid blocking on shutdown
-				select {
-				case m.auditTrailOut <- response:
-					// Response sent successfully
-				case <-time.After(1 * time.Second):
-					// Timeout sending response - continue
-				case <-m.ctx.Done():
-					// Shutdown requested, exit
-					return
-				}
+			if response == nil || msg.Reply == "" {
+				continue
 			}
+			timer := time.NewTimer(responseSendTimeout)
+			select {
+			case m.auditTrailOut <- response:
+				timer.Stop()
+			case <-timer.C:
+				// Nobody takes the confirmation - continue
+			case <-ctx.Done():
+				timer.Stop()
+				m.drainAuditTrail()
+				return
+			}
+		}
+	}
+}
+
+// drainAuditTrail writes the entries waiting in the channel, without
+// blocking. A confirmation is handed over only when there is room for it:
+// the modules that asked have stopped by then.
+func (m *AuditModule) drainAuditTrail() {
+	for {
+		select {
+		case msg := <-m.auditTrailIn:
+			if msg == nil {
+				continue
+			}
+			response := m.processAuditTrailEntry(msg)
+			if response == nil || msg.Reply == "" {
+				continue
+			}
+			select {
+			case m.auditTrailOut <- response:
+			default:
+			}
+		default:
+			return
 		}
 	}
 }
@@ -409,8 +500,12 @@ func (m *AuditModule) processAuditTrailEntry(msg *types.Msg) *types.Msg {
 		entry.EventType = EventCustomAuditTrail
 	}
 
-	// Write the entry using the standard method
-	m.writeEntry(context.Background(), entry)
+	// Write the entry using the standard method. An entry that is not in
+	// the log is not confirmed as saved.
+	if err := m.writeEntry(context.Background(), entry); err != nil {
+		fmt.Fprintf(os.Stderr, "CRITICAL: Failed to write audit entry: %v\n", err)
+		return m.createEntryErrorResponse(msg, err.Error())
+	}
 
 	// Create success response
 	response := SaveEntryResponse{

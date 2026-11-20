@@ -93,3 +93,52 @@ func TestFlushAndCloseOtherWriters(t *testing.T) {
 		t.Fatalf("plain writer: %v", err)
 	}
 }
+
+func TestFlushLeavesTheWriterOpen(t *testing.T) {
+	f, err := os.Create(filepath.Join(t.TempDir(), "log"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = f.Close() }()
+	if err := Flush(f, "log"); err != nil {
+		t.Fatalf("Flush: %v", err)
+	}
+	if _, err := f.Write([]byte("x")); err != nil {
+		t.Fatalf("write after Flush: %v", err)
+	}
+	// A pipe has nothing to sync and must not fail.
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = r.Close(); _ = w.Close() }()
+	if err := Flush(w, "log"); err != nil {
+		t.Fatalf("Flush on a pipe: %v", err)
+	}
+	// Plain writers: Sync is called when there is one, never Close.
+	if err := Flush(&bytes.Buffer{}, "log"); err != nil {
+		t.Fatalf("Flush on a buffer: %v", err)
+	}
+}
+
+func TestCloses(t *testing.T) {
+	f, err := os.Create(filepath.Join(t.TempDir(), "log"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = f.Close() }()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = r.Close(); _ = w.Close() }()
+	if !Closes(f) || !Closes(w) {
+		t.Error("a file other than the standard streams is closed")
+	}
+	if Closes(os.Stdout) || Closes(os.Stderr) {
+		t.Error("the standard streams are never closed")
+	}
+	if Closes(&bytes.Buffer{}) {
+		t.Error("a writer that is not an io.Closer is not closed")
+	}
+}

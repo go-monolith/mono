@@ -77,11 +77,17 @@ func NewAuditAdapter(container types.ServiceContainer, consumerModuleName string
 
 // SaveAuditTrail saves a list of audit entries synchronously.
 //
-// Each entry is marshaled to JSON and sent as a separate message to the channel.
-// The function waits for confirmation of each entry before proceeding to the next.
+// Each entry is marshaled to JSON and sent as a separate message to the channel,
+// and the function returns once every entry is confirmed. Any number of
+// entries can be saved in one call.
 // The Timestamp field of each entry will be set by the audit module before writing.
 //
-// Returns the count of successfully saved entries and any error encountered.
+// Returns the count of entries confirmed as written and the first error
+// encountered: an entry the audit module could not write to its log is not
+// counted. When ctx ends first, the count is that of the entries confirmed so
+// far; entries already sent may still be written. After the audit module was
+// stopped no confirmation arrives, so the call returns when ctx ends: give it
+// a context with a deadline.
 //
 // Example:
 //
@@ -121,45 +127,59 @@ func (a *auditAdapter) SaveAuditTrail(ctx context.Context, entries []Entry) (int
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
-	// Second loop: send all messages
-	sentCount := 0
-	for _, msg := range messages {
-		select {
-		case a.inChan <- msg:
-			sentCount++
-		case <-ctx.Done():
-			// Wait for responses of already sent entries
-			a.waitForResponses(context.Background(), sentCount)
-			return 0, fmt.Errorf("context cancelled while sending audit entry: %w", ctx.Err())
-		}
-	}
-
-	// Third loop: wait for all responses
-	successCount := 0
+	// Send and read confirmations in one loop. Sending everything first
+	// filled the channels: with more entries than they hold, the router
+	// dropped the confirmations it could not deliver and the call waited
+	// for them until its context ended. No more entries are in flight than
+	// the confirmation channel holds, so none can be dropped for lack of
+	// room.
+	window := max(cap(a.outChan), 1)
+	sent, received, successCount := 0, 0, 0
 	var firstErr error
-	for range sentCount {
+	for received < len(messages) {
+		var sendCh chan *types.Msg
+		var next *types.Msg
+		if sent < len(messages) && sent-received < window {
+			sendCh, next = a.inChan, messages[sent]
+		}
 		select {
+		case sendCh <- next:
+			sent++
 		case respMsg := <-a.outChan:
-			var response SaveEntryResponse
-			if err := json.Unmarshal(respMsg.Data, &response); err != nil {
+			received++
+			if err := ConfirmationError(respMsg); err != nil {
 				if firstErr == nil {
-					firstErr = fmt.Errorf("failed to parse audit response: %w", err)
-				}
-				continue
-			}
-			if !response.Success {
-				if firstErr == nil {
-					firstErr = fmt.Errorf("audit save failed: %s", response.Error)
+					firstErr = err
 				}
 				continue
 			}
 			successCount++
 		case <-ctx.Done():
-			return successCount, fmt.Errorf("context cancelled while waiting for audit response: %w", ctx.Err())
+			// Take the confirmations of the entries already sent, so that
+			// they are not read as those of the next call.
+			a.waitForResponses(context.Background(), sent-received)
+			return successCount, fmt.Errorf("context cancelled after %d of %d audit entries were sent and %d confirmed: %w",
+				sent, len(messages), received, ctx.Err())
 		}
 	}
 
 	return successCount, firstErr
+}
+
+// ConfirmationError returns the error a confirmation message of the
+// audit-trail service reports, or nil when the entry was saved.
+func ConfirmationError(msg *types.Msg) error {
+	if msg == nil {
+		return fmt.Errorf("empty audit response")
+	}
+	var response SaveEntryResponse
+	if err := json.Unmarshal(msg.Data, &response); err != nil {
+		return fmt.Errorf("failed to parse audit response: %w", err)
+	}
+	if !response.Success {
+		return fmt.Errorf("audit save failed: %s", response.Error)
+	}
+	return nil
 }
 
 // waitForResponses drains responses for already-sent entries to avoid leaving

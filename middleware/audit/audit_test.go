@@ -1163,8 +1163,10 @@ func TestWriteEntry_ErrorPaths(t *testing.T) {
 			},
 		}
 
-		// This should not panic, but log error to buffer
-		m.writeEntry(context.Background(), entry)
+		// This should not panic, but log error to buffer and return it
+		if err := m.writeEntry(context.Background(), entry); err == nil {
+			t.Error("writeEntry returned nil for an entry that cannot be marshaled")
+		}
 
 		// Verify error was written to buffer
 		output := buf.String()
@@ -1189,8 +1191,10 @@ func TestWriteEntry_ErrorPaths(t *testing.T) {
 			Details:     map[string]any{"key": "value"},
 		}
 
-		// This should not panic, errors go to stderr
-		m.writeEntry(context.Background(), entry)
+		// This should not panic; the error is returned
+		if err := m.writeEntry(context.Background(), entry); err == nil {
+			t.Error("writeEntry returned nil although the write failed")
+		}
 	})
 
 	t.Run("handles newline write error gracefully", func(t *testing.T) {
@@ -1209,8 +1213,14 @@ func TestWriteEntry_ErrorPaths(t *testing.T) {
 			Details:     map[string]any{"key": "value"},
 		}
 
-		// This should not panic, errors go to stderr
-		m.writeEntry(context.Background(), entry)
+		// The entry and its newline go out in one write, so the first
+		// entry is written whole; the second write fails and is returned.
+		if err := m.writeEntry(context.Background(), entry); err != nil {
+			t.Errorf("first writeEntry: %v", err)
+		}
+		if err := m.writeEntry(context.Background(), entry); err == nil {
+			t.Error("writeEntry returned nil although the write failed")
+		}
 	})
 
 	t.Run("hash chaining integration", func(t *testing.T) {
