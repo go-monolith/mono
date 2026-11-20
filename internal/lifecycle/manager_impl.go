@@ -1065,11 +1065,22 @@ func (lm *lifecycleManager) startModule(ctx context.Context, module types.Module
 
 	// Step 1: Set dependency service containers, as read-only attributed views
 	if depMod, ok := module.(types.DependentModule); ok {
-		lm.mu.RLock()
+		// The module's own code (Dependencies, SetDependencyServiceContainer)
+		// runs without the lifecycle lock: the containers are looked up
+		// under it first. Called under the read lock, a module that asked
+		// the application anything from there could wait for good behind a
+		// writer that was waiting for this very read lock.
+		dependencies := depMod.Dependencies()
 		// A dependency listed twice is resolved once (see registry.ResolveDependencies),
 		// so its container is also provided only once.
+		type dependency struct {
+			name      string
+			container types.ServiceContainer
+		}
 		provided := make(map[string]struct{})
-		for _, depName := range depMod.Dependencies() {
+		var deps []dependency
+		lm.mu.RLock()
+		for _, depName := range dependencies {
 			if _, dup := provided[depName]; dup {
 				continue
 			}
@@ -1079,9 +1090,12 @@ func (lm *lifecycleManager) startModule(ctx context.Context, module types.Module
 				lm.mu.RUnlock()
 				return monoerrors.WrapModuleStartFailed(moduleName, fmt.Errorf("dependency %s container not found", depName))
 			}
-			depMod.SetDependencyServiceContainer(depName, container.NewDependencyView(depContainer, depName, rec))
+			deps = append(deps, dependency{name: depName, container: depContainer})
 		}
 		lm.mu.RUnlock()
+		for _, dep := range deps {
+			depMod.SetDependencyServiceContainer(dep.name, container.NewDependencyView(dep.container, dep.name, rec))
+		}
 	}
 
 	// Step 1.5: Validate declared service contracts (fail fast) and make them
