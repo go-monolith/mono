@@ -197,6 +197,26 @@ func conflictConsumer(t *testing.T, stream jetstream.Stream, name string) *jetst
 	return info
 }
 
+// waitAcknowledged waits until the server has recorded the consumer's
+// acknowledgements up to stream sequence want. A handler's Ack is sent
+// asynchronously, so a test that stops the application right after the
+// handler ran could otherwise lose it and find the message unacknowledged.
+func waitAcknowledged(t *testing.T, app mono.MonoApplication, stream, consumer string, want uint64) {
+	t.Helper()
+	handle := conflictStream(t, app, stream)
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		info := conflictConsumer(t, handle, consumer)
+		if info.AckFloor.Stream >= want {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("consumer %s acknowledged up to %d, want %d", consumer, info.AckFloor.Stream, want)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
 // streamNames returns the names of the streams on the JetStream store in dir,
 // read through an application without modules.
 func streamNames(t *testing.T, dir string) []string {
@@ -506,6 +526,7 @@ func TestIntegration_ConsumerLimits_Tightened(t *testing.T) {
 			if got := reg.waitHandled(2); got != 2 {
 				t.Fatalf("handled %d messages, want 2", got)
 			}
+			waitAcknowledged(t, app, "ORDERS", "orders-ingest", 2)
 			stop()
 
 			for start := 1; start <= 2; start++ {
@@ -676,7 +697,9 @@ func inheritedThresholdWarnings(log *sharedLog) []string {
 func TestIntegration_ConsumerLimits_InheritedInactiveThresholdWarned(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
-	const threshold = 2 * time.Second
+	// Long enough for a slow machine to get from the server's start to the
+	// first pull of the fetch loop.
+	const threshold = 3 * time.Second
 	start := func(limit time.Duration, wantWarning bool) (mono.MonoApplication, *conflictReg, func()) {
 		t.Helper()
 		log := &sharedLog{}
@@ -695,7 +718,7 @@ func TestIntegration_ConsumerLimits_InheritedInactiveThresholdWarned(t *testing.
 		if len(warnings) != 1 {
 			t.Fatalf("warnings about the inherited threshold = %v, want one", warnings)
 		}
-		for _, part := range []string{"stream consumer service orders.ingest", "ORDERS", "orders-ingest", "2s"} {
+		for _, part := range []string{"stream consumer service orders.ingest", "ORDERS", "orders-ingest", threshold.String()} {
 			if !strings.Contains(warnings[0], part) {
 				t.Errorf("warning does not mention %q: %s", part, warnings[0])
 			}
@@ -714,6 +737,7 @@ func TestIntegration_ConsumerLimits_InheritedInactiveThresholdWarned(t *testing.
 	if got := reg.waitHandled(2); got != 2 {
 		t.Fatalf("handled %d messages, want 2", got)
 	}
+	waitAcknowledged(t, app, "ORDERS", "orders-ingest", 2)
 	stop()
 
 	// The limit is added: the existing consumer inherits it.
