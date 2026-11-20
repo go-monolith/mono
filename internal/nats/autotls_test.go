@@ -562,3 +562,69 @@ func TestAutoTLSIssueTimeoutDefault(t *testing.T) {
 		t.Errorf("IssueTimeout() = %v, want the negative value preserved", got)
 	}
 }
+
+// TestAutoTLSStopWithOpenConnections: a connection a client keeps open on the
+// public challenge port (a request whose body never arrives, or an idle
+// keep-alive connection) must not hold up stop, whatever context it is given.
+func TestAutoTLSStopWithOpenConnections(t *testing.T) {
+	at, err := newAutoTLS(validAutoTLSConfig(t), newMockLogger())
+	if err != nil {
+		t.Fatalf("newAutoTLS() error = %v", err)
+	}
+	if err := at.start(); err != nil {
+		t.Fatalf("start() error = %v", err)
+	}
+	addr := at.ln.Addr().String()
+	srv := at.srv
+	if srv.ReadTimeout <= 0 || srv.WriteTimeout <= 0 || srv.IdleTimeout <= 0 || srv.MaxHeaderBytes <= 0 {
+		t.Errorf("challenge server limits not set: read=%v write=%v idle=%v max_header_bytes=%d",
+			srv.ReadTimeout, srv.WriteTimeout, srv.IdleTimeout, srv.MaxHeaderBytes)
+	}
+
+	// A request that announces a body and never sends it.
+	stuck, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = stuck.Close() }()
+	if _, err := io.WriteString(stuck, "POST / HTTP/1.1\r\nHost: nats.test.invalid\r\nContent-Length: 10\r\n\r\n"); err != nil {
+		t.Fatal(err)
+	}
+	// An idle keep-alive connection that served one request.
+	idle, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = idle.Close() }()
+	if _, err := io.WriteString(idle, "GET /.well-known/acme-challenge/nope HTTP/1.1\r\nHost: nats.test.invalid\r\n\r\n"); err != nil {
+		t.Fatal(err)
+	}
+	buf := make([]byte, 512)
+	_ = idle.SetReadDeadline(time.Now().Add(2 * time.Second))
+	if _, err := idle.Read(buf); err != nil {
+		t.Fatalf("no answer on the keep-alive connection: %v", err)
+	}
+	// The server reads what is left of the body before it answers, so the
+	// first connection gets no answer; give it time to get there.
+	time.Sleep(200 * time.Millisecond)
+
+	done := make(chan struct{})
+	started := time.Now()
+	go func() {
+		at.stop(context.Background())
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(challengeShutdownTimeout + 3*time.Second):
+		t.Fatalf("stop() still blocked after %v by a client connection", time.Since(started))
+	}
+	if _, err := net.DialTimeout("tcp", addr, time.Second); err == nil {
+		t.Error("challenge listener still accepts connections after stop()")
+	}
+	// The connection that held the server is closed by it.
+	_ = stuck.SetReadDeadline(time.Now().Add(2 * time.Second))
+	if _, err := stuck.Read(buf); err == nil {
+		t.Error("the connection of the unfinished request is still open after stop()")
+	}
+}
