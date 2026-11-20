@@ -174,6 +174,32 @@ func (m *AccessLogModule) RollbackStart(ctx context.Context) error {
 	return m.stop(ctx, false)
 }
 
+// stopGrace is how long the proxies and the writes in flight are still
+// waited for after the Stop context ended. It is shorter than the time the
+// framework waits for a Stop whose context has ended.
+const stopGrace = 100 * time.Millisecond
+
+// WaitWithGrace waits until done is closed and reports whether it was. Once
+// ctx has ended it waits stopGrace more: by the time a middleware is stopped
+// the Stop context has often ended already (a module before it used it up),
+// and giving up at once would leave the log neither flushed nor closed
+// although the proxies and writes finish in a moment.
+func WaitWithGrace(ctx context.Context, done <-chan struct{}) bool {
+	select {
+	case <-done:
+		return true
+	case <-ctx.Done():
+	}
+	grace := time.NewTimer(stopGrace)
+	defer grace.Stop()
+	select {
+	case <-done:
+		return true
+	case <-grace.C:
+		return false
+	}
+}
+
 // stop stops the proxies and writes, flushes the writer and, with
 // closeOutput, closes it.
 func (m *AccessLogModule) stop(ctx context.Context, closeOutput bool) error {
@@ -201,10 +227,7 @@ func (m *AccessLogModule) stop(ctx context.Context, closeOutput bool) error {
 			close(done)
 		}()
 
-		select {
-		case <-done:
-			// Proxies stopped
-		case <-ctx.Done():
+		if !WaitWithGrace(ctx, done) {
 			return fmt.Errorf("timeout waiting for channel proxies to stop: %w", ctx.Err())
 		}
 	}
@@ -216,10 +239,7 @@ func (m *AccessLogModule) stop(ctx context.Context, closeOutput bool) error {
 		close(done)
 	}()
 
-	select {
-	case <-done:
-		// Writes completed
-	case <-ctx.Done():
+	if !WaitWithGrace(ctx, done) {
 		return fmt.Errorf("timeout waiting for in-flight writes to complete: %w", ctx.Err())
 	}
 

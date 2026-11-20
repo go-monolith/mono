@@ -206,7 +206,7 @@ See [`Start`](../api/framework.md#start) and [`Stop`](../api/framework.md#stop).
 
 *v0.2.18.* The `Stop` of a module, middleware module or plugin that did not return kept the application's `Stop` blocked past the shutdown timeout: the modules after it were not stopped and NATS never was.
 
-- **Such a `Stop` is now abandoned** 250ms after its context ended. It is left running in its goroutine, `Stop` goes on with the other modules and NATS, and returns an error wrapping `monoerrors.ErrStopAbandoned` that names the module.
+- **Such a `Stop` is now abandoned** 250ms after its context ended (2 seconds after it was called, when the context had ended before that). It is left running in its goroutine, `Stop` goes on with the other modules and NATS, and returns an error wrapping `monoerrors.ErrStopAbandoned` that names the module.
 - **A `Stop` that honours its context is not affected**: it returns when the context ends, and its own error is reported.
 - **`WrapModuleStopFailed` errors now wrap the `Stop`'s own error**, so `errors.Is(err, context.DeadlineExceeded)` and the like find it; the message is unchanged.
 
@@ -230,7 +230,8 @@ Custom middleware whose `Stop` gives up something it cannot get back can impleme
 - **A write that fails is reported.** `SaveAuditTrail` counted an entry as saved when the write to the log had failed, and the hash chain had already advanced over it, so every later entry failed `audit.VerifyChain`. The entry is now not counted, the error is returned, and the chain continues from the last entry that is in the log.
 - **`Stop` writes what was accepted.** Entries sent with `AsyncSaveAuditTrail` right before `Stop` were dropped (2 to 4 of 100 were written), and a save after `Stop` panicked on a closed channel. `Stop` now writes the accepted entries, and a save after `Stop` does not panic: `SaveAuditTrail` returns an error when its context ends, so give it a context with a deadline.
 - **`SaveAuditTrail` with many entries completes.** With more than about 200 entries it lost confirmations and waited until its context ended.
-- **On a context that ends**, `SaveAuditTrail` returns the number of entries confirmed so far; it returned 0 before.
+- **On a context that ends**, `SaveAuditTrail` returns the number of entries confirmed so far; it returned 0 before. The confirmations that arrive afterwards are no longer counted by the next call, which could report entries as saved before they were written.
+- **`Stop` with a context that has already ended** (a module before the middleware used up the time) still writes the accepted entries and closes the log; the access log is flushed and closed in that case as well. Both gave up at once before.
 - **After `Stop` closed the log file**, `Start` on the same module fails with `audit.ErrOutputClosed` (access log: `accesslog.ErrOutputClosed`). Build a new module with `New` for a new application.
 
 See [Audit Middleware](../middleware/audit.md#custom-audit-entries).
@@ -275,7 +276,7 @@ All optional.
 | `monoerrors.ErrStopAbandoned` | v0.2.18 | The error `Stop` returns for a module, middleware module or plugin whose `Stop` did not return after its context ended, and `Start` while such a `Stop` is still running |
 | [`types.RollbackAwareMiddleware`](../middleware/README.md#middleware-lifecycle) | v0.2.18 | Optional `RollbackStart(ctx)` of a middleware module, called instead of `Stop` when a failed `Start` is rolled back, so the middleware can be started again |
 | `audit.ErrOutputClosed`, `accesslog.ErrOutputClosed` | v0.2.18 | `Start` of a module whose log `Stop` has closed |
-| `audit.HashChain.Next`, `Commit`, `audit.ConfirmationError` | v0.2.18 | Compute the next entry of a chain and advance the chain once it is written; the error a confirmation of the audit-trail service reports |
+| `audit.HashChain.Next`, `Commit`, `audit.ConfirmationError`, `audit.CallHeader` | v0.2.18 | Compute the next entry of a chain and advance the chain once it is written; the error a confirmation of the audit-trail service reports; the header that ties a confirmation to its `SaveAuditTrail` call |
 | [`WithNATSSystemAccount(user, password)`](../api/framework.md#withnatssystemaccount) | v0.2.2 | A system account user for `nats server report` and `nats server raft peer-remove`. Clients that send credentials of their own are rejected once it is on, unless they are the system account user's |
 | `mono.ServiceLookup` | v0.1.2 | The read side of `ServiceContainer`, accepted by the typed contracts and helpers |
 | [`monotest.CheckImports`](module-boundaries.md#checking-imports) | v0.1.2 | Checks the contract package import rule; put the test in the application's root directory |

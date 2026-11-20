@@ -120,7 +120,7 @@ saved, err := m.audit.SaveAuditTrail(ctx, []audit.Entry{{
 - **`SaveAuditTrail` returns how many entries are in the log.** An entry the module could not write is not counted, and the first error is returned. Any number of entries can be saved in one call.
 - **Pass a context with a deadline.** When it ends first, the call returns the number confirmed so far and an error; entries already sent may still be written. After the audit module was stopped no confirmation arrives, so the call returns when the context ends.
 - **`AsyncSaveAuditTrail` does not wait** and cannot report a failed write. Entries it handed over before `Stop` are written by `Stop`; entries sent after `Stop` are not written.
-- **A failed write** is also reported on stderr (`CRITICAL: Failed to write audit entry`). The hash chain does not advance over an entry that is not in the log, so the entries that are still verify.
+- **A failed write** is also reported on stderr (`CRITICAL: Failed to write audit entry`). The hash chain does not advance over an entry that is not in the log, so the entries that are still verify. A write that fails after part of its line was written leaves that torn line in the log; the next entry starts on a line of its own.
 
 ## Hash Chaining Explained
 

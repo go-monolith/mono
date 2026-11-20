@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -1370,17 +1371,36 @@ func TestStop(t *testing.T) {
 		}
 	})
 
-	t.Run("stop with timeout", func(t *testing.T) {
+	t.Run("stop with a context that has already ended", func(t *testing.T) {
 		buf := &syncWriter{}
 		logger, _ := New(WithOutput(buf))
 
-		// Create a context that's already cancelled to trigger timeout
+		// Nothing is in flight: the stop completes although the context
+		// has ended (a module before the middleware used it up).
 		ctx, cancel := context.WithCancel(context.Background())
 		cancel()
 
+		if err := logger.Stop(ctx); err != nil {
+			t.Errorf("Stop() with nothing in flight = %v", err)
+		}
+	})
+
+	t.Run("stop gives up on a write that does not finish", func(t *testing.T) {
+		buf := &syncWriter{}
+		logger, _ := New(WithOutput(buf))
+		// A write in flight that never completes.
+		logger.wg.Add(1)
+		defer logger.wg.Done()
+
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		started := time.Now()
 		err := logger.Stop(ctx)
-		if err == nil {
-			t.Error("Stop() should return error when context is cancelled")
+		if err == nil || !errors.Is(err, context.Canceled) {
+			t.Errorf("Stop() = %v, want the context error", err)
+		}
+		if waited := time.Since(started); waited < stopGrace || waited > 2*time.Second {
+			t.Errorf("Stop() gave up after %v, want the grace of %v", waited, stopGrace)
 		}
 	})
 }
@@ -1610,8 +1630,10 @@ func TestProxyChannels_ShutdownDuringForward(t *testing.T) {
 	m.Stop(context.Background())
 }
 
-// TestStop_WithChannelProxiesTimeout tests Stop with channel proxies that timeout
-func TestStop_WithChannelProxiesTimeout(t *testing.T) {
+// TestStop_WithChannelProxiesAndEndedContext: the proxies stop as soon as
+// they are cancelled, so a Stop whose context has already ended (a module
+// before the middleware used it up) still stops them and closes the log.
+func TestStop_WithChannelProxiesAndEndedContext(t *testing.T) {
 	buf := &syncWriter{}
 	m, _ := New(WithOutput(buf))
 
@@ -1622,17 +1644,11 @@ func TestStop_WithChannelProxiesTimeout(t *testing.T) {
 	// Wrap channels (creates proxies)
 	_, _ = m.wrapChannelService(originalIn, originalOut, "test-module", "test-channel")
 
-	// Create an already cancelled context to trigger timeout
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	// Stop should return timeout error
-	err := m.Stop(ctx)
-	if err == nil {
-		t.Error("Stop() should return error when context is cancelled with proxies")
-	}
-	if !strings.Contains(err.Error(), "timeout") {
-		t.Errorf("expected timeout error, got: %v", err)
+	if err := m.Stop(ctx); err != nil {
+		t.Errorf("Stop() with an ended context = %v, want the proxies stopped within the grace", err)
 	}
 }
 

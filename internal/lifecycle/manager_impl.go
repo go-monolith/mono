@@ -62,6 +62,7 @@ type lifecycleManager struct {
 	cronProgressInterval       time.Duration                 // interval of the in-progress signal of a running cron handler (0 = default)
 	abandonedStops             map[string]int                // Stops given up on that have not returned yet, by "<kind> <name>" (see RunStop)
 	cancelRouters              context.CancelFunc            // ends the channel routers of the current start (nil: none running)
+	stopMinBudget              time.Duration                 // wait for a Stop called with an ended context (0 = StopMinBudget)
 }
 
 // EventRegistryCheckpointer is the optional capability of an event registry

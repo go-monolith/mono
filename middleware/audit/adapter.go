@@ -3,8 +3,11 @@ package audit
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/go-monolith/mono/pkg/types"
@@ -85,7 +88,8 @@ func NewAuditAdapter(container types.ServiceContainer, consumerModuleName string
 // Returns the count of entries confirmed as written and the first error
 // encountered: an entry the audit module could not write to its log is not
 // counted. When ctx ends first, the count is that of the entries confirmed so
-// far; entries already sent may still be written. After the audit module was
+// far; entries already sent may still be written, and their confirmations
+// are not taken for those of a later call. After the audit module was
 // stopped no confirmation arrives, so the call returns when ctx ends: give it
 // a context with a deadline.
 //
@@ -108,6 +112,9 @@ func (a *auditAdapter) SaveAuditTrail(ctx context.Context, entries []Entry) (int
 		return 0, nil
 	}
 
+	// Every entry of this call carries its ID, which the confirmation echoes.
+	call := strconv.FormatUint(auditCalls.Add(1), 36)
+
 	// First loop: marshal all entries (fail fast if any fails)
 	messages := make([]*types.Msg, 0, len(entries))
 	for i, entry := range entries {
@@ -120,6 +127,7 @@ func (a *auditAdapter) SaveAuditTrail(ctx context.Context, entries []Entry) (int
 			Subject: "audit-trail",
 			Reply:   a.consumer,
 			Data:    data,
+			Header:  types.Header{CallHeader: []string{call}},
 		})
 	}
 
@@ -127,13 +135,19 @@ func (a *auditAdapter) SaveAuditTrail(ctx context.Context, entries []Entry) (int
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
+	// Confirmations of an earlier call that gave up waiting are still on
+	// their way or in the channel. Those already here are dropped now; the
+	// loop below drops the rest by their call ID.
+	a.dropStale()
+
 	// Send and read confirmations in one loop. Sending everything first
 	// filled the channels: with more entries than they hold, the router
 	// dropped the confirmations it could not deliver and the call waited
 	// for them until its context ended. No more entries are in flight than
-	// the confirmation channel holds, so none can be dropped for lack of
-	// room.
-	window := max(cap(a.outChan), 1)
+	// half of what the confirmation channel holds, which leaves the other
+	// half for late confirmations of an earlier call, so none is dropped
+	// for lack of room.
+	window := max(cap(a.outChan)/2, 1)
 	sent, received, successCount := 0, 0, 0
 	var firstErr error
 	for received < len(messages) {
@@ -146,6 +160,9 @@ func (a *auditAdapter) SaveAuditTrail(ctx context.Context, entries []Entry) (int
 		case sendCh <- next:
 			sent++
 		case respMsg := <-a.outChan:
+			if !IsConfirmationOf(respMsg, call) {
+				continue // of an earlier call that stopped waiting
+			}
 			received++
 			if err := ConfirmationError(respMsg); err != nil {
 				if firstErr == nil {
@@ -158,12 +175,36 @@ func (a *auditAdapter) SaveAuditTrail(ctx context.Context, entries []Entry) (int
 			// Take the confirmations of the entries already sent, so that
 			// they are not read as those of the next call.
 			a.waitForResponses(context.Background(), sent-received)
-			return successCount, fmt.Errorf("context cancelled after %d of %d audit entries were sent and %d confirmed: %w",
-				sent, len(messages), received, ctx.Err())
+			return successCount, errors.Join(firstErr, fmt.Errorf("context cancelled after %d of %d audit entries were sent and %d confirmed: %w",
+				sent, len(messages), received, ctx.Err()))
 		}
 	}
 
 	return successCount, firstErr
+}
+
+// auditCalls numbers the synchronous saves of the process.
+var auditCalls atomic.Uint64
+
+// IsConfirmationOf reports whether msg is a confirmation of the save with
+// the given call ID (see CallHeader).
+func IsConfirmationOf(msg *types.Msg, call string) bool {
+	if msg == nil {
+		return false
+	}
+	ids := msg.Header[CallHeader]
+	return len(ids) > 0 && ids[0] == call
+}
+
+// dropStale empties the confirmation channel without waiting.
+func (a *auditAdapter) dropStale() {
+	for {
+		select {
+		case <-a.outChan:
+		default:
+			return
+		}
+	}
 }
 
 // ConfirmationError returns the error a confirmation message of the

@@ -83,6 +83,7 @@ The configured shutdown timeout bounds the whole operation when `ctx` has no dea
 **A module `Stop` that does not return** (since v0.2.18; before, it held the shutdown for as long as it ran, with NATS never stopped):
 
 - Each `Stop` of a module, middleware module or plugin is waited for until its context has ended and 250ms more. A `Stop` that honours its context returns in that time and is reported as it is.
+- A `Stop` that is only called after the context has ended (a module before it used up the time, or `Stop` was given a cancelled context) is waited for up to 2 seconds, so a `Stop` that ignores its context but finishes quickly still runs to its end, in order.
 - One that has not returned by then is abandoned: it keeps running in its goroutine, the shutdown goes on with the other modules and then NATS, and `Stop` returns an error wrapping `monoerrors.ErrStopAbandoned` that names it. Its eventual return is logged at Warn.
 - The abandoned `Stop` runs on after NATS has stopped, so whatever it still does with the event bus fails. Make `Stop` return when its context ends.
 

@@ -15,9 +15,31 @@ import (
 // instead of the Stop being taken for one that hangs.
 const StopAbandonGrace = 250 * time.Millisecond
 
+// StopMinBudget is how long a Stop is waited for when its context had
+// already ended before it was called: one Stop that used up the shutdown's
+// time (or a caller that passes a cancelled context) must not leave the
+// Stops after it a quarter of a second each. A Stop that ignores its context
+// but finishes in a moment then still runs to its end, in order, as it did
+// before Stops were bounded; one that honours its context returns at once.
+const StopMinBudget = 2 * time.Second
+
+// stopWaitAfterContext returns how long a Stop is waited for once its
+// context has ended: StopMinBudget when it had ended before the Stop was
+// called, StopAbandonGrace when it ended while the Stop ran.
+func (lm *lifecycleManager) stopWaitAfterContext(endedOnEntry bool) time.Duration {
+	if !endedOnEntry {
+		return StopAbandonGrace
+	}
+	if lm.stopMinBudget > 0 {
+		return lm.stopMinBudget
+	}
+	return StopMinBudget
+}
+
 // RunStop calls stop, the Stop of a module, middleware module or plugin
 // (kind) named name, and waits for it until ctx ends and StopAbandonGrace
-// has passed. A Stop that has not returned by then is abandoned: it is left
+// has passed (StopMinBudget when ctx had ended before the call). A Stop that
+// has not returned by then is abandoned: it is left
 // running in its goroutine, and RunStop returns an error wrapping
 // errors.ErrStopAbandoned, so that the shutdown goes on to the modules after
 // it and to the NATS server. Before, one Stop that ignored its context held
@@ -38,6 +60,7 @@ func (lm *lifecycleManager) RunStop(ctx context.Context, kind, name string, stop
 	}
 	done := make(chan outcome, 1)
 	started := time.Now()
+	wait := lm.stopWaitAfterContext(ctx.Err() != nil)
 	go func() {
 		var out outcome
 		defer func() {
@@ -54,7 +77,7 @@ func (lm *lifecycleManager) RunStop(ctx context.Context, kind, name string, stop
 		return out.panicValue, out.err
 	case <-ctx.Done():
 	}
-	grace := time.NewTimer(StopAbandonGrace)
+	grace := time.NewTimer(wait)
 	defer grace.Stop()
 	select {
 	case out := <-done:
@@ -80,7 +103,7 @@ func (lm *lifecycleManager) RunStop(ctx context.Context, kind, name string, stop
 			"kind", kind, "name", name, "after", time.Since(started), "error", out.err, "panic", out.panicValue)
 	}()
 	return nil, fmt.Errorf("%w: Stop of %s did not return within %v after its context ended (%v) and is left running",
-		monoerrors.ErrStopAbandoned, key, StopAbandonGrace, context.Cause(ctx))
+		monoerrors.ErrStopAbandoned, key, wait, context.Cause(ctx))
 }
 
 // AbandonedStops returns the modules, middleware modules and plugins whose

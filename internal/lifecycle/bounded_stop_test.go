@@ -221,7 +221,30 @@ func TestRunStop(t *testing.T) {
 		}
 	})
 
+	t.Run("a Stop called after the context ended has time to finish", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		finished := false
+		started := time.Now()
+		_, err := lm.RunStop(ctx, "module", "slow", func(context.Context) error {
+			time.Sleep(StopAbandonGrace + 200*time.Millisecond) // ignores its context, but finishes
+			finished = true
+			return nil
+		})
+		if err != nil || !finished {
+			t.Fatalf("RunStop = %v, finished=%v, want the Stop run to its end", err, finished)
+		}
+		if waited := time.Since(started); waited >= StopMinBudget {
+			t.Fatalf("waited %v for a Stop that took less", waited)
+		}
+		if lm.stopWaitAfterContext(true) != StopMinBudget || lm.stopWaitAfterContext(false) != StopAbandonGrace {
+			t.Fatal("unexpected default waits")
+		}
+	})
+
 	t.Run("the same name abandoned twice is counted until both return", func(t *testing.T) {
+		lm.stopMinBudget = 50 * time.Millisecond
+		defer func() { lm.stopMinBudget = 0 }()
 		ctx, cancel := context.WithCancel(context.Background())
 		cancel()
 		release := make(chan struct{})

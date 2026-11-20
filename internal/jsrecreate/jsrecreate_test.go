@@ -701,3 +701,88 @@ func TestDetachLeftoverBackups_Failures(t *testing.T) {
 		}
 	})
 }
+
+// TestOpen_DetachesLeftoversWhenTheCreateFails: the leftovers are detached
+// once the stream is deleted, also when the create after it fails; the next
+// Start finds no mismatch and would never detach them.
+func TestOpen_DetachesLeftoversWhenTheCreateFails(t *testing.T) {
+	js := startJetStream(t)
+	ctx := context.Background()
+	fileBucket(t, js, "locks", 2)
+	const leftover = "locks-backup-20260101T000000Z-0123456789abcdef"
+	if _, err := js.CreateKeyValue(ctx, jetstream.KeyValueConfig{Bucket: leftover, Storage: jetstream.FileStorage,
+		Sources: []*jetstream.StreamSource{{Name: "locks"}}}); err != nil {
+		t.Fatal(err)
+	}
+	finished := ""
+	spec := kvSpec(js, StreamAPI{JS: js}, "locks", Options{Recreate: true}, nil)
+	create, creates := spec.Create, 0
+	spec.Create = func(ctx context.Context) (jetstream.KeyValue, error) {
+		if creates++; creates == 2 { // the create after the delete
+			return nil, errors.New("no suitable peers")
+		}
+		return create(ctx)
+	}
+	spec.AfterCopy = func(_ context.Context, backup string) error {
+		if backup == leftover {
+			finished = backup
+		}
+		return nil
+	}
+	if _, err := Open(ctx, spec); err == nil || !strings.Contains(err.Error(), "no suitable peers") {
+		t.Fatalf("Open = %v, want the failed create", err)
+	}
+	stream, err := js.Stream(ctx, "KV_"+leftover)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := stream.CachedInfo().Config.Sources; len(got) != 0 {
+		t.Fatalf("the leftover backup still copies %d stream(s) after the failed create", len(got))
+	}
+	if finished != leftover {
+		t.Fatal("the detached leftover was not finished like a backup (AfterCopy)")
+	}
+}
+
+// TestCompleteBackup_DetachedByAnotherInstance: an instance whose backup was
+// detached by another one that finished the repair first takes the bucket as
+// repaired instead of failing Start with "has no source".
+func TestCompleteBackup_DetachedByAnotherInstance(t *testing.T) {
+	js := startJetStream(t)
+	ctx := context.Background()
+	fileBucket(t, js, "locks", 2)
+	stream, err := js.Stream(ctx, "KV_locks")
+	if err != nil {
+		t.Fatal(err)
+	}
+	info := stream.CachedInfo()
+	// The backup of this instance, already detached by the other one.
+	const backup = "locks-backup-20260101T000000Z-0123456789abcdef"
+	if _, err := js.CreateKeyValue(ctx, jetstream.KeyValueConfig{Bucket: backup, Storage: jetstream.FileStorage}); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Run("the bucket is still as it was: an error", func(t *testing.T) {
+		spec := kvSpec(js, StreamAPI{JS: js}, "locks", Options{Recreate: true}, nil)
+		repaired, err := completeBackup(ctx, spec, backup, info)
+		if repaired || err == nil || !strings.Contains(err.Error(), "has no source") {
+			t.Fatalf("completeBackup = %v, %v", repaired, err)
+		}
+	})
+	t.Run("the other instance repaired the bucket", func(t *testing.T) {
+		// The first check of a round still sees the old stream; the check
+		// made when the source is found gone sees the repair.
+		lookups := 0
+		streams := fakeStreams{StreamAPI: StreamAPI{JS: js}, info: func(ctx context.Context, name string) (*jetstream.StreamInfo, error) {
+			if lookups++; lookups == 1 {
+				return info, nil
+			}
+			return nil, jetstream.ErrStreamNotFound
+		}}
+		spec := kvSpec(js, streams, "locks", Options{Recreate: true}, nil)
+		repaired, err := completeBackup(ctx, spec, backup, info)
+		if !repaired || err != nil {
+			t.Fatalf("completeBackup = %v, %v, want repaired", repaired, err)
+		}
+	})
+}

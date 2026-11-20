@@ -54,14 +54,22 @@ type AuditModule struct {
 	auditTrailOut chan *types.Msg
 
 	// Lifecycle management. lifecycleMu serialises Start, Stop and
-	// RollbackStart; mu guards the fields below and every write.
+	// RollbackStart and guards cancel and started. mu guards the writer,
+	// the chain and the two flags below; a write holds it, so a handler
+	// stuck in a write holds it too, and nothing waits for it but another
+	// write.
 	lifecycleMu sync.Mutex
 	cancel      context.CancelFunc
-	wg          sync.WaitGroup
+	// handlerDone is closed when the handler goroutine of the current
+	// start has exited. One channel per start: a WaitGroup would be waited
+	// on by a Stop that gave up while the next Start adds to it.
+	handlerDone chan struct{}
 	started     bool
 	// outputClosed is set once Stop closed the writer: nothing can be
 	// written after that, so the module cannot be started again.
 	outputClosed bool
+	// tornLine is set when a failed write left part of a line in the log.
+	tornLine bool
 }
 
 // ErrOutputClosed is returned by Start, and for an entry that arrives, after
@@ -134,14 +142,15 @@ func (m *AuditModule) Name() string {
 func (m *AuditModule) Start(_ context.Context) error {
 	m.lifecycleMu.Lock()
 	defer m.lifecycleMu.Unlock()
-	m.mu.Lock()
-	defer m.mu.Unlock()
 
 	// Prevent multiple starts
 	if m.started {
 		return fmt.Errorf("audit module already started")
 	}
-	if m.outputClosed {
+	m.mu.Lock()
+	closed := m.outputClosed
+	m.mu.Unlock()
+	if closed {
 		return fmt.Errorf("audit module cannot be started again: %w", ErrOutputClosed)
 	}
 
@@ -150,8 +159,8 @@ func (m *AuditModule) Start(_ context.Context) error {
 	m.cancel = cancel
 
 	// Start handler goroutine for channel service
-	m.wg.Add(1)
-	go m.handleAuditTrailChannel(ctx)
+	m.handlerDone = make(chan struct{})
+	go m.handleAuditTrailChannel(ctx, m.handlerDone)
 
 	m.started = true
 	return nil
@@ -180,46 +189,80 @@ func (m *AuditModule) RollbackStart(ctx context.Context) error {
 
 // stop stops the handler goroutine after it wrote what it had accepted, then
 // flushes the writer and, with closeOutput, closes it.
+//
+// The wait for the handler is not given up the moment ctx ends: by the time
+// a middleware is stopped the Stop context has often ended already (a module
+// before it used it up), and the handler only has to write what is in its
+// channel, which takes milliseconds. Closing the log under it would lose
+// exactly the entries Stop is there to write.
 func (m *AuditModule) stop(ctx context.Context, closeOutput bool) error {
 	m.lifecycleMu.Lock()
 	defer m.lifecycleMu.Unlock()
 
-	m.mu.Lock()
 	if !m.started {
-		m.mu.Unlock()
-		return nil
+		if !closeOutput {
+			return nil
+		}
+		// Never started, or stopped by RollbackStart: the hooks may have
+		// written entries all the same, and the final Stop owns the writer.
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		if m.outputClosed {
+			return nil
+		}
+		m.outputClosed = output.Closes(m.writer)
+		return output.FlushAndClose(m.writer, "audit log")
 	}
-	cancel := m.cancel
-	m.mu.Unlock()
 
 	// Tell the handler to stop; it first writes what is in the channel.
-	cancel()
-	done := make(chan struct{})
-	go func() {
-		m.wg.Wait()
-		close(done)
-	}()
-	var stopErr error
-	timer := time.NewTimer(handlerStopTimeout)
-	defer timer.Stop()
-	select {
-	case <-done:
-	case <-timer.C:
-		stopErr = fmt.Errorf("audit-trail handler still writing after %v; entries it accepted may not be in the log", handlerStopTimeout)
-	case <-ctx.Done():
-		stopErr = fmt.Errorf("audit-trail handler still writing when Stop was given up; entries it accepted may not be in the log: %w", ctx.Err())
+	m.cancel()
+	if err := WaitForHandler(ctx, m.handlerDone); err != nil {
+		// The handler is still in a write and holds the writer: it is
+		// neither flushed nor closed under it, and the module stays
+		// started, so that no second handler is started beside this one. A
+		// later Stop waits for it again.
+		return err
 	}
+	m.started = false
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.started = false
 	if !closeOutput {
-		return errors.Join(stopErr, output.Flush(m.writer, "audit log"))
+		return output.Flush(m.writer, "audit log")
 	}
 	// Flush and close the writer, except os.Stdout and os.Stderr, which
 	// the rest of the process keeps using (see output.FlushAndClose).
 	m.outputClosed = output.Closes(m.writer)
-	return errors.Join(stopErr, output.FlushAndClose(m.writer, "audit log"))
+	return output.FlushAndClose(m.writer, "audit log")
+}
+
+// handlerDrainGrace is how long the handler is still waited for after the
+// Stop context ended. It is shorter than the time the framework waits for a
+// Stop whose context has ended, so the wait fits into it.
+const handlerDrainGrace = 100 * time.Millisecond
+
+// WaitForHandler waits until done is closed, for at most handlerStopTimeout
+// and, once ctx has ended, handlerDrainGrace more. It returns an error when
+// the handler has not finished by then.
+func WaitForHandler(ctx context.Context, done <-chan struct{}) error {
+	timer := time.NewTimer(handlerStopTimeout)
+	defer timer.Stop()
+	select {
+	case <-done:
+		return nil
+	case <-timer.C:
+		return fmt.Errorf("audit-trail handler still writing after %v; entries it accepted may not be in the log", handlerStopTimeout)
+	case <-ctx.Done():
+	}
+	grace := time.NewTimer(handlerDrainGrace)
+	defer grace.Stop()
+	select {
+	case <-done:
+		return nil
+	case <-grace.C:
+		return fmt.Errorf("audit-trail handler still writing %v after the Stop context ended; entries it accepted may not be in the log: %w",
+			handlerDrainGrace, ctx.Err())
+	}
 }
 
 // OnModuleLifecycle intercepts module lifecycle events and logs them.
@@ -367,8 +410,9 @@ func (m *AuditModule) recordEntry(ctx context.Context, entry Entry) {
 //
 // The chain advances only once the entry is in the log: an entry that was
 // never written must not be the predecessor of the next one, or every later
-// entry fails verification. The line and its newline go out in one Write, so
-// a failure between them cannot leave two entries on one line.
+// entry fails verification. The line and its newline go out in one Write; a
+// write that fails after part of the line was written leaves a torn line,
+// which the next write ends first, so the next entry never shares it.
 func (m *AuditModule) writeEntry(ctx context.Context, entry Entry) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -395,9 +439,20 @@ func (m *AuditModule) writeEntry(ctx context.Context, entry Entry) error {
 		}
 		return marshalErr
 	}
-	if _, err := m.writer.Write(append(data, '\n')); err != nil {
+	line := append(data, '\n')
+	if m.tornLine {
+		// The write before this one failed after part of its line was
+		// written: end that line, so this entry starts on its own.
+		line = append([]byte{'\n'}, line...)
+	}
+	n, err := m.writer.Write(line)
+	if err != nil {
+		// A torn line that is still open (nothing of this write got out),
+		// or one this write left, has to be ended by the next write.
+		m.tornLine = (m.tornLine && n == 0) || (n > 0 && n < len(line))
 		return fmt.Errorf("failed to write audit entry: %w", err)
 	}
+	m.tornLine = false
 	if m.hashChain != nil {
 		m.hashChain.Commit(entry)
 	}
@@ -420,8 +475,8 @@ const responseSendTimeout = time.Second
 // for custom audit trail entries, until ctx ends. It then writes the entries
 // still in the channel, so that what the module accepted before Stop is in
 // the log when Stop returns.
-func (m *AuditModule) handleAuditTrailChannel(ctx context.Context) {
-	defer m.wg.Done()
+func (m *AuditModule) handleAuditTrailChannel(ctx context.Context, done chan<- struct{}) {
+	defer close(done)
 
 	for {
 		select {
@@ -523,6 +578,7 @@ func (m *AuditModule) processAuditTrailEntry(msg *types.Msg) *types.Msg {
 		Subject: msg.Reply,
 		Reply:   msg.Reply,
 		Data:    responseData,
+		Header:  ConfirmationHeader(msg),
 	}
 }
 
@@ -545,5 +601,21 @@ func (m *AuditModule) createEntryErrorResponse(msg *types.Msg, errorMsg string) 
 		Subject: msg.Reply,
 		Reply:   msg.Reply,
 		Data:    responseData,
+		Header:  ConfirmationHeader(msg),
 	}
+}
+
+// CallHeader is the header a synchronous save puts on each entry it sends
+// and the audit module copies into the confirmation, so that the adapter can
+// tell the confirmations of its current call from those of an earlier one
+// that it gave up waiting for.
+const CallHeader = "Mono-Audit-Call"
+
+// ConfirmationHeader returns the header of the confirmation of request: its
+// CallHeader, when it has one.
+func ConfirmationHeader(request *types.Msg) types.Header {
+	if request == nil || len(request.Header[CallHeader]) == 0 {
+		return nil
+	}
+	return types.Header{CallHeader: request.Header[CallHeader]}
 }
