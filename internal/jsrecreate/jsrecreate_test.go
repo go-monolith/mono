@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"strings"
 	"testing"
@@ -608,4 +609,95 @@ func TestOpen_BackupOfAnotherStream(t *testing.T) {
 	if left := backups(t, js, "locks"); len(left) != 0 {
 		t.Fatalf("backups left behind: %v", left)
 	}
+}
+
+// TestOpen_DetachesLeftoverBackups: after a recreate, backups an interrupted
+// recreate left copying the bucket are detached and kept; buckets that are
+// not backups, backups of other buckets and the backup just made are left as
+// they are.
+func TestOpen_DetachesLeftoverBackups(t *testing.T) {
+	js := startJetStream(t)
+	ctx := context.Background()
+	fileBucket(t, js, "locks", 2)
+	fileBucket(t, js, "other", 1)
+	sourcing := func(bucket, source string) {
+		t.Helper()
+		if _, err := js.CreateKeyValue(ctx, jetstream.KeyValueConfig{Bucket: bucket, Storage: jetstream.FileStorage,
+			Sources: []*jetstream.StreamSource{{Name: source}}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	const (
+		leftover      = "locks-backup-20260101T000000Z-0123456789abcdef"
+		otherLeftover = "locks-backup-20260101T000000Z-fedcba9876543210" // a backup name, but of bucket "other"
+		detached      = "locks-backup-20250101T000000Z-0000000000000000" // an old, complete backup
+	)
+	sourcing(leftover, "locks")
+	sourcing(otherLeftover, "other")
+	sourcing("locks-copy", "locks")
+	if _, err := js.CreateKeyValue(ctx, jetstream.KeyValueConfig{Bucket: detached, Storage: jetstream.FileStorage}); err != nil {
+		t.Fatal(err)
+	}
+
+	var logs bytes.Buffer
+	if _, err := Open(ctx, kvSpec(js, StreamAPI{JS: js}, "locks", Options{Recreate: true}, &logs)); err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	sources := func(bucket string) []*jetstream.StreamSource {
+		t.Helper()
+		s, err := js.Stream(ctx, "KV_"+bucket)
+		if err != nil {
+			t.Fatalf("stream of %s: %v", bucket, err)
+		}
+		return s.CachedInfo().Config.Sources
+	}
+	if got := sources(leftover); len(got) != 0 {
+		t.Errorf("the leftover backup still copies %d stream(s)", len(got))
+	}
+	for _, kept := range []string{otherLeftover, "locks-copy"} {
+		if got := sources(kept); len(got) != 1 {
+			t.Errorf("bucket %s has %d sources, want its own kept", kept, len(got))
+		}
+	}
+	if n := strings.Count(logs.String(), "Detached a leftover KV bucket backup"); n != 1 {
+		t.Errorf("%d leftovers reported as detached, want 1:\n%s", n, logs.String())
+	}
+	if !strings.Contains(logs.String(), "backup_bucket="+leftover) {
+		t.Errorf("the log does not name the leftover:\n%s", logs.String())
+	}
+	// Nothing was deleted: the four other buckets and this recreate's backup.
+	if got := backups(t, js, "locks"); len(got) != 4 {
+		t.Errorf("backup buckets = %v, want the three that existed and the new one", got)
+	}
+}
+
+// TestDetachLeftoverBackups_Failures: the search is best effort and never
+// fails the bucket that was just recreated.
+func TestDetachLeftoverBackups_Failures(t *testing.T) {
+	t.Run("the listing fails", func(t *testing.T) {
+		js := startJetStream(t)
+		var logs bytes.Buffer
+		spec := kvSpec(js, StreamAPI{JS: js}, "locks", Options{Recreate: true}, &logs)
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		detachLeftoverBackups(ctx, spec, "")
+		if !strings.Contains(logs.String(), "Failed to look for leftover KV bucket backups") {
+			t.Fatalf("log = %s", logs.String())
+		}
+	})
+	t.Run("more backups than are inspected", func(t *testing.T) {
+		js := startJetStream(t)
+		ctx := context.Background()
+		for i := 0; i < maxLeftoverBackups+2; i++ {
+			name := fmt.Sprintf("locks-backup-20260101T000000Z-%016x", i)
+			if _, err := js.CreateKeyValue(ctx, jetstream.KeyValueConfig{Bucket: name, Storage: jetstream.MemoryStorage}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		var logs bytes.Buffer
+		detachLeftoverBackups(ctx, kvSpec(js, StreamAPI{JS: js}, "locks", Options{Recreate: true}, &logs), "")
+		if !strings.Contains(logs.String(), "Too many KV bucket backups to inspect them all") {
+			t.Fatalf("log = %s", logs.String())
+		}
+	})
 }

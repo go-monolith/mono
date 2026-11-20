@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/go-monolith/mono/pkg/types"
+	"github.com/nats-io/nats-server/v2/server"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 )
@@ -292,4 +293,56 @@ func TestFetchErrorReporter_ConsumerGone(t *testing.T) {
 			t.Fatalf("entries = %v", logger.entries)
 		}
 	})
+}
+
+// TestFetchErrorReporter_WatchJetStreamConsumer runs against a real server:
+// the reporter takes the stream and the name from the consumer handle and
+// finds the consumer gone once it is deleted.
+func TestFetchErrorReporter_WatchJetStreamConsumer(t *testing.T) {
+	s, err := server.NewServer(&server.Options{JetStream: true, Port: -1, StoreDir: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	go s.Start()
+	if !s.ReadyForConnections(5 * time.Second) {
+		t.Fatal("NATS server not ready")
+	}
+	t.Cleanup(func() { s.Shutdown(); s.WaitForShutdown() })
+	nc, err := nats.Connect(s.ClientURL())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(nc.Close)
+	js, err := jetstream.New(nc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	stream, err := js.CreateStream(ctx, jetstream.StreamConfig{Name: "JOBS", Subjects: []string{"jobs.>"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	consumer, err := stream.CreateConsumer(ctx, jetstream.ConsumerConfig{Durable: "orders-jobs", AckPolicy: jetstream.AckExplicitPolicy})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	logger := &mockLogger{}
+	r := newFetchErrorReporter(logger, "Fetch error", "service", "jobs")
+	r.WatchJetStreamConsumer(consumer)
+	if r.stream != "JOBS" || r.consumer != "orders-jobs" {
+		t.Fatalf("watching %s/%s", r.stream, r.consumer)
+	}
+	// It exists: a deleted answer that is already out of date says nothing.
+	r.failure(jetstream.ErrConsumerDeleted)
+	if logger.hasErrorContaining(ConsumerGoneMessage) {
+		t.Fatalf("an existing consumer was reported as gone: %v", logger.entries)
+	}
+	if err := stream.DeleteConsumer(ctx, "orders-jobs"); err != nil {
+		t.Fatal(err)
+	}
+	r.failure(jetstream.ErrConsumerDeleted)
+	if !logger.hasErrorContaining(ConsumerGoneMessage) || !logger.hasErrorContaining("stream JOBS consumer orders-jobs") {
+		t.Fatalf("the deleted consumer was not reported: %v", logger.entries)
+	}
 }

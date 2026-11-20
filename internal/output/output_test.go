@@ -142,3 +142,30 @@ func TestCloses(t *testing.T) {
 		t.Error("a writer that is not an io.Closer is not closed")
 	}
 }
+
+// syncCounter is a writer with a Sync and a Close of its own.
+type syncCounter struct {
+	bytes.Buffer
+	syncs, closes int
+	syncErr       error
+}
+
+func (s *syncCounter) Sync() error  { s.syncs++; return s.syncErr }
+func (s *syncCounter) Close() error { s.closes++; return nil }
+
+func TestFlushSyncsWithoutClosing(t *testing.T) {
+	w := &syncCounter{}
+	if err := Flush(w, "log"); err != nil {
+		t.Fatalf("Flush: %v", err)
+	}
+	if w.syncs != 1 || w.closes != 0 {
+		t.Fatalf("syncs=%d closes=%d, want one sync and no close", w.syncs, w.closes)
+	}
+	if !Closes(w) {
+		t.Error("a writer with Close is closed by FlushAndClose")
+	}
+	w.syncErr = errors.New("disk full")
+	if err := Flush(w, "audit log"); err == nil || !strings.Contains(err.Error(), "failed to sync audit log") || !errors.Is(err, w.syncErr) {
+		t.Fatalf("Flush = %v, want the sync error with the writer's name", err)
+	}
+}
