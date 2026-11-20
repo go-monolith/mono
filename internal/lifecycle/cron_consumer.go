@@ -290,3 +290,41 @@ func cronStartSequence(metadata map[string]string) (uint64, bool) {
 func isCronConsumerMissing(err error) bool {
 	return errors.Is(err, jetstream.ErrConsumerNotFound) || errors.Is(err, jetstream.ErrConsumerDoesNotExist)
 }
+
+// WriteCronStream creates or updates the stream of a cron service.
+//
+// The framework enables per-message TTLs (AllowMsgTTL) on the stream only
+// while the service has a TTL, and the server refuses to switch them off
+// again. A service whose TTL was removed would therefore fail every start
+// with the server's invalid configuration error, for a stream setting the
+// developer never wrote. When the write is rejected with that code, the
+// stream is read back, and if it has per-message TTLs enabled the write is
+// repeated once with them kept: a schedule without a TTL simply sends none.
+//
+// The setting is only ever kept, never enabled for a stream that does not
+// have it: a version that does not know this would otherwise fail on every
+// cron stream after a rollback. A start that needs no repeat makes no extra
+// request; a stream in this state costs the rejected write and the lookup at
+// every start. The error of the repeated write is returned, since the same
+// code is used for other rejections.
+func (lm *lifecycleManager) WriteCronStream(ctx context.Context, es types.EventStream, cfg types.StreamConfig) error {
+	_, err := es.CreateOrUpdateStream(ctx, cfg)
+	if err == nil || cfg.AllowMsgTTL || !IsStreamInvalidConfig(err) {
+		return err
+	}
+	stream, lookupErr := es.Stream(ctx, cfg.Name)
+	if lookupErr != nil || stream == nil {
+		return err
+	}
+	info := stream.CachedInfo()
+	if info == nil || !info.Config.AllowMsgTTL {
+		return err
+	}
+	cfg.AllowMsgTTL = true
+	if _, err := es.CreateOrUpdateStream(ctx, cfg); err != nil {
+		return err
+	}
+	lm.logger.Debug("Cron stream keeps per-message TTLs enabled; the server cannot switch them off again",
+		"stream", cfg.Name)
+	return nil
+}

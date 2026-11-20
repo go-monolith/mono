@@ -2,6 +2,8 @@ package container
 
 import (
 	"fmt"
+	"slices"
+	"strings"
 	"time"
 
 	"github.com/go-monolith/mono/pkg/types"
@@ -49,6 +51,11 @@ func (c *serviceContainer) RegisterCronService(
 	if len(config.Payload) > 0 && config.SourceSubject != "" {
 		return fmt.Errorf("cron service '%s': Payload and SourceSubject are mutually exclusive", name)
 	}
+	// The scheduler takes the last message of one subject; the server rejects
+	// a schedule whose source has a wildcard, after the stream was written.
+	if tokens := strings.Split(config.SourceSubject, "."); slices.Contains(tokens, "*") || slices.Contains(tokens, ">") {
+		return fmt.Errorf("cron service '%s': SourceSubject %q must be a single subject without wildcards", name, config.SourceSubject)
+	}
 	if config.TimeZone != "" {
 		if _, err := time.LoadLocation(config.TimeZone); err != nil {
 			return fmt.Errorf("cron service '%s': invalid TimeZone %q: %w", name, config.TimeZone, err)
@@ -75,6 +82,11 @@ func (c *serviceContainer) RegisterCronService(
 	// subject (distinct from the concrete target) so the durable consumer — which
 	// filters on the concrete target subject — never receives it.
 	scheduleSubject := types.CronScheduleSubject(targetSubject)
+	// The schedule and control sub-subjects carry the framework's own
+	// messages; a schedule cannot take its payload from them.
+	if config.SourceSubject == scheduleSubject || config.SourceSubject == types.CronControlSubject(targetSubject) {
+		return fmt.Errorf("cron service '%s': SourceSubject %q is reserved for the service's schedule", name, config.SourceSubject)
+	}
 
 	entry := &types.ServiceEntry{
 		Type:            types.ServiceTypeCron,

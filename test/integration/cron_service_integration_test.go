@@ -241,6 +241,40 @@ func TestCronServiceIntegration(t *testing.T) {
 		}
 	})
 
+	t.Run("source subject under the service's own subjects", func(t *testing.T) {
+		// The cron stream already listens on services.<module>.<service>.>,
+		// so a source subject below it must not be added a second time.
+		const sourceSubject = "services.metrics.resample.latest"
+		module := newCronTestModule("metrics", "resample", mono.CronServiceConfig{
+			Schedule:      "@every 1s",
+			SourceSubject: sourceSubject,
+		}, 1)
+
+		fw := startCronFramework(t, module)
+		defer fw.Stop(context.Background())
+
+		js, err := module.eventBus.EventStream()
+		if err != nil {
+			t.Fatalf("EventStream failed: %v", err)
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if _, err := js.Publish(ctx, sourceSubject, []byte("latest-payload")); err != nil {
+			t.Fatalf("publish to source subject failed: %v", err)
+		}
+
+		if !module.waitForTicks(8 * time.Second) {
+			t.Fatal("expected a tick carrying the source payload")
+		}
+		data, subject, _ := module.firstReceived()
+		if string(data) != "latest-payload" {
+			t.Errorf("payload = %q, want latest-payload", data)
+		}
+		if subject != "services.metrics.resample" {
+			t.Errorf("subject = %q, want services.metrics.resample", subject)
+		}
+	})
+
 	t.Run("schedule survives restart idempotently", func(t *testing.T) {
 		storageDir := t.TempDir()
 

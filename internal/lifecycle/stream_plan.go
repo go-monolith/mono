@@ -147,7 +147,9 @@ func StreamRegistrations(services []*types.ServiceEntry, events []types.EventStr
 //   - wrapping ErrStreamConfigImmutable when two of them disagree on a setting
 //     NATS cannot change on an existing stream (see CheckStreamRegistrations);
 //   - wrapping ErrInvalidConfiguration when two of their subjects overlap
-//     without one covering the other (see CheckStreamSubjects).
+//     without one covering the other (see CheckStreamSubjects), or when one
+//     of them seals a stream that runs message schedules (see
+//     CheckSealedStream).
 func NewStreamPlan(regs []StreamRegistration) (*StreamPlan, error) {
 	if err := CheckStreamRegistrations(regs); err != nil {
 		return nil, err
@@ -552,7 +554,11 @@ func MinimiseSubjects(subjects []string) []string {
 
 // CheckStreamRegistrations returns an error wrapping ErrStreamConfigImmutable
 // when two registrations name the same stream with different storage types,
-// or with retention policies of which exactly one is work-queue. Every
+// with retention policies of which exactly one is work-queue, or with a
+// one-way setting (OneWayStreamSettings) that only one of them enables, the
+// settings taken as the server would hold them (NormalisedStreamConfig). A
+// registration that seals a stream with message schedules is rejected too
+// (CheckSealedStream, wrapping ErrInvalidConfiguration). Every
 // registration writes the stream configuration, so the second one would be
 // rejected by the server; checking the registrations first fails before
 // anything is created, on a new deployment too, and names both of them. Other
@@ -561,6 +567,9 @@ func MinimiseSubjects(subjects []string) []string {
 func CheckStreamRegistrations(regs []StreamRegistration) error {
 	first := make(map[string]int, len(regs))
 	for i, reg := range regs {
+		if err := CheckSealedStream(reg.Stream, reg.Owner); err != nil {
+			return err
+		}
 		j, seen := first[reg.Stream.Name]
 		if !seen {
 			first[reg.Stream.Name] = i
@@ -571,13 +580,29 @@ func CheckStreamRegistrations(regs []StreamRegistration) error {
 			jetStreamStorage(other.Storage), jetStreamStorage(reg.Stream.Storage),
 			jetStreamRetention(other.Retention), jetStreamRetention(reg.Stream.Retention),
 			"the first with", "the second with")
-		if len(diffs) == 0 {
-			continue
+		if len(diffs) > 0 {
+			return fmt.Errorf("%w: stream %s is registered by the %s and by the %s, %s; "+
+				"NATS cannot change the storage type of an existing stream, or its retention to or from work-queue, "+
+				"so every registration of a stream must agree on them",
+				monoerrors.ErrStreamConfigImmutable, reg.Stream.Name, regs[j].Owner, reg.Owner, strings.Join(diffs, ", and "))
 		}
-		return fmt.Errorf("%w: stream %s is registered by the %s and by the %s, %s; "+
-			"NATS cannot change the storage type of an existing stream, or its retention to or from work-queue, "+
-			"so every registration of a stream must agree on them",
-			monoerrors.ErrStreamConfigImmutable, reg.Stream.Name, regs[j].Owner, reg.Owner, strings.Join(diffs, ", and "))
+		// A one-way setting that one registration has on and another off is
+		// switched on by the first write and cannot be switched off by the
+		// second: in one order the first start fails, in the other the next.
+		earlier, later := NormalisedStreamConfig(other), NormalisedStreamConfig(reg.Stream)
+		for _, setting := range OneWayStreamSettings {
+			if setting.Configured(earlier) == setting.Configured(later) {
+				continue
+			}
+			enables := "enables " + setting.Name
+			if setting.Name == "DenyPurge" && other.DenyPurge && reg.Stream.DenyPurge {
+				// Both set it; for one of them the server switches it off.
+				enables = "keeps DenyPurge enabled (AllowMsgSchedules or SubjectDeleteMarkerTTL of the other switches it off)"
+			}
+			return fmt.Errorf("%w: stream %s is registered by the %s and by the %s, of which only one %s; "+
+				"NATS cannot switch it off again on an existing stream, so every registration of a stream must agree on it",
+				monoerrors.ErrStreamConfigImmutable, reg.Stream.Name, regs[j].Owner, reg.Owner, enables)
+		}
 	}
 	return nil
 }

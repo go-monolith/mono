@@ -126,6 +126,42 @@ func TestRegisterCronService_Validation(t *testing.T) {
 			wantErr: true,
 		},
 		{
+			name:    "source with a single-token wildcard",
+			config:  types.CronServiceConfig{Schedule: "@every 1m", SourceSubject: "events.*"},
+			handler: noopCronHandler,
+			wantErr: true,
+		},
+		{
+			name:    "source with a trailing wildcard",
+			config:  types.CronServiceConfig{Schedule: "@every 1m", SourceSubject: "services.>"},
+			handler: noopCronHandler,
+			wantErr: true,
+		},
+		{
+			name:    "valid source with a wildcard character inside a token",
+			config:  types.CronServiceConfig{Schedule: "@every 1m", SourceSubject: "alerts.over>50"},
+			handler: noopCronHandler,
+			wantErr: false,
+		},
+		{
+			name:    "source is the schedule subject",
+			config:  types.CronServiceConfig{Schedule: "@every 1m", SourceSubject: "services.mod.job.schedule"},
+			handler: noopCronHandler,
+			wantErr: true,
+		},
+		{
+			name:    "source is the control subject",
+			config:  types.CronServiceConfig{Schedule: "@every 1m", SourceSubject: "services.mod.job.control"},
+			handler: noopCronHandler,
+			wantErr: true,
+		},
+		{
+			name:    "valid source under the service's own subjects",
+			config:  types.CronServiceConfig{Schedule: "@every 1m", SourceSubject: "services.mod.job.latest"},
+			handler: noopCronHandler,
+			wantErr: false,
+		},
+		{
 			name:    "valid source only",
 			config:  types.CronServiceConfig{Schedule: "@every 1m", SourceSubject: "events.metrics"},
 			handler: noopCronHandler,
