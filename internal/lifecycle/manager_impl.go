@@ -757,6 +757,23 @@ func (lm *lifecycleManager) Start(ctx context.Context) (err error) {
 		return fmt.Errorf("failed to start plugins: %w", err)
 	}
 
+	// What a failed start had started is stopped with one context of its
+	// own, made when the first rollback step needs it: ctx has usually ended
+	// by then (see RollbackContext), and the steps share one budget.
+	var rollback context.Context
+	var cancelRollback context.CancelFunc
+	rollbackCtx := func() context.Context {
+		if rollback == nil {
+			rollback, cancelRollback = RollbackContext(ctx)
+		}
+		return rollback
+	}
+	defer func() {
+		if cancelRollback != nil {
+			cancelRollback()
+		}
+	}()
+
 	// From here on every error return stops what was started: the plugins,
 	// and the middleware whose Start succeeded. Modules are rolled back
 	// before this runs (see rollback), so the order is modules, middleware,
@@ -764,7 +781,7 @@ func (lm *lifecycleManager) Start(ctx context.Context) (err error) {
 	var startedMiddleware []types.MiddlewareModule
 	defer func() {
 		if err != nil {
-			lm.rollbackStartedInfrastructure(ctx, startedMiddleware)
+			lm.rollbackStartedInfrastructure(rollbackCtx(), startedMiddleware)
 		}
 	}()
 
@@ -827,7 +844,7 @@ func (lm *lifecycleManager) Start(ctx context.Context) (err error) {
 		}
 
 		if err := lm.startModule(ctx, module); err != nil {
-			return lm.rollback(ctx, started, err)
+			return lm.rollback(rollbackCtx(), started, err)
 		}
 
 		started = append(started, module.Name())
@@ -853,11 +870,11 @@ func (lm *lifecycleManager) Start(ctx context.Context) (err error) {
 	// keeps running against the modules the rollback is about to stop and a
 	// retried Start does not subscribe twice.
 	if err := lm.setupNATSSubscriptions(ctx); err != nil {
-		if terr := lm.teardownNATSSubscriptions(ctx); terr != nil {
+		if terr := lm.teardownNATSSubscriptions(rollbackCtx()); terr != nil {
 			lm.logger.Error("Error tearing down NATS subscriptions after failed setup", "error", terr)
 		}
 		lm.resetSubscriptionState()
-		return lm.rollback(ctx, started, err)
+		return lm.rollback(rollbackCtx(), started, err)
 	}
 
 	// Step 6: periodic subscription stats log, when enabled
@@ -1943,8 +1960,11 @@ func (lm *lifecycleManager) startPlugins(ctx context.Context) error {
 	for _, alias := range aliases {
 		plugin := plugins[alias]
 		if err := lm.startPlugin(ctx, plugin, alias); err != nil {
-			// Rollback already started plugins
-			lm.rollbackPlugins(ctx, startedAliases)
+			// Rollback already started plugins, with a context that has
+			// not ended with the start (see RollbackContext).
+			rollbackCtx, cancel := RollbackContext(ctx)
+			lm.rollbackPlugins(rollbackCtx, startedAliases)
+			cancel()
 			return err
 		}
 		startedAliases = append(startedAliases, alias)

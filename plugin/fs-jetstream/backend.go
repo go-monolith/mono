@@ -29,6 +29,9 @@ type JetStreamBackend struct {
 	bucketTTL  time.Duration
 	store      jetstream.ObjectStore
 	logger     *slog.Logger
+	// puts serialises the uploads and deletes of one object name (see
+	// PutObject and DeleteObject).
+	puts KeyedMutex
 }
 
 // Compile-time interface checks.
@@ -106,7 +109,7 @@ func (b *JetStreamBackend) SetWithContext(ctx context.Context, key string, val [
 		Name: key,
 	}
 
-	_, err := b.store.Put(ctx, meta, bytes.NewReader(val))
+	_, err := b.PutObject(ctx, meta, bytes.NewReader(val))
 	if err != nil {
 		return fmt.Errorf("failed to put object %s: %w", key, err)
 	}
@@ -126,7 +129,7 @@ func (b *JetStreamBackend) Set(key string, val []byte, exp time.Duration) error 
 // DeleteWithContext deletes the value for the given key with a context.
 // It returns no error if the storage does not contain the key.
 func (b *JetStreamBackend) DeleteWithContext(ctx context.Context, key string) error {
-	if err := b.store.Delete(ctx, key); err != nil {
+	if err := b.DeleteObject(ctx, key); err != nil {
 		if errors.Is(err, jetstream.ErrObjectNotFound) {
 			return nil // Key not found is not an error per storage.Storage contract
 		}
@@ -153,7 +156,7 @@ func (b *JetStreamBackend) ResetWithContext(ctx context.Context) error {
 	}
 
 	for _, info := range infos {
-		if err := b.store.Delete(ctx, info.Name); err != nil {
+		if err := b.DeleteObject(ctx, info.Name); err != nil {
 			if !errors.Is(err, jetstream.ErrObjectNotFound) {
 				return fmt.Errorf("failed to delete object %s during reset: %w", info.Name, err)
 			}
@@ -282,7 +285,7 @@ func (b *JetStreamBackend) PutReaderWithContext(ctx context.Context, key string,
 		}
 	}
 
-	info, err := b.store.Put(ctx, meta, reader)
+	info, err := b.PutObject(ctx, meta, reader)
 	if err != nil {
 		return nil, fmt.Errorf("failed to put object %s: %w", key, err)
 	}

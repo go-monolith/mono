@@ -381,6 +381,18 @@ func (m *BackupModule) SetPlugin(alias string, plugin mono.PluginModule) {
 }
 ```
 
+## Uploads That Are Given Up
+
+An object is stored as chunk messages followed by a metadata message. Chunks no metadata refers to are invisible to `List`, `Delete` and `Reset`, but count towards `MaxBytes`.
+
+- A `Put` whose context is cancelled or times out leaves no chunks: the upload stops at the next read, what it wrote is removed, and `Put` returns the context's error.
+- An upload whose data was read completely is finished, also when its context ends in that moment.
+- Uploads and deletes of one name are serialised within one application instance. A `Delete` that has begun is finished.
+- Not covered: uploads of one name from several instances at once, and an instance that dies during an upload.
+- Chunks left behind earlier are not removed automatically.
+
+See the plugin documentation (`docs/official/plugins/fs-jetstream.md`) for details.
+
 ## Plugin Lifecycle
 
 1. **Startup**: Plugin starts FIRST (before middleware and regular modules)

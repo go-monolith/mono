@@ -5,6 +5,7 @@ package helper
 
 import (
 	"context"
+	stderrors "errors"
 	"fmt"
 	"slices"
 	"strings"
@@ -185,6 +186,14 @@ func RegisterTypedEventConsumerWithOptions[T any](
 //
 // The config.Stream.Subjects will be overridden with the event definition's subject.
 //
+// A message that fails to unmarshal is left out: the handler gets the other
+// messages of the batch (it is not called when none is left), and the returned
+// error wraps ErrUndecodableMessage. The message is neither acknowledged nor
+// terminated, so the server redelivers it after AckWait. An event stream
+// consumer has no MaxDeliver unless config.Consumer.MaxDeliver sets one, so
+// such a message is redelivered, and logged, until it leaves the stream; set
+// MaxDeliver to bound that. See DecodeBatch.
+//
 // Example:
 //
 //	config := types.StreamConsumerConfig{
@@ -219,15 +228,15 @@ func RegisterTypedEventStreamConsumer[T any](
 ) error {
 	// Wrap the typed handler in a standard EventStreamConsumerHandler
 	wrappedHandler := func(ctx context.Context, msgs []*types.Msg) error {
-		events := make([]T, 0, len(msgs))
-		for _, msg := range msgs {
-			event, err := eventDef.Unmarshal(msg)
-			if err != nil {
-				return fmt.Errorf("failed to unmarshal event: %w", err)
-			}
-			events = append(events, event)
+		events, decoded, undecoded := DecodeBatch(msgs, eventDef.Unmarshal)
+		var handlerErr error
+		if len(decoded) > 0 {
+			handlerErr = handler(ctx, events, decoded)
 		}
-		return handler(ctx, events, msgs)
+		if undecoded != nil {
+			undecoded = fmt.Errorf("event %s: %w", eventDef.ToBase().Name, undecoded)
+		}
+		return stderrors.Join(handlerErr, undecoded)
 	}
 
 	return registry.RegisterEventStreamConsumer(eventDef.ToBase(), config, wrappedHandler, module)
@@ -666,7 +675,12 @@ func RegisterTypedQueueGroupService[T any](
 // Important:
 //   - Messages should be individually acknowledged using Ack(), Nak(), etc.
 //   - The payloads slice and msgs slice are parallel - payloads[i] corresponds to msgs[i]
-//   - If unmarshaling fails for any message, the error is returned and no messages are processed
+//   - A message that fails to unmarshal is left out: the handler gets the
+//     other messages of the batch (it is not called when none is left), and
+//     the returned error wraps ErrUndecodableMessage. The message is neither
+//     acknowledged nor terminated, so the server redelivers it after AckWait,
+//     until MaxDeliver (3 by default); it is not removed from the stream. See
+//     DecodeBatch.
 //
 // Example:
 //
@@ -710,15 +724,19 @@ func RegisterTypedStreamConsumerService[T any](
 ) error {
 	// Wrap the typed handler in a standard StreamConsumerHandler
 	wrappedHandler := func(ctx context.Context, msgs []*types.Msg) error {
-		payloads := make([]T, 0, len(msgs))
-		for _, msg := range msgs {
+		payloads, decoded, undecoded := DecodeBatch(msgs, func(msg *types.Msg) (T, error) {
 			var payload T
-			if err := unmarshalF(msg.Data, &payload); err != nil {
-				return fmt.Errorf("service '%s': failed to unmarshal message: %w", name, err)
-			}
-			payloads = append(payloads, payload)
+			err := unmarshalF(msg.Data, &payload)
+			return payload, err
+		})
+		var handlerErr error
+		if len(decoded) > 0 {
+			handlerErr = handler(ctx, payloads, decoded)
 		}
-		return handler(ctx, payloads, msgs)
+		if undecoded != nil {
+			undecoded = fmt.Errorf("service '%s': %w", name, undecoded)
+		}
+		return stderrors.Join(handlerErr, undecoded)
 	}
 
 	return container.RegisterStreamConsumerService(name, config, wrappedHandler)

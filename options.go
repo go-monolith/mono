@@ -70,12 +70,14 @@ func WithNATSPort(port int) MonoFrameworkOption {
 				"port must be between 1024 and 65535")
 		}
 		cfg.NATSOptions.Port = port
+		cfg.NATSOptions.PortSet = true
 		return nil
 	}
 }
 
-// WithNATSHost sets the NATS server host address.
-// The host cannot be empty.
+// WithNATSHost sets the NATS server host address (default 127.0.0.1).
+// The host cannot be empty. It overrides the host of a config file
+// (WithNATSConfigFile), also when it is the default.
 //
 // Example:
 //
@@ -87,6 +89,7 @@ func WithNATSHost(host string) MonoFrameworkOption {
 				"host cannot be empty")
 		}
 		cfg.NATSOptions.Host = host
+		cfg.NATSOptions.HostSet = true
 		return nil
 	}
 }
@@ -134,6 +137,15 @@ func WithNATSInProcessConn() MonoFrameworkOption {
 // When both a config file and programmatic options (like WithNATSPort) are specified,
 // the config file provides base settings and programmatic options override them.
 // This allows using a standard NATS config file while customizing specific settings.
+// WithNATSHost, WithNATSPort and WithNATSMaxPayload override the file whenever
+// they are used, also with a value that equals the framework default.
+//
+// Listen address: without a config file the client listener binds 127.0.0.1.
+// With a config file that sets no host (or listen), and without WithNATSHost,
+// nats-server's own default applies and the listener accepts connections on
+// every interface; this is logged at Warn when the server starts. Use
+// WithNATSHost("127.0.0.1"), or set the host in the file, to keep the client
+// port private.
 //
 // The path cannot be empty. File existence and validity are checked when
 // NewMonoApplication starts the embedded server, not when the option is applied.
@@ -858,6 +870,7 @@ func WithNATSMaxPayload(bytes int32) MonoFrameworkOption {
 				fmt.Sprintf("max payload must be at most %d bytes (8 MB), got %d", maxPayload, bytes))
 		}
 		cfg.NATSOptions.MaxPayload = bytes
+		cfg.NATSOptions.MaxPayloadSet = true
 		return nil
 	}
 }

@@ -171,6 +171,37 @@ See [Changing a Consumer Setting That Cannot Be Changed](../api/container.md#cha
 
 See [Work-Queue Streams: One Consumer per Subject](../api/container.md#work-queue-streams-one-consumer-per-subject), [Renaming a Stream, or Switching a Service Between Stream Consumer and Cron](../api/container.md#renaming-a-stream-or-switching-a-service-between-stream-consumer-and-cron) and [Lowering a Stream's Consumer Limits](../api/container.md#lowering-a-streams-consumer-limits).
 
+### An explicit host, port or max payload overrides a config file (v0.2.17)
+
+*v0.2.17.* With [`WithNATSConfigFile`](../api/framework.md#withnatsconfigfile), `WithNATSHost`, `WithNATSPort` and `WithNATSMaxPayload` were dropped when their value equalled the framework default. `WithNATSHost("127.0.0.1")` beside a config file without a host therefore left the client listener on every interface, without authentication unless the file configured it, while the log said `host=127.0.0.1`.
+
+- **The options now override the file whenever they are used.** A configuration that passed a default-valued option beside a file that sets another value changes: the option wins.
+- **A config file without a host, and no `WithNATSHost`, still listens on every interface** (nats-server's default). This is now logged at Warn when the server starts, and the start-up log reports the address the server is bound to. Add `WithNATSHost("127.0.0.1")` or a `host` in the file if the port is meant to be private.
+
+### `Start` and `Stop` are guarded against each other (v0.2.17)
+
+*v0.2.17.* Overlapping calls all ran before:
+
+- **`Stop` during `Start`** stopped NATS under the start, which then returned nil and left the application "running" without a server and with no module stopped. `Stop` now aborts the start: `Start` stops what it started and returns an error wrapping `context.Canceled`. A program that calls `Stop` from a signal handler while `Start` is running must expect that error from `Start`.
+- **A second `Stop` during a graceful one** stopped NATS at once, under the handlers the first one was waiting for. It now waits for the first and returns its result.
+- **A second `Start` during `Start`** started the modules twice. It now fails with `application is already starting`.
+- **A failed `Start`** stops what it started with a context of its own (bounded by the shutdown timeout) instead of the `Start` context, which has usually ended by then.
+- **The context a module's `Start` receives** is now derived from the one passed to `Start`. It stays live while the application runs, as before, and ends once `Stop` has finished.
+
+See [`Start`](../api/framework.md#start) and [`Stop`](../api/framework.md#stop).
+
+### A message that cannot be unmarshaled no longer costs its batch (v0.2.17)
+
+*v0.2.17.* A typed stream consumer or event stream consumer handler (`helper.RegisterTypedStreamConsumerService`, `helper.RegisterTypedEventStreamConsumer`, typed stream consumer definitions) was not called when one message of its batch failed to unmarshal. Nothing was acknowledged, and after `MaxDeliver` deliveries the valid messages of the batch were given up on together with it.
+
+- **The handler now gets the other messages**, with `payloads[i]` belonging to `msgs[i]`. It can be called with fewer messages than the fetch batch size, and is not called when none is left.
+- **The message that failed is left as it was**: not acknowledged and not terminated, so it stays in the stream and is redelivered after `AckWait`, until `MaxDeliver`. The error logged for the batch wraps `helper.ErrUndecodableMessage`.
+
+### Other fixes in v0.2.17
+
+- **`audit.VerifyChain`** accepts the untampered log of a normal run; it rejected every log that held a clean `module.stopped` entry. Existing logs verify without being rewritten. See [Verifying Audit Log Integrity](../middleware/audit.md#verifying-audit-log-integrity).
+- **fs-jetstream:** a `Put` whose context is cancelled or times out no longer leaves its chunks in the bucket, where they counted towards `MaxBytes` and could not be removed. Chunks left behind by earlier versions are not removed automatically. For a deadline that passes during the upload `Put` now returns `context.DeadlineExceeded` instead of `nats: timeout`. See [Uploads That Are Given Up](../plugins/fs-jetstream.md#uploads-that-are-given-up).
+
 ## New Features
 
 All optional.
@@ -188,6 +219,8 @@ All optional.
 | [fs-jetstream `BucketConfig.RecreateOnStorageMismatch`](../plugins/fs-jetstream.md#changing-a-buckets-storage-type), `fsjetstream.ErrStorageMismatch` | v0.2.11 | The same for object store buckets: a bucket whose stream exists with another storage type fails `Start` with a clear error, or, with the opt-in, is recreated: **the bucket is emptied**, after its objects are copied to a backup bucket (kept 7 days by default; `SkipBackupOnRecreate`, `RecreateBackupTTL`, `RecreateBackupTimeout`, default 10 minutes). Set it only for a bucket whose contents can be lost. `WithLogger(nil)` is now rejected, and without `WithLogger` the logger is resolved at `Start` |
 | [`monoerrors.ErrStreamConfigImmutable`](../api/container.md#changing-a-streams-storage-type-or-retention) | v0.2.12 | A stream consumer service or event stream consumer whose `Storage`, or `Retention` to or from work-queue, differs from the existing stream's fails `Start` with a clear error instead of the server's generic one. It failed before as well; the stream is never deleted. Two event stream consumers that register one stream with different values now fail before the stream is created |
 | [`monoerrors.ErrWorkQueueConsumerConflict`](../api/container.md#work-queue-streams-one-consumer-per-subject), [`monoerrors.ErrStreamSubjectsOverlap`](../api/container.md#renaming-a-stream-or-switching-a-service-between-stream-consumer-and-cron) | v0.2.16 | `Start` errors for a second consumer on the same subjects of a work-queue stream, and for a stream that asks for subjects another stream holds. Both failed before as well, with the server's error; nothing is deleted |
+| `helper.DecodeBatch`, `helper.ErrUndecodableMessage` | v0.2.17 | Decode a batch leaving out the messages that fail to unmarshal; the error the typed batch handlers return for such a batch |
+| `audit.CanonicalDetails`, `audit.HashEntry`, `audit.LegacyEmptyDetailsHash` | v0.2.17 | The form an audit entry's details are hashed in, and the hash earlier versions gave an entry with empty details |
 | [`WithNATSSystemAccount(user, password)`](../api/framework.md#withnatssystemaccount) | v0.2.2 | A system account user for `nats server report` and `nats server raft peer-remove`. Clients that send credentials of their own are rejected once it is on, unless they are the system account user's |
 | `mono.ServiceLookup` | v0.1.2 | The read side of `ServiceContainer`, accepted by the typed contracts and helpers |
 | [`monotest.CheckImports`](module-boundaries.md#checking-imports) | v0.1.2 | Checks the contract package import rule; put the test in the application's root directory |

@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"net/url"
 	"runtime/debug"
 	"strings"
@@ -185,6 +186,11 @@ func (m *natsManager) Start(ctx context.Context) error {
 		opts = &server.Options{}
 	}
 
+	// A config file without a host, and no WithHost: nats-server's default
+	// applies, which is every interface, not the framework's loopback
+	// default. It is reported at Warn once the server has started.
+	fileLeavesHostOpen := m.config.ConfigFile != "" && !m.config.HostSet && opts.Host == "" && !m.config.DontListen
+
 	// Apply host/port configuration
 	// When using config file: only apply if explicitly set (programmatic override)
 	// When not using config file: always apply from m.config (includes defaults)
@@ -209,11 +215,13 @@ func (m *natsManager) Start(ctx context.Context) error {
 	if m.config.DontListen {
 		opts.DontListen = true
 	}
-	// MaxPayload: When using config file, only apply if different from default (1MB)
-	// to avoid overriding config file settings with defaults
+	// MaxPayload: with a config file, only apply it when it was given by
+	// WithMaxPayload, so that the default does not override the file. A value
+	// that differs from the default (1MB) counts as given too, for a
+	// configuration that was not built by the options.
 	defaultMaxPayload := int32(1024 * 1024)
 	if m.config.ConfigFile != "" {
-		if m.config.MaxPayload > 0 && m.config.MaxPayload != defaultMaxPayload {
+		if m.config.MaxPayload > 0 && (m.config.MaxPayloadSet || m.config.MaxPayload != defaultMaxPayload) {
 			opts.MaxPayload = m.config.MaxPayload
 		}
 	} else {
@@ -349,10 +357,13 @@ func (m *natsManager) Start(ctx context.Context) error {
 		return fmt.Errorf("NATS server not ready after %s timeout", m.config.StartupReadyTimeout)
 	}
 
+	// The address the server is listening on, not the configured one: with
+	// a config file they can differ (see fileLeavesHostOpen).
+	listenHost, listenPort := ListenAddress(ns.Addr(), m.config.Host, m.config.Port)
 	logAttrs := []any{
 		"server_name", ns.Name(),
-		"host", m.config.Host,
-		"port", m.config.Port,
+		"host", listenHost,
+		"port", listenPort,
 		"jetstream", m.config.JetStreamEnabled,
 	}
 	if m.config.ClusterEnabled {
@@ -370,6 +381,12 @@ func (m *natsManager) Start(ctx context.Context) error {
 		logAttrs = append(logAttrs, "client_tls", true)
 	}
 	m.logger.Info("NATS server started", logAttrs...)
+	if fileLeavesHostOpen {
+		m.logger.Warn("NATS client listener accepts connections on all interfaces: the config file sets no host and WithNATSHost was not used, "+
+			"so nats-server's default applies instead of the framework's loopback default. "+
+			"Set host (or listen) in the config file, or use WithNATSHost, to say which interface is meant",
+			"config_file", m.config.ConfigFile, "host", listenHost, "port", listenPort)
+	}
 
 	// Obtain certificates before reporting readiness so that a misconfigured
 	// domain or an unreachable challenge port fails startup instead of
@@ -731,4 +748,16 @@ func jetStreamHealthFromJsz(info *server.JSInfo) *types.JetStreamHealth {
 		}
 	}
 	return h
+}
+
+// ListenAddress returns the host and port of the client listener addr, as the
+// server reports it once it is ready. It returns fallbackHost and fallbackPort
+// when addr is not a TCP address: a server that does not listen (DontListen)
+// has none.
+func ListenAddress(addr net.Addr, fallbackHost string, fallbackPort int) (string, int) {
+	tcp, ok := addr.(*net.TCPAddr)
+	if !ok || tcp == nil {
+		return fallbackHost, fallbackPort
+	}
+	return tcp.IP.String(), tcp.Port
 }

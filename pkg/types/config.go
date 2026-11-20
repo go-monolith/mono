@@ -129,8 +129,17 @@ type ServiceDiscoveryConfig struct {
 
 // NATSOptions holds NATS server configuration.
 type NATSOptions struct {
-	Host             string
-	Port             int
+	Host string
+	Port int
+	// HostSet, PortSet and MaxPayloadSet record that Host, Port and
+	// MaxPayload were given by an option (WithNATSHost, WithNATSPort,
+	// WithNATSMaxPayload) and are not the defaults. With a config file
+	// (ConfigFile) only values given by an option override the file, so a
+	// value that happens to equal the default must still be told apart from
+	// the default.
+	HostSet          bool
+	PortSet          bool
+	MaxPayloadSet    bool
 	DontListen       bool     // If true, server won't listen on TCP (useful for in-process only). Requires UseInProcessConn=true.
 	UseInProcessConn bool     // If true, client uses in-process connection instead of TCP. Can be used independently or with DontListen.
 	JetStreamEnabled bool     // Track if JetStream is requested
