@@ -373,6 +373,74 @@ The new stream must listen on other subjects than the old one, otherwise the ser
 **Deleting the stream** (`nats stream rm <stream>`) and restarting also applies the new settings, but it permanently deletes every message in the stream and the position of every consumer on it. Use it only when the stream holds nothing you need, for example in a development environment.
 {% endhint %}
 
+### Sharing a Stream Between Registrations
+
+Several registrations may name the same stream: stream consumer services, [event stream consumers](eventregistry.md#registereventstreamconsumer), or both.
+
+- **Same subjects.** Two modules that consume the same event on one stream each get every event (on a limits or interest stream). Nothing changed here.
+- **Different subjects.** Since v0.2.13 the stream is written with the subjects of all its registrations, and each consumer is filtered on the subjects of its own registration. Each handler receives only its own messages.
+
+```go
+// Two events of one module, kept in one stream.
+config := mono.StreamConsumerConfig{Stream: mono.StreamConfig{Name: "billing-events"}}
+registry.RegisterEventStreamConsumer(invoiceIssued.ToBase(), config, m.handleInvoice, m)
+registry.RegisterEventStreamConsumer(paymentReceived.ToBase(), config, m.handlePayment, m)
+```
+
+{% hint style="warning" %}
+**Before v0.2.13 this configuration lost messages.** Each registration overwrote the stream's subjects with its own, so only one registration's messages were stored, and the handlers received each other's messages. `Start` succeeded and nothing was logged. For stream consumer services, which registration won could change from one start to the next.
+{% endhint %}
+
+Details:
+
+- **Existing deployments are repaired in place** at the next start: the stream gets the missing subjects and the durable consumers get their filter. They keep their position, so nothing they acknowledged is delivered again. Messages that were never stored cannot be recovered.
+- **Your own filter is kept.** A registration that sets `Consumer.FilterSubject` or `Consumer.FilterSubjects` is not given another one.
+- **Subjects that cover each other** (`tasks.>` and `tasks.urgent`) are reduced to the covering one for the stream. Both consumers keep their own filter, so a message on `tasks.urgent` goes to both handlers.
+- **Subjects that overlap without one covering the other** (`a.*.c` and `a.b.*`) cannot be in one stream, unless a third subject on the stream covers both. `Start` fails with `ErrInvalidConfiguration`, naming both registrations, before anything is written.
+- **Other stream settings** (`MaxAge`, limits, `Description`) are not merged. Every registration writes them, and the one set up last wins. Services are set up in name order, modules first by name, then event stream consumers in registration order, so the result is the same on every start. Give the registrations of one stream the same settings.
+- **`Storage` and work-queue retention** must agree across the registrations of a stream, or `Start` fails with `ErrStreamConfigImmutable` (see above).
+- **Work-queue streams** accept one consumer per subject. Registrations with different subjects can share one; registrations whose subjects are the same or cover each other cannot.
+- **When a stream stops being shared** (the other registrations are removed), the remaining consumers lose their filter again. Messages of a removed registration that are still stored after a consumer's position are then delivered to it. Purge them first if a handler must not see them (`nats stream purge <stream> --subject <subject>`).
+- **Rolling deploy from an earlier version:** an instance of the earlier version that starts later overwrites the subjects again, until every instance runs v0.2.13 or later. The next start of a newer instance repairs them.
+
+### Renaming or Removing a Stream Registration
+
+The names of durable consumers and service subjects are derived from module, service and event names:
+
+| Registration | Durable consumer |
+|---|---|
+| Stream consumer service | `<module>-<service>` |
+| Event stream consumer | `<consumer-module>-<event-module>-<event>-<version>` |
+
+A rename therefore creates a **new** durable, and the old one stays on the server. Removing a registration leaves its durable, and for a service its stream. The framework never deletes them, because another version of the application may still be running and using them, and deleting them loses their position or messages.
+
+| What changed | Limits stream | Interest stream | Work-queue stream |
+|---|---|---|---|
+| Module or service renamed | The new durable starts from its deliver policy: with the default, the stream is delivered again | Handled messages are kept, because the old durable never acknowledges them | `Start` fails: the old durable holds the subjects |
+| Registration removed | Nothing is consumed; the stream keeps its messages | Messages the remaining consumers handled are kept | Messages are kept |
+| Service removed or changed to another kind | The stream keeps storing what is published to the service subject | The same | The same |
+
+Messages are kept until the stream's own limits (`MaxAge`, `MaxMsgs`, `MaxBytes`) remove them. Without limits, which is the default, they are kept without bound.
+
+**Leftover report.** Since v0.2.13 the framework marks the streams and durable consumers it creates (metadata entry `mono.registration`) and, at every start, logs a warning for each marked one that no registration of the application uses:
+
+```text
+WARN Consumer left behind by a stream registration this application no longer has (renamed or removed). ...
+     stream=EVENTS consumer=billing-orders-OrderPlaced-v1
+     created_for="event stream consumer of module billing for event orders.OrderPlaced"
+     retains_messages=true remove_with="nats consumer rm EVENTS billing-orders-OrderPlaced-v1"
+WARN Stream left behind by a stream registration this application no longer has (renamed or removed). ...
+     stream=ORDERS created_for="stream consumer service orders.ingest" remove_with="nats stream rm ORDERS"
+```
+
+- **Check before you remove.** During a rolling deploy, an instance of another version may still use what is reported, and so may another application built on the framework that uses the same JetStream: its streams and consumers carry the same marker. Removing a consumer loses its position; removing a stream loses its messages.
+- **A stream that existed before** and that a registration names is marked too, and reported once no registration names it.
+- **What is not reported:** streams and consumers the application created itself, and anything left behind before v0.2.13 (it never received the marker). List those with `nats stream ls` and `nats consumer ls <stream>`.
+- **Marking happens at the first start on v0.2.13 or later**, in place, without changing a consumer's position.
+- **The report is best effort.** It inspects at most 64 unregistered consumers and 64 unregistered streams per start, within 10 seconds, logs when it could not inspect everything, and never fails `Start`.
+
+A new durable cannot take over the old one's position, so on a limits stream a rename means the stream is delivered again. Handlers should be idempotent in any case, because delivery is at least once.
+
 ### RegisterCronService
 
 ```go

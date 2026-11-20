@@ -106,6 +106,21 @@ This includes non-durable consumers your application creates itself. The server 
 
 *v0.1.2.* `Entries()` on the container passed to `SetDependencyServiceContainer` returns deep copies without handlers and channels (nil). A module that read `RequestHandler`, `QueueHandlers[i].Handler`, `InChannel` or `OutChannel` from a dependency now finds nil; use `GetRequestReplyService`, `GetQueueGroupService`, `GetStreamConsumerService` or `GetChannelService`. The framework logs one warning for the first such call per dependency. `app.Services(name).Entries()` in the host program is unchanged.
 
+### Registrations that share a stream no longer overwrite each other (v0.2.13)
+
+*v0.2.13.* Registrations that name the same stream but listen on different subjects (two stream consumer services, two events, or a service and an event) used to overwrite each other's subjects: only one registration's messages were stored, and the handlers received each other's messages. The stream is now written with the subjects of all of them and each consumer is filtered on its own.
+
+- **Existing deployments** are repaired at the next start. Durable consumers keep their position. Messages that were never stored cannot be recovered.
+- **Handlers stop receiving foreign messages.** A handler that relied on receiving another registration's messages must register for them.
+- **Nothing changes** for a registration with a stream of its own, or for registrations with the same subjects on one stream.
+- **Setup order:** services are now set up in name order, so which registration's other stream settings win no longer varies between starts.
+
+See [Sharing a Stream Between Registrations](../api/container.md#sharing-a-stream-between-registrations).
+
+### Leftover streams and consumers are reported (v0.2.13)
+
+*v0.2.13.* The framework adds a metadata entry (`mono.registration`) to the streams and durable consumers it creates, in place at the next start, and logs a warning at every start for each marked one that no registration uses any more (after a module, service or event was renamed or removed). Nothing is deleted. Leftovers from before v0.2.13 are not recognised. See [Renaming or Removing a Stream Registration](../api/container.md#renaming-or-removing-a-stream-registration).
+
 ## New Features
 
 All optional.
