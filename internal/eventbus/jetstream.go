@@ -217,6 +217,26 @@ func (j *NatsJetStream) StreamNames(ctx context.Context) ([]string, error) {
 	return names, nil
 }
 
+// StreamNamesBySubject returns the names of the streams that listen on a
+// subject overlapping subject (the server compares them as NATS subjects, so
+// either may carry wildcards), in sorted order. A stream without subjects
+// listens on its own name.
+//
+// Like StreamNames it is a concrete method, detected through an optional
+// interface. The lifecycle manager uses it to name the stream that holds the
+// subjects of a stream the server rejected for overlapping it.
+func (j *NatsJetStream) StreamNamesBySubject(ctx context.Context, subject string) ([]string, error) {
+	lister := j.js.StreamNames(ctx, jetstream.WithStreamListSubject(subject))
+	var names []string
+	for name := range lister.Name() {
+		names = append(names, name)
+	}
+	if err := lister.Err(); err != nil {
+		return nil, fmt.Errorf("failed to list the streams on subject %s: %w", subject, err)
+	}
+	return names, nil
+}
+
 // StreamMetadata returns the metadata of the named stream, or nil when the
 // stream does not exist yet. Like ConsumerNames, it is a concrete method used
 // by the lifecycle manager's legacy durable migration.

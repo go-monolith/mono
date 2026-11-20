@@ -98,6 +98,35 @@ var (
 	// apply the change: that would lose its messages and the position of
 	// every consumer.
 	ErrStreamConfigImmutable = errors.New("stream configuration cannot be changed in place")
+
+	// ErrWorkQueueConsumerConflict is returned by Start when a stream
+	// consumer service or an event stream consumer needs a consumer on a
+	// work-queue stream (StreamConfig.Retention WorkQueuePolicy) that
+	// another consumer already covers. Such a stream delivers each message
+	// to one consumer, so no two consumers may listen on the same subjects.
+	// It is returned before anything is created when two registrations of
+	// the application collide (two modules consuming one event, for
+	// example), and after the server rejected the consumer when one that
+	// already exists is in the way, typically the durable of a module or
+	// service that was renamed. The error names the stream, the
+	// registrations and the consumers, and wraps the server's error when
+	// there is one. The framework never deletes the existing consumer
+	// itself: another running version of the application may still use it.
+	ErrWorkQueueConsumerConflict = errors.New("work-queue stream consumers overlap")
+
+	// ErrStreamSubjectsOverlap is returned by Start when the stream of a
+	// stream consumer service, an event stream consumer or a cron service
+	// asks for subjects that another stream already listens on: a subject
+	// belongs to one stream for as long as that stream exists. This is what
+	// renaming a stream (StreamConfig.Name) with the same subjects, or
+	// turning a stream consumer service into a cron service of the same name
+	// (or the reverse), amounts to. It is also returned before anything is
+	// created when two registrations of the application put overlapping
+	// subjects on different streams. The error names the streams, what
+	// registered them and the subjects, and wraps the server's error when
+	// there is one. The framework never moves the subjects or deletes the
+	// other stream: that would lose messages.
+	ErrStreamSubjectsOverlap = errors.New("stream subjects overlap with another stream")
 )
 
 // ModuleError wraps errors with module context.

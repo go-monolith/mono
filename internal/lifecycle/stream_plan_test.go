@@ -222,7 +222,7 @@ func TestNewStreamPlan(t *testing.T) {
 		[]types.EventStreamConsumerEntry{
 			streamEntry("billing", "SAME", paymentProcessedV1),
 			streamEntry("shipping", "SAME", paymentProcessedV1),
-			streamEntry("billing", "SHARED", paymentProcessedV1),
+			streamEntry("billing", "SHARED", subscriptionChangedV1),
 		},
 	)
 	plan, err := NewStreamPlan(regs)
@@ -238,12 +238,12 @@ func TestNewStreamPlan(t *testing.T) {
 	wantSubjects := []string{
 		"services.orders.first", "services.orders.first.>",
 		"services.orders.second", "services.orders.second.>",
-		paymentProcessedV1.Subject,
+		subscriptionChangedV1.Subject,
 	}
 	if !shared.Shared || !slices.Equal(shared.Subjects, wantSubjects) {
 		t.Errorf("SHARED = shared %v, subjects %v; want shared with %v", shared.Shared, shared.Subjects, wantSubjects)
 	}
-	for _, consumer := range []string{"orders-first", "orders-second", "billing-billing-PaymentProcessed-v1"} {
+	for _, consumer := range []string{"orders-first", "orders-second", "billing-billing-SubscriptionChanged-v1"} {
 		if _, ok := shared.Consumers[consumer]; !ok {
 			t.Errorf("SHARED consumers %v do not contain %s", shared.Consumers, consumer)
 		}
@@ -251,7 +251,7 @@ func TestNewStreamPlan(t *testing.T) {
 	if got := plan.Subjects("SHARED", []string{"services.orders.first"}); !slices.Equal(got, wantSubjects) {
 		t.Errorf("Subjects(SHARED) = %v, want %v", got, wantSubjects)
 	}
-	wantMarker := "event stream consumer of module billing for event billing.PaymentProcessed; " +
+	wantMarker := "event stream consumer of module billing for event billing.SubscriptionChanged; " +
 		"stream consumer service orders.first; stream consumer service orders.second"
 	if got := plan.Marker("SHARED", "ignored"); got != wantMarker {
 		t.Errorf("Marker(SHARED) = %q, want %q", got, wantMarker)
