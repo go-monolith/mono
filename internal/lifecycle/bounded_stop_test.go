@@ -458,11 +458,14 @@ func TestOweFinalStop(t *testing.T) {
 		lm, mw := setup(t)
 		close(mw.Release)
 		eventually(t, func() bool { return len(lm.AbandonedStops()) == 0 }, "the RollbackStart did not return")
-		eventually(t, func() bool {
-			lm.mu.RLock()
-			defer lm.mu.RUnlock()
-			return len(lm.rolledBack) == 1
-		}, "the middleware is not owed its final Stop")
+		// Recorded before Start is allowed again, so a Start cannot fall
+		// between the return and the record.
+		lm.mu.RLock()
+		owed := len(lm.rolledBack)
+		lm.mu.RUnlock()
+		if owed != 1 {
+			t.Fatalf("%d middleware owed their final Stop when the RollbackStart stopped counting as abandoned, want 1", owed)
+		}
 		if err := lm.StopRolledBackMiddleware(context.Background()); err != nil {
 			t.Fatal(err)
 		}

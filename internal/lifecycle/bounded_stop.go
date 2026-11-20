@@ -130,16 +130,20 @@ func (lm *lifecycleManager) RunStopThen(ctx context.Context, kind, name string, 
 	lm.mu.Unlock()
 	go func() {
 		out := <-done
+		lm.logger.Warn("A Stop that was abandoned has returned",
+			"kind", kind, "name", name, "after", time.Since(started), "error", out.err, "panic", out.panicValue)
+		// Before the Stop stops counting as abandoned: Start is refused
+		// until then, so it cannot start the middleware again between the
+		// return and the bookkeeping of what it is owed (it would then get
+		// a second final Stop).
+		if afterAbandoned != nil {
+			afterAbandoned()
+		}
 		lm.mu.Lock()
 		if lm.abandonedStops[key]--; lm.abandonedStops[key] <= 0 {
 			delete(lm.abandonedStops, key)
 		}
 		lm.mu.Unlock()
-		lm.logger.Warn("A Stop that was abandoned has returned",
-			"kind", kind, "name", name, "after", time.Since(started), "error", out.err, "panic", out.panicValue)
-		if afterAbandoned != nil {
-			afterAbandoned()
-		}
 	}()
 	return nil, fmt.Errorf("%w: Stop of %s did not return within %v after its context ended (%v) and is left running",
 		monoerrors.ErrStopAbandoned, key, wait, context.Cause(ctx))
