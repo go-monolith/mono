@@ -297,3 +297,36 @@ func TestChannelServiceMixedRouting(t *testing.T) {
 		// Expected
 	}
 }
+
+// TestChannelRouter_NilMessage: a provider that sends nil on its out channel
+// used to panic the router goroutine, which nothing recovers, and with it
+// the process. The nil is dropped and the router goes on.
+func TestChannelRouter_NilMessage(t *testing.T) {
+	container := NewServiceContainer(&mockLogger{})
+	if err := container.BindModule(&mockModule{name: "provider"}); err != nil {
+		t.Fatalf("BindModule failed: %v", err)
+	}
+	in := make(chan *types.Msg, 10)
+	out := make(chan *types.Msg, 10)
+	if err := container.RegisterChannelService("jobs", in, out); err != nil {
+		t.Fatalf("RegisterChannelService failed: %v", err)
+	}
+	_, consumer, err := container.GetChannelService("jobs", "consumer")
+	if err != nil {
+		t.Fatalf("GetChannelService failed: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	container.StartChannelRouters(ctx)
+
+	out <- nil
+	out <- &types.Msg{Reply: "consumer", Data: []byte("after the nil")}
+	select {
+	case msg := <-consumer:
+		if string(msg.Data) != "after the nil" {
+			t.Fatalf("message = %q", msg.Data)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("the router did not go on after a nil message")
+	}
+}

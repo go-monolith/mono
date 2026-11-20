@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/go-monolith/mono/pkg/types"
 )
 
 // writeConfigFile writes a NATS config file and returns its path.
@@ -219,5 +221,61 @@ func TestRedactConfigError(t *testing.T) {
 		if !strings.Contains(got, kept) {
 			t.Fatalf("redacted error lacks %q: %s", kept, got)
 		}
+	}
+}
+
+// TestNATSManager_ClientCAUnderConfigFileRouteCA: with the route CA in a
+// config file's cluster { tls {} } block, a route CA that is signed by the
+// client CA was not found (the block leaves only a certificate pool), so a
+// route certificate would have been accepted as a client.
+func TestNATSManager_ClientCAUnderConfigFileRouteCA(t *testing.T) {
+	serverCA := newTestCA(t, "server-ca")
+	clientCA := newTestCA(t, "client-ca")
+	underClient := clientCA.intermediate(t, "under-client")
+	dir := t.TempDir()
+	certFile, keyFile := serverCA.issue(t, dir, "server", 2)
+	routeCert, routeKey := underClient.issue(t, t.TempDir(), "route", 3)
+	routeCAFile := underClient.write(t, t.TempDir())
+	clientCAFile := clientCA.write(t, t.TempDir())
+
+	port, err := findAvailablePort()
+	if err != nil {
+		t.Fatal(err)
+	}
+	conf := fmt.Sprintf("server_name: n1\nCluster {\n  name: c1\n  port: -1\n  TLS {\n    cert_file: %q\n    key_file: %q\n    CA_File: %q\n    verify: true\n  }\n}\n",
+		routeCert, routeKey, routeCAFile)
+	path := writeConfigFile(t, conf)
+	if got, err := ClusterCAFileOfConfig(path); err != nil || got != routeCAFile {
+		t.Fatalf("ClusterCAFileOfConfig = %q, %v, want %q", got, err, routeCAFile)
+	}
+	manager, err := NewNATSManager(newMockLogger(), WithPort(port), WithInProcessConn(), WithConfigFile(path),
+		WithClientTLS(&types.ClientTLSConfig{CertFile: certFile, KeyFile: keyFile, ClientCAFile: clientCAFile}))
+	if err != nil {
+		t.Fatalf("NewNATSManager() error = %v", err)
+	}
+	err = manager.Start(context.Background())
+	if err == nil {
+		_ = manager.Stop(context.Background())
+		t.Fatal("Start() accepted a route CA that is signed by the client CA")
+	}
+	if !strings.Contains(err.Error(), "is signed by, the client CA") {
+		t.Fatalf("error = %v, want the shared authority named", err)
+	}
+}
+
+func TestClusterCAFileOfConfig(t *testing.T) {
+	for name, tt := range map[string]struct{ conf, want string }{
+		"no cluster block":    {"port: 4222\n", ""},
+		"cluster without tls": {"cluster { name: c1 }\n", ""},
+		"tls without ca_file": {"cluster { tls { verify: true } }\n", ""},
+		"ca_file":             {"cluster { tls { ca_file: \"/etc/route-ca.pem\" } }\n", "/etc/route-ca.pem"},
+	} {
+		got, err := ClusterCAFileOfConfig(writeConfigFile(t, tt.conf))
+		if err != nil || got != tt.want {
+			t.Errorf("%s: got %q, %v, want %q", name, got, err, tt.want)
+		}
+	}
+	if _, err := ClusterCAFileOfConfig(filepath.Join(t.TempDir(), "missing.conf")); err == nil {
+		t.Error("a missing file is not an error")
 	}
 }

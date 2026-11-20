@@ -8,8 +8,10 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
+	"github.com/nats-io/nats-server/v2/conf"
 	"github.com/nats-io/nats-server/v2/server"
 
 	"github.com/go-monolith/mono/pkg/certreload"
@@ -206,4 +208,45 @@ func readCertificates(path string) ([]*x509.Certificate, error) {
 		return nil, errors.New("no certificate found")
 	}
 	return certs, nil
+}
+
+// ClusterCAFileOfConfig returns the ca_file of the cluster { tls {} } block
+// of the NATS config file at path, or "" when there is none (keys are
+// case-insensitive, as nats-server reads them). The options parsed from the
+// file hold the route CA only as a certificate pool, whose certificates
+// cannot be listed, and checkSeparateCAs needs them to find a route CA that
+// is signed by the client CA.
+func ClusterCAFileOfConfig(path string) (string, error) {
+	m, err := conf.ParseFile(path)
+	if err != nil {
+		return "", fmt.Errorf("failed to parse NATS config file %q: %w", path, RedactConfigError(err))
+	}
+	cluster, ok := configBlock(m, "cluster")
+	if !ok {
+		return "", nil
+	}
+	tlsBlock, ok := configBlock(cluster, "tls")
+	if !ok {
+		return "", nil
+	}
+	for k, v := range tlsBlock {
+		if strings.EqualFold(k, "ca_file") {
+			if file, ok := v.(string); ok {
+				return file, nil
+			}
+		}
+	}
+	return "", nil
+}
+
+// configBlock returns the block named name (case-insensitive) of a parsed
+// config map.
+func configBlock(m map[string]any, name string) (map[string]any, bool) {
+	for k, v := range m {
+		if strings.EqualFold(k, name) {
+			block, ok := v.(map[string]any)
+			return block, ok
+		}
+	}
+	return nil, false
 }

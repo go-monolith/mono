@@ -93,3 +93,44 @@ func TestRestartAfterStop_WriterNotClosed(t *testing.T) {
 		t.Fatalf("%d lines logged after the restart, want 1", len(lines))
 	}
 }
+
+// TestChannelProxiesOfTwoModulesWithOneServiceName: two modules may each
+// have a channel service of the same name. Kept by the service name alone,
+// the second proxy replaced the first, whose goroutines Stop then never
+// ended.
+func TestChannelProxiesOfTwoModulesWithOneServiceName(t *testing.T) {
+	m, err := New(WithOutput(&syncWriter{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, module := range []string{"orders", "billing"} {
+		m.wrapChannelService(make(chan *types.Msg, 1), make(chan *types.Msg, 1), module, "events")
+	}
+	// The same service wrapped again (a module that registers twice): the
+	// proxy it replaces is stopped at once.
+	m.channelProxiesMu.Lock()
+	first := m.channelProxies["orders/events"]
+	m.channelProxiesMu.Unlock()
+	m.wrapChannelService(make(chan *types.Msg, 1), make(chan *types.Msg, 1), "orders", "events")
+	if first == nil || first.ctx.Err() == nil {
+		t.Fatal("the replaced proxy was not stopped")
+	}
+
+	m.channelProxiesMu.Lock()
+	proxies := make([]*channelProxy, 0, len(m.channelProxies))
+	for _, p := range m.channelProxies {
+		proxies = append(proxies, p)
+	}
+	m.channelProxiesMu.Unlock()
+	if len(proxies) != 2 {
+		t.Fatalf("%d proxies kept for two modules, want 2", len(proxies))
+	}
+	if err := m.Stop(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range proxies {
+		if p.ctx.Err() == nil {
+			t.Errorf("the proxy of %s/%s was not stopped", p.moduleName, p.serviceName)
+		}
+	}
+}

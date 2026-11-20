@@ -97,6 +97,11 @@ type Reloader struct {
 	cert    *tls.Certificate
 	digest  [sha256.Size]byte // of the certificate and key files' contents
 	checked time.Time
+	// checking is set while one caller reads the files (without the lock).
+	checking bool
+	// expiryWarned is when the expiry of the current certificate was last
+	// warned about.
+	expiryWarned time.Time
 }
 
 // New loads the certificate and key and checks them (validity period,
@@ -138,34 +143,83 @@ func New(cfg Config) (*Reloader, error) {
 // Config.CheckInterval). A reload that fails, for example while a Secret
 // update has written the certificate but not yet the key, keeps the previous
 // certificate and is retried at the next check, so a certificate is always
-// returned.
+// returned. Only the caller that makes a check waits for the files; callers
+// that arrive meanwhile get the current certificate at once. A certificate
+// that has expired without being renewed is warned about (see
+// ExpiryWarnInterval).
 func (r *Reloader) Certificate() *tls.Certificate {
 	r.mu.Lock()
-	defer r.mu.Unlock()
 	now := r.now()
-	if now.Sub(r.checked) < r.cfg.CheckInterval {
-		return r.cert
+	if r.checking || now.Sub(r.checked) < r.cfg.CheckInterval {
+		cert := r.cert
+		r.mu.Unlock()
+		return cert
 	}
+	// The files are read without the lock held: on a file system that
+	// stalls, the read would otherwise hold up every handshake behind this
+	// one. While a check runs, the others get the current certificate.
+	r.checking = true
 	r.checked = now
-	certPEM, keyPEM, err := r.read()
-	if err != nil {
+	current := r.digest
+	r.mu.Unlock()
+
+	cert, digest, changed, err := r.load(current)
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.checking = false
+	switch {
+	case err != nil:
 		r.warn(err)
-		return r.cert
-	}
-	digest := digestOf(certPEM, keyPEM)
-	if digest == r.digest {
-		return r.cert
-	}
-	cert, err := r.parse(certPEM, keyPEM)
-	if err != nil {
-		r.warn(err)
-		return r.cert
-	}
-	r.cert, r.digest = cert, digest
-	if r.cfg.Logger != nil {
-		r.cfg.Logger.Info("Reloaded the "+r.cfg.Name+" certificate", "cert_file", r.cfg.CertFile, "not_after", cert.Leaf.NotAfter)
+	case changed:
+		r.cert, r.digest = cert, digest
+		r.expiryWarned = time.Time{}
+		if r.cfg.Logger != nil {
+			r.cfg.Logger.Info("Reloaded the "+r.cfg.Name+" certificate", "cert_file", r.cfg.CertFile, "not_after", cert.Leaf.NotAfter)
+		}
+	default:
+		r.warnIfExpired(now)
 	}
 	return r.cert
+}
+
+// load reads the files and, when their contents differ from current, parses
+// the certificate. It takes no lock.
+func (r *Reloader) load(current [sha256.Size]byte) (cert *tls.Certificate, digest [sha256.Size]byte, changed bool, err error) {
+	certPEM, keyPEM, err := r.read()
+	if err != nil {
+		return nil, digest, false, err
+	}
+	digest = digestOf(certPEM, keyPEM)
+	if digest == current {
+		return nil, digest, false, nil
+	}
+	cert, err = r.parse(certPEM, keyPEM)
+	if err != nil {
+		return nil, digest, false, err
+	}
+	return cert, digest, true, nil
+}
+
+// ExpiryWarnInterval is the least time between two warnings that the
+// certificate being served has expired.
+const ExpiryWarnInterval = time.Hour
+
+// warnIfExpired warns, at most every ExpiryWarnInterval, that the
+// certificate has expired and its files still hold it. A certificate is
+// checked when it is loaded; one that is never renewed went on being served
+// past its expiry without a word, and its peers refuse it. Called with the
+// lock held.
+func (r *Reloader) warnIfExpired(now time.Time) {
+	if r.cfg.Logger == nil || r.cert == nil || r.cert.Leaf == nil || !now.After(r.cert.Leaf.NotAfter) {
+		return
+	}
+	if !r.expiryWarned.IsZero() && now.Sub(r.expiryWarned) < ExpiryWarnInterval {
+		return
+	}
+	r.expiryWarned = now
+	r.cfg.Logger.Warn("The "+r.cfg.Name+" certificate has expired and its files were not renewed; peers that check it refuse the connection",
+		"cert_file", r.cfg.CertFile, "not_after", r.cert.Leaf.NotAfter)
 }
 
 // GetCertificate is Certificate in the shape of tls.Config.GetCertificate,

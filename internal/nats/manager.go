@@ -300,7 +300,18 @@ func (m *natsManager) Start(ctx context.Context) error {
 	if err := applyClusterTLS(opts, m.config.ClusterTLSCertFile, m.config.ClusterTLSKeyFile, m.config.ClusterTLSCAFile, m.logger); err != nil {
 		return err
 	}
-	if err := applyClientTLS(opts, m.config.ClientTLS, m.config.ClusterTLSCAFile, m.logger); err != nil {
+	// The client CA is checked against the route CA certificates. With
+	// WithNATSClusterTLS their file is known; a config file's
+	// cluster { tls {} } block leaves only a pool, which cannot be listed,
+	// so the file is read from the config again.
+	routeCAFile := m.config.ClusterTLSCAFile
+	if routeCAFile == "" && m.config.ConfigFile != "" && m.config.ClientTLS != nil && m.config.ClientTLS.ClientCAFile != "" {
+		var err error
+		if routeCAFile, err = ClusterCAFileOfConfig(m.config.ConfigFile); err != nil {
+			return err
+		}
+	}
+	if err := applyClientTLS(opts, m.config.ClientTLS, routeCAFile, m.logger); err != nil {
 		return err
 	}
 	if m.config.SystemAccountUsername != "" || m.config.SystemAccountPassword != "" {

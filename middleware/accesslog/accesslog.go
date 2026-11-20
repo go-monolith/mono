@@ -687,9 +687,16 @@ func (m *AccessLogModule) wrapChannelService(
 		cancel:      cancel,
 	}
 
-	// Store proxy for cleanup
+	// Store proxy for cleanup, under the module and the service: two
+	// modules may each have a channel service of one name, and keyed by the
+	// service alone the second replaced the first, whose two goroutines
+	// were then never stopped. A proxy that is replaced is stopped.
+	key := moduleName + "/" + serviceName
 	m.channelProxiesMu.Lock()
-	m.channelProxies[serviceName] = proxy
+	if replaced, ok := m.channelProxies[key]; ok {
+		replaced.cancel()
+	}
+	m.channelProxies[key] = proxy
 	m.channelProxiesMu.Unlock()
 
 	// Start proxy goroutines
