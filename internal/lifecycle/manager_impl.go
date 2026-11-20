@@ -61,6 +61,16 @@ type lifecycleManager struct {
 	moduleBuses                map[string]types.EventBus     // the scoped event bus handed to each module
 	cronProgressInterval       time.Duration                 // interval of the in-progress signal of a running cron handler (0 = default)
 	abandonedStops             map[string]int                // Stops given up on that have not returned yet, by "<kind> <name>" (see RunStop)
+	cancelRouters              context.CancelFunc            // ends the channel routers of the current start (nil: none running)
+}
+
+// EventRegistryCheckpointer is the optional capability of an event registry
+// to be put back as it was when a Start that failed began (see Start). The
+// framework's registry has it; a test double without it is left as it is.
+type EventRegistryCheckpointer interface {
+	// Checkpoint records the registry and returns the function that
+	// restores it.
+	Checkpoint() (restore func())
 }
 
 // subscriptionRecord ties a framework-managed subscription to the worker pool
@@ -746,6 +756,38 @@ func (lm *lifecycleManager) Start(ctx context.Context) (err error) {
 			strings.Join(abandoned, ", "), monoerrors.ErrStopAbandoned)
 	}
 
+	// A failed Start leaves the event registry as it found it, so that a
+	// retried Start registers the same events and consumers once more
+	// without finding its own from the failed attempt.
+	if cp, ok := lm.eventRegistry.(EventRegistryCheckpointer); ok {
+		restoreEvents := cp.Checkpoint()
+		defer func() {
+			if err != nil {
+				restoreEvents()
+			}
+		}()
+	}
+
+	// The channel routers of this start run until it is rolled back or the
+	// application stops. Started with the runtime context alone, the
+	// routers of a failed start kept running, and beside those of the retry
+	// they took the messages of the same out channel for consumer channels
+	// nobody reads any more.
+	runtimeCtx := lm.GetRuntimeContext()
+	if runtimeCtx == nil {
+		runtimeCtx = context.Background()
+	}
+	routerCtx, cancelRouters := context.WithCancel(runtimeCtx)
+	defer func() {
+		if err != nil {
+			cancelRouters()
+			return
+		}
+		lm.mu.Lock()
+		lm.cancelRouters = cancelRouters
+		lm.mu.Unlock()
+	}()
+
 	// Step -1: wait until JetStream answers, so that plugins and modules that
 	// use it in Start, and the JetStream setup after them, find it ready even
 	// while the servers of a cluster are still electing leaders.
@@ -864,13 +906,13 @@ func (lm *lifecycleManager) Start(ctx context.Context) (err error) {
 	// plugins (whose containers are kept by alias)
 	for moduleName, container := range lm.containers {
 		if container != nil {
-			container.StartChannelRouters(lm.runtimeCtx)
+			container.StartChannelRouters(routerCtx)
 			lm.logger.Debug("Started channel routers", "module", moduleName)
 		}
 	}
 	for alias, container := range lm.pluginContainers {
 		if container != nil {
-			container.StartChannelRouters(lm.runtimeCtx)
+			container.StartChannelRouters(routerCtx)
 			lm.logger.Debug("Started channel routers", "plugin", alias)
 		}
 	}
@@ -1448,6 +1490,13 @@ func (lm *lifecycleManager) Stop(ctx context.Context) error {
 	// 2. Only now cancel the runtime context: anything still running after the
 	//    drain budget is told to stop, and channel routers exit.
 	lm.cancelRuntime()
+	lm.mu.Lock()
+	cancelRouters := lm.cancelRouters
+	lm.cancelRouters = nil
+	lm.mu.Unlock()
+	if cancelRouters != nil {
+		cancelRouters()
+	}
 
 	// Get modules in reverse dependency order
 	ordered, err := registry.ResolveDependencies(lm.registry)
