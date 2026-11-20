@@ -247,7 +247,7 @@ func (lm *lifecycleManager) UpdateKeepingImmutable(
 			names = append(names, setting.Name)
 		}
 		return nil, cfg, fmt.Errorf("the update that keeps the existing %s of consumer %s, which NATS cannot change, was rejected as well; "+
-			"another setting may not fit a kept value (to apply the configuration as it is, delete the consumer: nats consumer rm %s %s): %w",
+			"another setting may not fit a kept value (to apply the configuration as it is, delete the consumer, nats consumer rm %s %s, and start again): %w",
 			strings.Join(names, ", "), cfg.Name, stream, cfg.Name, retryErr)
 	}
 	for _, setting := range kept {
@@ -258,7 +258,7 @@ func (lm *lifecycleManager) UpdateKeepingImmutable(
 			"setting", setting.Name,
 			"configured", setting.Configured,
 			"kept", setting.Kept,
-			"apply_with", fmt.Sprintf("nats consumer rm %s %s", stream, cfg.Name),
+			"apply_with", ApplyByDeletingConsumer(stream, cfg.Name),
 		}
 		if setting.Note != "" {
 			args = append(args, "note", setting.Note)
@@ -278,4 +278,12 @@ func readBackError(consumer string, updateErr, lookupErr error) error {
 		return fmt.Errorf("failed to read back consumer %s after its update was rejected (%v): %w", consumer, updateErr, lookupErr)
 	}
 	return updateErr
+}
+
+// ApplyByDeletingConsumer is the way to apply a consumer setting NATS cannot
+// change, as the kept-setting warning gives it: delete the consumer, then
+// restart. A running instance does not create the consumer again (its fetch
+// loop reports that it is gone), so the delete alone would stop consumption.
+func ApplyByDeletingConsumer(stream, consumer string) string {
+	return fmt.Sprintf("nats consumer rm %s %s, then restart every instance (a running instance does not create the consumer again)", stream, consumer)
 }

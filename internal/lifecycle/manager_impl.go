@@ -59,6 +59,22 @@ type lifecycleManager struct {
 	strictBoundaries           bool                          // reject boundary violations instead of recording them
 	boundaries                 map[string]*boundary.Recorder // boundary observations by module, for ModuleBoundaries
 	moduleBuses                map[string]types.EventBus     // the scoped event bus handed to each module
+	cronProgressInterval       time.Duration                 // interval of the in-progress signal of a running cron handler (0 = default)
+	abandonedStops             map[string]int                // Stops given up on that have not returned yet, by "<kind> <name>" (see RunStop)
+	cancelRouters              context.CancelFunc            // ends the channel routers of the current start (nil: none running)
+	stopMinBudget              time.Duration                 // time the Stops called with an ended context share (0 = StopMinBudget)
+	stopOvertime               time.Duration                 // how much of it the current stop or rollback has used
+	rolledBack                 []types.MiddlewareModule      // middleware stopped by RollbackStart and not started again: their final Stop is owed
+	finalStopsGiven            bool                          // StopRolledBackMiddleware ran since the last Start: a rollback that returns now is stopped at once
+}
+
+// EventRegistryCheckpointer is the optional capability of an event registry
+// to be put back as it was when a Start that failed began (see Start). The
+// framework's registry has it; a test double without it is left as it is.
+type EventRegistryCheckpointer interface {
+	// Checkpoint records the registry and returns the function that
+	// restores it.
+	Checkpoint() (restore func())
 }
 
 // subscriptionRecord ties a framework-managed subscription to the worker pool
@@ -736,6 +752,51 @@ func (lm *lifecycleManager) detectMiddlewareModules() {
 // order (rollback), then the started middleware in reverse order, then the
 // plugins (rollbackStartedInfrastructure).
 func (lm *lifecycleManager) Start(ctx context.Context) (err error) {
+	// A Stop that an earlier stop or rollback gave up on may still be
+	// running: starting the same module beside it would run its Start and
+	// its Stop at the same time.
+	if abandoned := lm.AbandonedStops(); len(abandoned) > 0 {
+		return fmt.Errorf("cannot start while an earlier Stop is still running (%s): %w",
+			strings.Join(abandoned, ", "), monoerrors.ErrStopAbandoned)
+	}
+	// The rollback of this start, should it fail, has a stop budget of its own.
+	lm.ResetStopBudget()
+	lm.mu.Lock()
+	lm.finalStopsGiven = false
+	lm.mu.Unlock()
+
+	// A failed Start leaves the event registry as it found it, so that a
+	// retried Start registers the same events and consumers once more
+	// without finding its own from the failed attempt.
+	if cp, ok := lm.eventRegistry.(EventRegistryCheckpointer); ok {
+		restoreEvents := cp.Checkpoint()
+		defer func() {
+			if err != nil {
+				restoreEvents()
+			}
+		}()
+	}
+
+	// The channel routers of this start run until it is rolled back or the
+	// application stops. Started with the runtime context alone, the
+	// routers of a failed start kept running, and beside those of the retry
+	// they took the messages of the same out channel for consumer channels
+	// nobody reads any more.
+	runtimeCtx := lm.GetRuntimeContext()
+	if runtimeCtx == nil {
+		runtimeCtx = context.Background()
+	}
+	routerCtx, cancelRouters := context.WithCancel(runtimeCtx)
+	defer func() {
+		if err != nil {
+			cancelRouters()
+			return
+		}
+		lm.mu.Lock()
+		lm.cancelRouters = cancelRouters
+		lm.mu.Unlock()
+	}()
+
 	// Step -1: wait until JetStream answers, so that plugins and modules that
 	// use it in Start, and the JetStream setup after them, find it ready even
 	// while the servers of a cluster are still electing leaders.
@@ -807,6 +868,10 @@ func (lm *lifecycleManager) Start(ctx context.Context) (err error) {
 				return fmt.Errorf("failed to start middleware module %s: %w", mw.Name(), err)
 			}
 			startedMiddleware = append(startedMiddleware, mw)
+			// Started again: its final Stop comes with this start's.
+			lm.mu.Lock()
+			lm.rolledBack = RemoveMiddleware(lm.rolledBack, mw)
+			lm.mu.Unlock()
 		}
 	}
 
@@ -854,13 +919,13 @@ func (lm *lifecycleManager) Start(ctx context.Context) (err error) {
 	// plugins (whose containers are kept by alias)
 	for moduleName, container := range lm.containers {
 		if container != nil {
-			container.StartChannelRouters(lm.runtimeCtx)
+			container.StartChannelRouters(routerCtx)
 			lm.logger.Debug("Started channel routers", "module", moduleName)
 		}
 	}
 	for alias, container := range lm.pluginContainers {
 		if container != nil {
-			container.StartChannelRouters(lm.runtimeCtx)
+			container.StartChannelRouters(routerCtx)
 			lm.logger.Debug("Started channel routers", "plugin", alias)
 		}
 	}
@@ -1428,6 +1493,7 @@ func (lm *lifecycleManager) setupNATSSubscriptions(ctx context.Context) error {
 // Stop stops all modules in reverse dependency order
 func (lm *lifecycleManager) Stop(ctx context.Context) error {
 	lm.logger.Info("Stopping all modules")
+	lm.ResetStopBudget()
 
 	// 1. Stop taking new messages and wait for in-flight handlers, with the
 	//    runtime context still live so they can finish their work.
@@ -1438,6 +1504,13 @@ func (lm *lifecycleManager) Stop(ctx context.Context) error {
 	// 2. Only now cancel the runtime context: anything still running after the
 	//    drain budget is told to stop, and channel routers exit.
 	lm.cancelRuntime()
+	lm.mu.Lock()
+	cancelRouters := lm.cancelRouters
+	lm.cancelRouters = nil
+	lm.mu.Unlock()
+	if cancelRouters != nil {
+		cancelRouters()
+	}
 
 	// Get modules in reverse dependency order
 	ordered, err := registry.ResolveDependencies(lm.registry)
@@ -1468,7 +1541,7 @@ func (lm *lifecycleManager) Stop(ctx context.Context) error {
 		middlewares := lm.middlewareChain.Middlewares()
 		for i := len(middlewares) - 1; i >= 0; i-- {
 			mw := middlewares[i]
-			if err := lm.stopMiddlewareModule(ctx, mw); err != nil {
+			if err := lm.stopMiddlewareModule(ctx, mw, false); err != nil {
 				errors = append(errors, err)
 			}
 		}
@@ -1500,21 +1573,19 @@ func (lm *lifecycleManager) Stop(ctx context.Context) error {
 	return nil
 }
 
-// stopModule stops a single module with panic recovery
-func (lm *lifecycleManager) stopModule(ctx context.Context, module types.Module) (err error) {
+// stopModule stops a single module with panic recovery. A Stop that does not
+// return after its context ended is abandoned (see RunStop).
+func (lm *lifecycleManager) stopModule(ctx context.Context, module types.Module) error {
 	moduleName := module.Name()
-
-	// Panic recovery
-	defer func() {
-		if r := recover(); r != nil {
-			err = monoerrors.WrapModulePanic(moduleName, "stop", r)
-			lm.logger.Error("Module panic during stop", "module", moduleName, "panic", r)
-		}
-	}()
 
 	lm.logger.Info("Stopping module", "module", moduleName)
 
-	if err := module.Stop(ctx); err != nil {
+	panicValue, err := lm.RunStop(ctx, "module", moduleName, module.Stop)
+	if panicValue != nil {
+		lm.logger.Error("Module panic during stop", "module", moduleName, "panic", panicValue)
+		return monoerrors.WrapModulePanic(moduleName, "stop", panicValue)
+	}
+	if err != nil {
 		lm.logger.Error("Module stop failed", "module", moduleName, "error", err)
 
 		// Notify middleware of module stopped with error
@@ -1546,21 +1617,30 @@ func (lm *lifecycleManager) stopModule(ctx context.Context, module types.Module)
 	return nil
 }
 
-// stopMiddlewareModule stops a single middleware module with panic recovery
-func (lm *lifecycleManager) stopMiddlewareModule(ctx context.Context, mw types.MiddlewareModule) (err error) {
+// stopMiddlewareModule stops a single middleware module with panic recovery.
+// For the rollback of a failed Start, a middleware that can tell it from the
+// final stop (types.RollbackAwareMiddleware) gets RollbackStart instead of
+// Stop, so that it can be started again. A Stop that does not return after
+// its context ended is abandoned (see RunStop).
+func (lm *lifecycleManager) stopMiddlewareModule(ctx context.Context, mw types.MiddlewareModule, rollback bool) error {
 	moduleName := mw.Name()
-
-	// Panic recovery
-	defer func() {
-		if r := recover(); r != nil {
-			err = monoerrors.WrapModulePanic(moduleName, "stop", r)
-			lm.logger.Error("Middleware module panic during stop", "module", moduleName, "panic", r)
-		}
-	}()
 
 	lm.logger.Info("Stopping middleware module", "module", moduleName)
 
-	if err := mw.Stop(ctx); err != nil {
+	stop := mw.Stop
+	var afterAbandoned func()
+	if aware, ok := mw.(types.RollbackAwareMiddleware); ok && rollback {
+		stop = aware.RollbackStart
+		// A RollbackStart that is abandoned and returns later still owes
+		// the middleware its final Stop.
+		afterAbandoned = func() { lm.OweFinalStop(mw) }
+	}
+	panicValue, err := lm.RunStopThen(ctx, "middleware module", moduleName, stop, afterAbandoned)
+	if panicValue != nil {
+		lm.logger.Error("Middleware module panic during stop", "module", moduleName, "panic", panicValue)
+		return monoerrors.WrapModulePanic(moduleName, "stop", panicValue)
+	}
+	if err != nil {
 		lm.logger.Error("Middleware module stop failed", "module", moduleName, "error", err)
 		return fmt.Errorf("failed to stop middleware module %s: %w", moduleName, err)
 	}
@@ -1843,11 +1923,91 @@ func (lm *lifecycleManager) rollback(ctx context.Context, started []string, orig
 func (lm *lifecycleManager) rollbackStartedInfrastructure(ctx context.Context, startedMiddleware []types.MiddlewareModule) {
 	for i := len(startedMiddleware) - 1; i >= 0; i-- {
 		mw := startedMiddleware[i]
-		if err := lm.stopMiddlewareModule(ctx, mw); err != nil {
+		err := lm.stopMiddlewareModule(ctx, mw, true)
+		if err != nil {
 			lm.logger.Error("Failed to stop middleware module during rollback", "module", mw.Name(), "error", err)
+		}
+		// Stopped through RollbackStart, it still owes its final Stop
+		// (see StopRolledBackMiddleware). Not one whose RollbackStart was
+		// abandoned: it is still running, and its Stop must not run beside it.
+		if _, aware := mw.(types.RollbackAwareMiddleware); aware && !errors.Is(err, monoerrors.ErrStopAbandoned) {
+			lm.mu.Lock()
+			lm.rolledBack = AppendMiddlewareOnce(lm.rolledBack, mw)
+			lm.mu.Unlock()
 		}
 	}
 	lm.rollbackPlugins(ctx, lm.pluginRegistry.List())
+}
+
+// lateFinalStopTimeout bounds the final Stop given to a middleware whose
+// abandoned RollbackStart returned after the application stopped.
+const lateFinalStopTimeout = 5 * time.Second
+
+// OweFinalStop records that mw, whose abandoned RollbackStart has returned,
+// is owed its final Stop (see StopRolledBackMiddleware). When the final
+// stops were given already, the application has stopped and nothing would
+// call it: it is stopped here.
+func (lm *lifecycleManager) OweFinalStop(mw types.MiddlewareModule) {
+	lm.mu.Lock()
+	if !lm.finalStopsGiven {
+		lm.rolledBack = AppendMiddlewareOnce(lm.rolledBack, mw)
+		lm.mu.Unlock()
+		return
+	}
+	lm.mu.Unlock()
+	ctx, cancel := context.WithTimeout(context.Background(), lateFinalStopTimeout)
+	defer cancel()
+	if err := lm.stopMiddlewareModule(ctx, mw, false); err != nil {
+		lm.logger.Error("Failed to stop middleware module after its rollback returned", "module", mw.Name(), "error", err)
+	}
+}
+
+// AppendMiddlewareOnce returns list with mw appended unless it is in it.
+func AppendMiddlewareOnce(list []types.MiddlewareModule, mw types.MiddlewareModule) []types.MiddlewareModule {
+	for _, have := range list {
+		if have == mw {
+			return list
+		}
+	}
+	return append(list, mw)
+}
+
+// RemoveMiddleware returns list without mw.
+func RemoveMiddleware(list []types.MiddlewareModule, mw types.MiddlewareModule) []types.MiddlewareModule {
+	kept := list[:0:0]
+	for _, have := range list {
+		if have != mw {
+			kept = append(kept, have)
+		}
+	}
+	return kept
+}
+
+// StopRolledBackMiddleware calls Stop on the middleware modules a rollback
+// stopped through RollbackStart and that were not started again, in reverse
+// registration order. A middleware that was started again is stopped by
+// Stop; one whose RollbackStart was abandoned is not among them until it
+// has returned (see OweFinalStop).
+func (lm *lifecycleManager) StopRolledBackMiddleware(ctx context.Context) error {
+	lm.mu.Lock()
+	rolledBack := lm.rolledBack
+	lm.rolledBack = nil
+	lm.finalStopsGiven = true
+	lm.mu.Unlock()
+
+	if len(rolledBack) == 0 {
+		return nil
+	}
+	lm.ResetStopBudget()
+	// The rollback recorded them in the order it stopped them, the reverse
+	// of their registration, which is the order Stop uses.
+	var errs []error
+	for _, mw := range rolledBack {
+		if err := lm.stopMiddlewareModule(ctx, mw, false); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
 }
 
 // servesOverNATS reports whether c holds a service that is subscribed over
@@ -2053,19 +2213,17 @@ func (lm *lifecycleManager) stopPlugins(ctx context.Context) error {
 	return nil
 }
 
-// stopPlugin stops a single plugin with panic recovery.
-func (lm *lifecycleManager) stopPlugin(ctx context.Context, plugin types.PluginModule, alias string) (err error) {
-	// Panic recovery
-	defer func() {
-		if r := recover(); r != nil {
-			err = monoerrors.WrapPluginStopFailed(alias, fmt.Errorf("panic: %v", r))
-			lm.logger.Error("Plugin panic during stop", "alias", alias, "panic", r)
-		}
-	}()
-
+// stopPlugin stops a single plugin with panic recovery. A Stop that does not
+// return after its context ended is abandoned (see RunStop).
+func (lm *lifecycleManager) stopPlugin(ctx context.Context, plugin types.PluginModule, alias string) error {
 	lm.logger.Info("Stopping plugin", "alias", alias, "module", plugin.Name())
 
-	if err := plugin.Stop(ctx); err != nil {
+	panicValue, err := lm.RunStop(ctx, "plugin", alias, plugin.Stop)
+	if panicValue != nil {
+		lm.logger.Error("Plugin panic during stop", "alias", alias, "panic", panicValue)
+		return monoerrors.WrapPluginStopFailed(alias, fmt.Errorf("panic: %v", panicValue))
+	}
+	if err != nil {
 		lm.logger.Error("Plugin stop failed", "alias", alias, "error", err)
 		return monoerrors.WrapPluginStopFailed(alias, err)
 	}
@@ -2368,6 +2526,7 @@ func (lm *lifecycleManager) purgeCronSchedule(ctx context.Context, es types.Even
 // acknowledgement here (see dispatchCronTick).
 func (lm *lifecycleManager) runCronConsumerLoop(ctx context.Context, consumer jetstream.Consumer, entry *types.ServiceEntry) {
 	fetchErrs := newFetchErrorReporter(lm.logger, "Cron fetch error", "service", entry.Name)
+	fetchErrs.WatchJetStreamConsumer(consumer)
 	for {
 		select {
 		case <-ctx.Done():
@@ -2435,8 +2594,15 @@ func (lm *lifecycleManager) runCronConsumerLoop(ctx context.Context, consumer je
 
 // dispatchCronTick invokes the cron handler and acknowledges the occurrence on
 // the handler's behalf: Ack on nil, Nak on error (including a recovered panic).
+// While the handler runs the server is told that the occurrence is in
+// progress, so one that takes longer than AckWait is not delivered again
+// (see KeepCronOccurrence).
 func (lm *lifecycleManager) dispatchCronTick(ctx context.Context, entry *types.ServiceEntry, msg *types.Msg) {
-	if err := lm.invokeCronHandler(ctx, entry, msg); err != nil {
+	stopProgress := KeepCronOccurrence(msg, lm.cronProgressEvery(), lm.logger,
+		"service", entry.Name, "module", entry.ModuleName, "subject", entry.Subject)
+	err := lm.invokeCronHandler(ctx, entry, msg)
+	stopProgress()
+	if err != nil {
 		lm.logger.Error("Cron handler error",
 			append([]any{"service", entry.Name, "module", entry.ModuleName, "subject", entry.Subject}, handlerErrorFields(err)...)...)
 		if nakErr := msg.Nak(); nakErr != nil {
@@ -2625,6 +2791,7 @@ func (lm *lifecycleManager) runEventStreamConsumerLoop(
 	}
 
 	fetchErrs := newFetchErrorReporter(lm.logger, "Fetch error", "event", eventName)
+	fetchErrs.WatchJetStreamConsumer(consumer)
 	for {
 		select {
 		case <-ctx.Done():
@@ -2708,6 +2875,7 @@ func (lm *lifecycleManager) runStreamConsumerLoop(
 ) {
 	cfg := entry.StreamConsumerConfig
 	fetchErrs := newFetchErrorReporter(lm.logger, "Fetch error", "service", entry.Name)
+	fetchErrs.WatchJetStreamConsumer(consumer)
 
 	for {
 		select {

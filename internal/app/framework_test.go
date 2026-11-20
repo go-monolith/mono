@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -1019,6 +1020,8 @@ type mockLifecycleManager struct {
 	cancelFunc      context.CancelFunc
 	stopHadDeadline bool // whether the context passed to Stop carried a deadline
 	stats           []types.SubscriptionStats
+	rolledBackStops atomic.Int32 // calls of StopRolledBackMiddleware
+	rolledBackErr   error
 }
 
 func newMockLifecycleManager() *mockLifecycleManager {
@@ -1036,6 +1039,11 @@ func (m *mockLifecycleManager) Start(_ context.Context) error {
 func (m *mockLifecycleManager) Stop(ctx context.Context) error {
 	_, m.stopHadDeadline = ctx.Deadline()
 	return m.stopErr
+}
+
+func (m *mockLifecycleManager) StopRolledBackMiddleware(_ context.Context) error {
+	m.rolledBackStops.Add(1)
+	return m.rolledBackErr
 }
 
 func (m *mockLifecycleManager) WaitForShutdown(_ context.Context) error {

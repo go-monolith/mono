@@ -20,6 +20,29 @@ import (
 // exposure on the public challenge port (gosec G112).
 const challengeReadHeaderTimeout = 10 * time.Second
 
+// Limits of the ACME challenge server. The port is public, a challenge is one
+// small GET answered from memory, and a connection that is neither idle nor
+// closed keeps http.Server.Shutdown waiting, so nothing a client does may hold
+// a connection for long:
+//   - challengeReadTimeout bounds reading a whole request, including a body
+//     the client announces and never sends (the server reads what is left of
+//     a body before it reuses the connection);
+//   - challengeWriteTimeout bounds writing the response;
+//   - challengeIdleTimeout closes a keep-alive connection without a request;
+//   - challengeMaxHeaderBytes bounds the request line and headers.
+const (
+	challengeReadTimeout    = 10 * time.Second
+	challengeWriteTimeout   = 10 * time.Second
+	challengeIdleTimeout    = 30 * time.Second
+	challengeMaxHeaderBytes = 16 << 10
+)
+
+// challengeShutdownTimeout bounds the graceful shutdown of the challenge
+// server, whatever context stop is given: connections still open after it
+// are closed. A challenge in flight is answered in milliseconds, so the wait
+// only matters for a client that keeps its connection busy.
+const challengeShutdownTimeout = 2 * time.Second
+
 // autoTLSHandshakeTimeout is the TLS handshake budget, in seconds, installed on
 // server.Options.TLSTimeout when AutoTLS is enabled.
 //
@@ -157,6 +180,10 @@ func (a *autoTLS) start() error {
 	a.srv = &http.Server{
 		Handler:           stripHostPort(a.mgr.HTTPHandler(nil)),
 		ReadHeaderTimeout: challengeReadHeaderTimeout,
+		ReadTimeout:       challengeReadTimeout,
+		WriteTimeout:      challengeWriteTimeout,
+		IdleTimeout:       challengeIdleTimeout,
+		MaxHeaderBytes:    challengeMaxHeaderBytes,
 	}
 	go func() {
 		if err := a.srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -288,7 +315,12 @@ func (a *autoTLS) issueAll() error {
 }
 
 // stop shuts the challenge server down, honouring the caller's deadline and
-// falling back to closing the listener outright if graceful shutdown fails.
+// falling back to closing the listener and every connection outright if
+// graceful shutdown fails. The graceful part is bounded here by
+// challengeShutdownTimeout: the manager calls stop with its mutex held and,
+// on some paths, with a context that never ends, and Shutdown waits for every
+// connection that is not idle, so without the bound one client holding a
+// connection open on the public port blocked the whole shutdown.
 //
 // autocert.Manager has no exported stop: its renewal timers are plain
 // time.Timers that are released when the process exits.
@@ -297,7 +329,10 @@ func (a *autoTLS) stop(ctx context.Context) {
 		return
 	}
 	if a.srv != nil {
-		if err := a.srv.Shutdown(ctx); err != nil {
+		shutdownCtx, cancel := context.WithTimeout(ctx, challengeShutdownTimeout)
+		err := a.srv.Shutdown(shutdownCtx)
+		cancel()
+		if err != nil {
 			a.logger.Warn("ACME challenge server did not shut down gracefully; forcing close", "error", err)
 			if closeErr := a.srv.Close(); closeErr != nil {
 				a.logger.Warn("failed to force-close the ACME challenge server", "error", closeErr)

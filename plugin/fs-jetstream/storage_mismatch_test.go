@@ -419,3 +419,83 @@ func TestCreateBackupBucket_SourceFailure(t *testing.T) {
 		t.Fatalf("the half-made backup store should exist for the engine to delete: %v", err)
 	}
 }
+
+// TestRecreate_LeftoverBackup: a backup an interrupted recreate left copying
+// the bucket is detached by the next recreate and finished like a backup, so
+// it no longer follows the recreated bucket and deleting an object in it
+// does not write into that bucket.
+func TestRecreate_LeftoverBackup(t *testing.T) {
+	conn, js := setupTestNATSWithJetStream(t)
+	ctx := context.Background()
+	createFileObjectStore(t, js, "files")
+	cfg := BucketConfig{Name: "files", Storage: MemoryStorage, RecreateOnStorageMismatch: true}
+
+	// What a recreate killed during its copy leaves: the backup store,
+	// attached, its metadata still naming the bucket.
+	const leftover = "files-backup-20260101T000000Z-0123456789abcdef"
+	maker, err := New(Config{Buckets: []BucketConfig{cfg}}, WithLogger(slog.New(slog.DiscardHandler)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	maker.js = js
+	stream, err := js.Stream(ctx, objStreamPrefix+"files")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := maker.createBackupBucket(ctx, cfg, leftover, stream.CachedInfo(), time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		if _, msgs := objStorage(t, js, leftover); msgs >= stream.CachedInfo().State.Msgs {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the leftover did not copy the bucket")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	var logs bytes.Buffer
+	m, err := startFSPlugin(t, conn, cfg, WithLogger(slog.New(slog.NewTextHandler(&logs, nil))))
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	old, err := js.Stream(ctx, objStreamPrefix+leftover)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := old.CachedInfo().Config.Sources; len(got) != 0 {
+		t.Fatalf("the leftover still copies %d stream(s)", len(got))
+	}
+	if !strings.Contains(logs.String(), "backup_bucket="+leftover) {
+		t.Errorf("the log does not name the leftover:\n%s", logs.String())
+	}
+
+	// Its objects name the leftover itself, so a delete in it stays in it.
+	store, err := js.ObjectStore(ctx, leftover)
+	if err != nil {
+		t.Fatal(err)
+	}
+	info, err := store.GetInfo(ctx, "small.txt")
+	if err != nil || info.Bucket != leftover {
+		t.Fatalf("object in the leftover = %+v, %v; want it to name %s", info, err, leftover)
+	}
+	if err := m.Bucket("files").Set("small.txt", []byte("new"), 0); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Delete(ctx, "small.txt"); err != nil {
+		t.Fatal(err)
+	}
+	if v, err := m.Bucket("files").GetWithContext(ctx, "small.txt"); err != nil || string(v) != "new" {
+		t.Fatalf("object of the recreated bucket after a delete in the leftover = %q, %v", v, err)
+	}
+	// And what the recreated bucket receives is not copied into it.
+	if err := m.Bucket("files").Set("after.txt", []byte("x"), 0); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(300 * time.Millisecond)
+	if _, err := store.GetInfo(ctx, "after.txt"); !errors.Is(err, jetstream.ErrObjectNotFound) {
+		t.Fatalf("an object written after the recreate is in the leftover: %v", err)
+	}
+}

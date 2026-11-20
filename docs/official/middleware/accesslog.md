@@ -74,6 +74,8 @@ func main() {
 
 {% hint style="warning" %}
 **The module closes the writer on `Stop`** (it calls `Sync()` and `Close()` when the writer implements them. `os.Stdout` and `os.Stderr` are never closed, and a pipe or terminal, which cannot be synced, does not fail `Stop`). Do not close it yourself.
+
+A module whose log was closed cannot be started again: `Start` returns `accesslog.ErrOutputClosed`, so build a new module with `accesslog.New` for a new application. When a failed `Start` of the application is rolled back, the log is flushed and left open, and the module logs again after the retried `Start` (since v0.2.18); it is closed when the application is stopped instead.
 {% endhint %}
 
 Select fields:
@@ -113,7 +115,7 @@ ts=2025-01-15T10:30:00Z request_id=550e8400-e29b-41d4-a716-446655440000 module=p
 | Field | Description |
 |-------|-------------|
 | `ts` | UTC start time of the call (RFC 3339) |
-| `request_id` | Request ID from the header (or from the context, see [Ordering](README.md#ordering)); always present, empty when unknown |
+| `request_id` | Request ID from the header (or from the context, see [Ordering](README.md#ordering)); always present, empty when unknown. The header is written by the sender, so the value is sanitised: at most 128 bytes of ASCII letters, digits and `-_.:/=+@~`, every other byte replaced by `_` (since v0.2.18). A value with spaces can therefore not add fields to a text line |
 | `module` | Name of the module providing the service |
 | `service` | Service name (event name for event consumers) |
 | `service_type` | `request_reply`, `queue_group`, `stream_consumer`, `event_consumer`, `event_stream_consumer` or `channel` |

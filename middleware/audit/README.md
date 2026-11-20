@@ -241,6 +241,10 @@ func New(opts ...Option) (*AuditModule, error)
 // the audit container a module receives in SetDependencyServiceContainer
 func NewAuditAdapter(container types.ServiceContainer, consumerModuleName string) (AuditAdapterPort, error)
 
+// ErrOutputClosed is returned by Start after Stop closed the log. The
+// rollback of a failed application Start (RollbackStart) leaves it open.
+var ErrOutputClosed error
+
 // VerifyChain verifies an audit log hash chain that starts a new chain
 func VerifyChain(entries []Entry) error
 

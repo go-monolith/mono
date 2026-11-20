@@ -76,6 +76,13 @@ Client Request (no request ID)
   request_id: "550e8400-e29b-41d4-a716-446655440000" (same ID)
 ```
 
+**An incoming ID is sanitised** (since v0.2.18). The header is written by the sender of the message, and the ID goes into the handler's context, every nested call and the logs:
+
+- At most 128 bytes are kept.
+- ASCII letters, digits and `-_.:/=+@~` are kept; every other byte (spaces, quotes, control characters, non-ASCII) becomes `_`.
+- UUIDs, ULIDs, W3C trace IDs and base64 values pass unchanged. The access log applies the same rule, so both report the same value.
+- The message's own header is not rewritten: a handler that reads `msg.Header` directly sees what was sent.
+
 ## Accessing the Request ID in Handlers
 
 `func GetRequestID(ctx context.Context) string` returns the ID, or an empty string if there is none. There is no function to put an ID into a context; send it as a header instead (see [HTTP Gateway Integration](#http-gateway-integration)).

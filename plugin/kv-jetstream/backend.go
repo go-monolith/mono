@@ -285,7 +285,8 @@ func (b *JetStreamKVBackend) PutWithRevision(key string, val []byte, exp time.Du
 // storage.StorageWithKeys Implementation
 // =============================================================================
 
-// KeysWithContext returns all keys in the storage.
+// KeysWithContext returns all keys in the storage. When ctx ends before the
+// listing is complete it returns an error wrapping the context's and no keys.
 func (b *JetStreamKVBackend) KeysWithContext(ctx context.Context) ([]string, error) {
 	lister, err := b.kv.ListKeys(ctx)
 	if err != nil {
@@ -298,6 +299,13 @@ func (b *JetStreamKVBackend) KeysWithContext(ctx context.Context) ([]string, err
 	var keys []string
 	for key := range lister.Keys() {
 		keys = append(keys, key)
+	}
+	// The lister closes its channel when the context ends as it does when
+	// every key was sent, so a listing cut short is told apart here: a
+	// shorter list returned as complete would make a caller treat the
+	// missing keys as deleted.
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("failed to list keys: listing stopped after %d keys: %w", len(keys), err)
 	}
 	return keys, nil
 }

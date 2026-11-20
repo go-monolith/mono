@@ -200,12 +200,14 @@ Set the option only on buckets whose contents can be lost and are rebuilt by the
 - **Completeness:** the delete happens only once the backup holds every message the bucket held when it was read (messages that expired before they were copied can't be). The backup is then detached, so it copies nothing the recreated bucket receives. Writes made to the old bucket after it was read, for example by instances of an older version still running during a rolling deploy, may or may not be in the backup.
 - **Failure:** if the backup can't be made or doesn't finish within 2 minutes (a fixed limit whatever the bucket's size, and within the `Start` context), the partial backup is removed, nothing is deleted, and `Start` fails with `ErrStorageMismatch`. A bucket too large to copy in that time keeps failing `Start`: remove its stream by hand, or set `SkipBackupOnRecreate`. Because the copy runs inside `Start`, a repair can delay startup by up to 2 minutes: allow for it in orchestrator startup deadlines (for example a Kubernetes `startupProbe`, whose `failureThreshold` × `periodSeconds` should exceed it).
 - **When there's none:** an empty bucket is recreated without a backup, and `SkipBackupOnRecreate` turns it off.
+- **A backup left attached:** a recreate that was interrupted during the copy (the process was killed) leaves a backup bucket that still copies the bucket's stream. It would copy everything the recreated bucket receives. The next recreate of the bucket detaches such backups (since v0.2.18), once the bucket is recreated: each is logged at Warn with its name, and is kept, since it holds part of what the bucket held and may be incomplete. Only names of the form the plugin gives its backups, with this bucket's stream as their one source, are detached; a bucket of your own that copies this one is left alone. A leftover whose bucket is not recreated again keeps copying until you delete it.
 - **Logged:** the Warn line names the backup bucket (`backup_bucket`).
 - **Cleanup:** the plugin never removes a backup bucket. Its keys expire, but the empty bucket remains until you delete it (`nats kv del <backup>`).
 - **Name length:** a bucket name longer than 211 characters leaves no room for the backup name; `New` rejects it unless `SkipBackupOnRecreate` is set.
 - **Restore:** read the keys from the backup with the `nats` CLI (`nats kv ls <backup>`, `nats kv get <backup> <key>`) or a client, and write back the ones you need.
 
 - **Only on a real mismatch:** the stream is inspected only after the bucket could not be created or opened, so a healthy start makes no extra request, and a bucket whose storage type matches is never touched.
+- **Only that bucket's own keys are backed up:** the backup copies the stream `KV_<name>`, also for a bucket whose name itself starts with `KV_` (before v0.2.18 the backup of a bucket `KV_x` copied the bucket `x`, and `KV_x` was then deleted without a copy). A backup that copies another stream is never accepted as complete.
 - **Only that bucket's stream:** `KV_<name>`, never any other stream. A `KV_<name>` stream that isn't a plain bucket of that name (a mirror, or other subjects) is never deleted: `Start` fails instead.
 - **Same `Storage` everywhere:** two applications that share a bucket with different `Storage` values, and both set the option, delete each other's bucket on every start.
 - **Concurrent starts:** when several instances start at once, an instance that finds the bucket already repaired by another one, during its copy or right before its delete, drops its backup and opens the repaired bucket. Keys written to the repaired bucket in the moment between that last check and the delete can still be lost: JetStream has no conditional delete.
@@ -477,6 +479,8 @@ for _, key := range keys {
     fmt.Println(key)
 }
 ```
+
+`KeysWithContext(ctx)` returns an error and no keys when `ctx` ends before every key was listed (since v0.2.18; before, it returned the keys listed so far and a nil error, which a caller could take for the whole bucket).
 
 ### Watch for Changes
 

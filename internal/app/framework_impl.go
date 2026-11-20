@@ -387,6 +387,7 @@ func (fw *frameworkApplication) Stop(ctx context.Context) error {
 	fw.logger.Info("Stopping application")
 
 	var stopErr error
+	startStillRunning := false
 	switch previous {
 	case types.StateRunning:
 		if err := fw.lifecycleManager.Stop(ctx); err != nil {
@@ -410,6 +411,20 @@ func (fw *frameworkApplication) Stop(ctx context.Context) error {
 		} else {
 			fw.logger.Error("Start in progress did not return while stopping; stopping the NATS server anyway", "error", ctx.Err())
 			stopErr = fmt.Errorf("start in progress did not return while stopping: %w", ctx.Err())
+			startStillRunning = true
+		}
+	}
+
+	// Middleware that the rollback of a failed or aborted Start stopped
+	// through RollbackStart, and that was not started again, gets its final
+	// Stop now: the rollback left its log open for a retry that did not
+	// come. Not while a start that did not return may still be at it.
+	if !startStillRunning {
+		if err := fw.lifecycleManager.StopRolledBackMiddleware(ctx); err != nil {
+			fw.logger.Error("Failed to stop middleware left by a rolled-back start", "error", err)
+			if stopErr == nil {
+				stopErr = err
+			}
 		}
 	}
 

@@ -93,3 +93,79 @@ func TestFlushAndCloseOtherWriters(t *testing.T) {
 		t.Fatalf("plain writer: %v", err)
 	}
 }
+
+func TestFlushLeavesTheWriterOpen(t *testing.T) {
+	f, err := os.Create(filepath.Join(t.TempDir(), "log"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = f.Close() }()
+	if err := Flush(f, "log"); err != nil {
+		t.Fatalf("Flush: %v", err)
+	}
+	if _, err := f.Write([]byte("x")); err != nil {
+		t.Fatalf("write after Flush: %v", err)
+	}
+	// A pipe has nothing to sync and must not fail.
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = r.Close(); _ = w.Close() }()
+	if err := Flush(w, "log"); err != nil {
+		t.Fatalf("Flush on a pipe: %v", err)
+	}
+	// Plain writers: Sync is called when there is one, never Close.
+	if err := Flush(&bytes.Buffer{}, "log"); err != nil {
+		t.Fatalf("Flush on a buffer: %v", err)
+	}
+}
+
+func TestCloses(t *testing.T) {
+	f, err := os.Create(filepath.Join(t.TempDir(), "log"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = f.Close() }()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = r.Close(); _ = w.Close() }()
+	if !Closes(f) || !Closes(w) {
+		t.Error("a file other than the standard streams is closed")
+	}
+	if Closes(os.Stdout) || Closes(os.Stderr) {
+		t.Error("the standard streams are never closed")
+	}
+	if Closes(&bytes.Buffer{}) {
+		t.Error("a writer that is not an io.Closer is not closed")
+	}
+}
+
+// syncCounter is a writer with a Sync and a Close of its own.
+type syncCounter struct {
+	bytes.Buffer
+	syncs, closes int
+	syncErr       error
+}
+
+func (s *syncCounter) Sync() error  { s.syncs++; return s.syncErr }
+func (s *syncCounter) Close() error { s.closes++; return nil }
+
+func TestFlushSyncsWithoutClosing(t *testing.T) {
+	w := &syncCounter{}
+	if err := Flush(w, "log"); err != nil {
+		t.Fatalf("Flush: %v", err)
+	}
+	if w.syncs != 1 || w.closes != 0 {
+		t.Fatalf("syncs=%d closes=%d, want one sync and no close", w.syncs, w.closes)
+	}
+	if !Closes(w) {
+		t.Error("a writer with Close is closed by FlushAndClose")
+	}
+	w.syncErr = errors.New("disk full")
+	if err := Flush(w, "audit log"); err == nil || !strings.Contains(err.Error(), "failed to sync audit log") || !errors.Is(err, w.syncErr) {
+		t.Fatalf("Flush = %v, want the sync error with the writer's name", err)
+	}
+}

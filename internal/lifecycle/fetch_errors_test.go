@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/go-monolith/mono/pkg/types"
+	"github.com/nats-io/nats-server/v2/server"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 )
@@ -168,5 +169,180 @@ func TestFetchErrorReporter_LeaderMoveIsWarning(t *testing.T) {
 		if len(logger.entries) != 1 || !strings.HasPrefix(logger.entries[0], "WARN: Fetch error") {
 			t.Errorf("%v: entries = %v, want one warning", err, logger.entries)
 		}
+	}
+}
+
+// TestFetchErrorReporter_ConsumerGone: a pull request for a consumer that no
+// longer exists is answered with "no responders", like one for a consumer
+// without a leader. The reporter looks the consumer up and says once, at
+// Error, that it is gone and what brings the loop back, instead of a warning
+// every ten seconds that reads as if it would clear by itself.
+func TestFetchErrorReporter_ConsumerGone(t *testing.T) {
+	newReporter := func(lookupErr *error) (*fetchErrorReporter, *mockLogger, *time.Time, *int) {
+		logger := &mockLogger{}
+		clock := time.Unix(0, 0)
+		lookups := 0
+		r := newFetchErrorReporter(logger, "Fetch error", "service", "jobs")
+		r.now = func() time.Time { return clock }
+		r.WatchConsumer("JOBS", "orders-jobs", func(context.Context) error { lookups++; return *lookupErr })
+		return r, logger, &clock, &lookups
+	}
+
+	t.Run("deleted: said at once, then a reminder, then the recovery", func(t *testing.T) {
+		lookupErr := error(jetstream.ErrConsumerNotFound)
+		r, logger, clock, lookups := newReporter(&lookupErr)
+		r.failure(jetstream.ErrConsumerDeleted)
+		if len(logger.entries) != 1 || !strings.HasPrefix(logger.entries[0], "ERROR: "+ConsumerGoneMessage) {
+			t.Fatalf("entries = %v, want the consumer reported as gone at once", logger.entries)
+		}
+		for _, want := range []string{"stream JOBS", "consumer orders-jobs", "restart this instance", "service jobs"} {
+			if !strings.Contains(logger.entries[0], want) {
+				t.Errorf("line %q lacks %q", logger.entries[0], want)
+			}
+		}
+		// The fetches that follow get no responders: nothing more is logged
+		// until the reminder is due, and the lookup is not made every time.
+		for i := 0; i < 50; i++ {
+			*clock = clock.Add(time.Second)
+			r.failure(nats.ErrNoResponders)
+		}
+		if len(logger.entries) != 1 {
+			t.Fatalf("entries = %v, want no further line within the reminder interval", logger.entries)
+		}
+		if *lookups > 12 {
+			t.Errorf("%d lookups for 51 failures", *lookups)
+		}
+		*clock = clock.Add(goneLogInterval)
+		r.failure(nats.ErrNoResponders)
+		if len(logger.entries) != 2 || !strings.HasPrefix(logger.entries[1], "ERROR: "+ConsumerGoneMessage) {
+			t.Fatalf("entries = %v, want one reminder", logger.entries)
+		}
+		// Another instance started and created the consumer: fetching works.
+		r.success()
+		if len(logger.entries) != 3 || !strings.HasPrefix(logger.entries[2], "INFO: Consumer exists again") {
+			t.Fatalf("entries = %v, want the recovery", logger.entries)
+		}
+		r.success()
+		if len(logger.entries) != 3 {
+			t.Fatalf("recovery logged twice: %v", logger.entries)
+		}
+	})
+
+	t.Run("removed by the server: found after a few failed fetches", func(t *testing.T) {
+		lookupErr := error(jetstream.ErrConsumerNotFound)
+		r, logger, _, lookups := newReporter(&lookupErr)
+		for i := 1; i < goneCheckEvery; i++ {
+			r.failure(nats.ErrNoResponders)
+		}
+		if *lookups != 0 || logger.hasErrorContaining(ConsumerGoneMessage) {
+			t.Fatalf("looked up %d times before %d failures: %v", *lookups, goneCheckEvery, logger.entries)
+		}
+		r.failure(nats.ErrNoResponders)
+		if *lookups != 1 || !logger.hasErrorContaining(ConsumerGoneMessage) {
+			t.Fatalf("lookups = %d, entries = %v, want the consumer reported as gone", *lookups, logger.entries)
+		}
+	})
+
+	t.Run("the stream is gone too", func(t *testing.T) {
+		lookupErr := error(jetstream.ErrStreamNotFound)
+		r, logger, _, _ := newReporter(&lookupErr)
+		r.failure(jetstream.ErrConsumerDeleted)
+		if !logger.hasErrorContaining(ConsumerGoneMessage) {
+			t.Fatalf("entries = %v", logger.entries)
+		}
+	})
+
+	t.Run("a consumer without a leader is not reported as gone", func(t *testing.T) {
+		var lookupErr error // the consumer exists
+		r, logger, clock, _ := newReporter(&lookupErr)
+		for i := 0; i < 3*goneCheckEvery; i++ {
+			*clock = clock.Add(time.Second)
+			r.failure(nats.ErrNoResponders)
+		}
+		if logger.hasErrorContaining(ConsumerGoneMessage) {
+			t.Fatalf("entries = %v", logger.entries)
+		}
+		if !logger.hasWarnContaining("Fetch error") {
+			t.Fatalf("the failure is still reported as before: %v", logger.entries)
+		}
+	})
+
+	t.Run("a lookup that fails says nothing", func(t *testing.T) {
+		lookupErr := errors.New("timeout")
+		r, logger, _, _ := newReporter(&lookupErr)
+		r.failure(jetstream.ErrConsumerDeleted)
+		if logger.hasErrorContaining(ConsumerGoneMessage) {
+			t.Fatalf("entries = %v", logger.entries)
+		}
+		// Once the lookup answers, it is reported.
+		lookupErr = jetstream.ErrConsumerNotFound
+		for i := 0; i < goneCheckEvery; i++ {
+			r.failure(nats.ErrNoResponders)
+		}
+		if !logger.hasErrorContaining(ConsumerGoneMessage) {
+			t.Fatalf("entries = %v", logger.entries)
+		}
+	})
+
+	t.Run("without a consumer to watch nothing changes", func(t *testing.T) {
+		logger := &mockLogger{}
+		r := newFetchErrorReporter(logger, "Fetch error", "service", "jobs")
+		r.WatchJetStreamConsumer(nil)
+		r.failure(jetstream.ErrConsumerDeleted)
+		if len(logger.entries) != 1 || !strings.HasPrefix(logger.entries[0], "ERROR: Fetch error") {
+			t.Fatalf("entries = %v", logger.entries)
+		}
+	})
+}
+
+// TestFetchErrorReporter_WatchJetStreamConsumer runs against a real server:
+// the reporter takes the stream and the name from the consumer handle and
+// finds the consumer gone once it is deleted.
+func TestFetchErrorReporter_WatchJetStreamConsumer(t *testing.T) {
+	s, err := server.NewServer(&server.Options{JetStream: true, Port: -1, StoreDir: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	go s.Start()
+	if !s.ReadyForConnections(5 * time.Second) {
+		t.Fatal("NATS server not ready")
+	}
+	t.Cleanup(func() { s.Shutdown(); s.WaitForShutdown() })
+	nc, err := nats.Connect(s.ClientURL())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(nc.Close)
+	js, err := jetstream.New(nc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	stream, err := js.CreateStream(ctx, jetstream.StreamConfig{Name: "JOBS", Subjects: []string{"jobs.>"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	consumer, err := stream.CreateConsumer(ctx, jetstream.ConsumerConfig{Durable: "orders-jobs", AckPolicy: jetstream.AckExplicitPolicy})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	logger := &mockLogger{}
+	r := newFetchErrorReporter(logger, "Fetch error", "service", "jobs")
+	r.WatchJetStreamConsumer(consumer)
+	if r.stream != "JOBS" || r.consumer != "orders-jobs" {
+		t.Fatalf("watching %s/%s", r.stream, r.consumer)
+	}
+	// It exists: a deleted answer that is already out of date says nothing.
+	r.failure(jetstream.ErrConsumerDeleted)
+	if logger.hasErrorContaining(ConsumerGoneMessage) {
+		t.Fatalf("an existing consumer was reported as gone: %v", logger.entries)
+	}
+	if err := stream.DeleteConsumer(ctx, "orders-jobs"); err != nil {
+		t.Fatal(err)
+	}
+	r.failure(jetstream.ErrConsumerDeleted)
+	if !logger.hasErrorContaining(ConsumerGoneMessage) || !logger.hasErrorContaining("stream JOBS consumer orders-jobs") {
+		t.Fatalf("the deleted consumer was not reported: %v", logger.entries)
 	}
 }

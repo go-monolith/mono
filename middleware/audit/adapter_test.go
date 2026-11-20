@@ -151,7 +151,7 @@ func (h *mockAuditHandler) handle() {
 				if msg.Reply != "" {
 					response := SaveEntryResponse{Success: false, Error: err.Error()}
 					data, _ := json.Marshal(response)
-					h.outChan <- &types.Msg{Subject: msg.Reply, Data: data}
+					h.outChan <- &types.Msg{Subject: msg.Reply, Data: data, Header: ConfirmationHeader(msg)}
 				}
 				continue
 			}
@@ -171,7 +171,7 @@ func (h *mockAuditHandler) handle() {
 					response = SaveEntryResponse{Success: true}
 				}
 				data, _ := json.Marshal(response)
-				h.outChan <- &types.Msg{Subject: msg.Reply, Data: data}
+				h.outChan <- &types.Msg{Subject: msg.Reply, Data: data, Header: ConfirmationHeader(msg)}
 			}
 			entryIdx++
 		}
@@ -377,8 +377,8 @@ func TestAuditAdapter_SaveAuditTrail(t *testing.T) {
 
 		// Start a goroutine to respond with invalid JSON
 		go func() {
-			<-inChan
-			outChan <- &types.Msg{Data: []byte("invalid json")}
+			req := <-inChan
+			outChan <- &types.Msg{Data: []byte("invalid json"), Header: ConfirmationHeader(req)}
 		}()
 
 		entries := []Entry{{ModuleName: "test"}}

@@ -43,9 +43,11 @@ All unexported; nothing here is part of the public API.
 | `(*autoTLS).stop(ctx)` | Shuts the challenge server down |
 | `stripHostPort(next)` | Normalizes `r.Host` before autocert's host policy runs |
 
-Constants: `challengeReadHeaderTimeout` (10s), `autoTLSHandshakeTimeout` (10s,
-assigned to `server.Options.TLSTimeout`), `acmeRequestTimeout` (30s, per ACME
-request — not per order).
+Constants: `challengeReadHeaderTimeout` (10s), `challengeReadTimeout` (10s),
+`challengeWriteTimeout` (10s), `challengeIdleTimeout` (30s),
+`challengeMaxHeaderBytes` (16 KiB), `challengeShutdownTimeout` (2s),
+`autoTLSHandshakeTimeout` (10s, assigned to `server.Options.TLSTimeout`),
+`acmeRequestTimeout` (30s, per ACME request — not per order).
 
 ## Invariants
 
@@ -95,8 +97,12 @@ startup error rather than a log line from a goroutine nobody is watching. The
 error message names the address and mentions that a privileged port needs root
 or `CAP_NET_BIND_SERVICE`, because that is the common cause.
 
-The handler is `stripHostPort(mgr.HTTPHandler(nil))` with a
-`ReadHeaderTimeout`, which is required on a public port. Resulting status codes:
+The handler is `stripHostPort(mgr.HTTPHandler(nil))`. The port is public, so
+the server bounds everything a client can do with a connection: reading the
+headers (`ReadHeaderTimeout`), reading the whole request including a body that
+is announced and never sent (`ReadTimeout`), writing the response
+(`WriteTimeout`), keeping an idle keep-alive connection (`IdleTimeout`) and the
+size of the headers (`MaxHeaderBytes`). Resulting status codes:
 
 | Request | Result |
 |---|---|
@@ -131,8 +137,14 @@ from a supervised restart loop whose attempts all race on the same cache.
 ### Shutdown
 
 `stop` is safe on a nil receiver and safe to call twice. It shuts the server
-down under the caller's deadline, force-closes on failure, and falls back to
-closing a bound-but-unserved listener. `autocert.Manager` has no exported stop;
+down under the caller's deadline and at most `challengeShutdownTimeout`,
+force-closes the listener and every connection on failure, and falls back to
+closing a bound-but-unserved listener. The bound is inside `stop` because the
+manager calls it with its mutex held and, on the failed-start path and from
+the framework's `Stop`, with a context that never ends: `http.Server.Shutdown`
+waits for every connection that is not idle, so one client holding a
+connection open (a request whose body never arrives) blocked `Stop`, with the
+NATS port still accepting, until that client went away. `autocert.Manager` has no exported stop;
 its renewal timers are released when the process exits.
 
 ## Error semantics
@@ -171,6 +183,8 @@ must not reach the internet point `DirectoryURL` at a closed local port or an
 
 Each invariant above has a guard: `TestAutoTLSTLSConfig` (2, 3),
 `TestAutoTLSStartStop` (1, 6, including the `Host`-with-port regression cases),
+`TestAutoTLSStopWithOpenConnections` (shutdown with a client holding a
+connection open, and the server limits),
 `TestNewACMEClientAlwaysBounded` (4, across all four directory/CA-pool
 combinations), and `TestNATSManager_AutoTLS_ChallengePortConflict` in
 `manager_test.go` (5).

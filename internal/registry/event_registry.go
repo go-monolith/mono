@@ -423,3 +423,36 @@ func (r *eventRegistry) StreamConsumerEntries() []types.EventStreamConsumerEntry
 
 	return result
 }
+
+// Checkpoint records the registry as it is and returns the function that
+// puts it back: the event definitions, the consumers, the stream consumers
+// and the stream consumer sequence. The lifecycle takes one when Start
+// begins and restores it when Start fails, so that a retried Start registers
+// the modules' events and consumers on the registry it would have found the
+// first time. Without it the events of an EventEmitterModule were "already
+// registered" on every retry, and consumers registered a second time got a
+// second subscription and a second durable.
+//
+// The middleware chain is not part of the checkpoint. restore may be called
+// once or not at all.
+func (r *eventRegistry) Checkpoint() (restore func()) {
+	r.mu.RLock()
+	events := append([]types.BaseEventDefinition(nil), r.events...)
+	consumers := append([]types.EventConsumerEntry(nil), r.consumers...)
+	streamConsumers := append([]types.EventStreamConsumerEntry(nil), r.streamConsumers...)
+	sequence := r.streamConsumerSequence
+	r.mu.RUnlock()
+
+	return func() {
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		r.events = events
+		r.consumers = consumers
+		r.streamConsumers = streamConsumers
+		r.streamConsumerSequence = sequence
+		r.eventMap = make(map[string]types.BaseEventDefinition, len(events))
+		for _, def := range events {
+			r.eventMap[makeEventKey(def.ModuleName, def.Name, def.Version)] = def
+		}
+	}
+}

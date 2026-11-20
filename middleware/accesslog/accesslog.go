@@ -18,6 +18,7 @@ package accesslog
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -27,6 +28,7 @@ import (
 	"time"
 
 	"github.com/go-monolith/mono/internal/output"
+	"github.com/go-monolith/mono/internal/reqid"
 	"github.com/go-monolith/mono/middleware/requestid"
 	"github.com/go-monolith/mono/pkg/types"
 )
@@ -72,7 +74,16 @@ type AccessLogModule struct {
 	formatter       Formatter
 	mu              sync.Mutex
 	shutdown        atomic.Bool
-	wg              sync.WaitGroup
+	// writes is held shared by every write for as long as it runs, and
+	// taken exclusively by stop once the shutdown flag is set: when stop
+	// has had it, no write is in progress and none begins. A WaitGroup
+	// cannot do this: a write that read the flag just before it was set
+	// would add itself beside the Wait, and stop would close the log
+	// under it.
+	writes sync.RWMutex
+	// outputClosed is set (under mu) once Stop closed the writer: nothing
+	// can be written after that, so the module cannot be started again.
+	outputClosed bool
 
 	// Channel proxy management
 	channelProxies   map[string]*channelProxy
@@ -81,6 +92,15 @@ type AccessLogModule struct {
 
 // Ensure Module implements MiddlewareModule.
 var _ types.MiddlewareModule = (*AccessLogModule)(nil)
+
+// Ensure Module can be stopped by the rollback of a failed Start and started
+// again.
+var _ types.RollbackAwareMiddleware = (*AccessLogModule)(nil)
+
+// ErrOutputClosed is returned by Start after Stop closed the module's output.
+// A stopped module whose output was closed cannot be started again: build a
+// new one with New.
+var ErrOutputClosed = errors.New("access log output was closed by Stop")
 
 // New creates a new access log module with the given options.
 //
@@ -128,13 +148,67 @@ func (m *AccessLogModule) Name() string {
 }
 
 // Start initializes the access log module.
+//
+// It fails with ErrOutputClosed when an earlier Stop closed the output. A
+// module stopped by RollbackStart, or whose output Stop does not close
+// (os.Stdout, os.Stderr, a writer that is not an io.Closer), can be started
+// again: Start clears the shutdown state Stop left, which used to make a
+// restarted module log nothing.
 func (m *AccessLogModule) Start(_ context.Context) error {
-	// No initialization required for access log module
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.outputClosed {
+		return fmt.Errorf("access log module cannot be started again: %w", ErrOutputClosed)
+	}
+	m.shutdown.Store(false)
 	return nil
 }
 
-// Stop closes the access log module.
+// Stop stops the channel proxies, waits for the writes in flight, then
+// flushes and closes the access log (see output.FlushAndClose: os.Stdout and
+// os.Stderr are never closed).
 func (m *AccessLogModule) Stop(ctx context.Context) error {
+	return m.stop(ctx, true)
+}
+
+// RollbackStart stops the module like Stop but only flushes the access log
+// and leaves it open, so the module can be started again. The framework calls
+// it instead of Stop when the application's Start failed after this module
+// had started (types.RollbackAwareMiddleware): Stop would close the log file,
+// and the application's next Start would have nothing to write to.
+func (m *AccessLogModule) RollbackStart(ctx context.Context) error {
+	return m.stop(ctx, false)
+}
+
+// stopGrace is how long the proxies and the writes in flight are still
+// waited for after the Stop context ended. It is shorter than the time the
+// framework waits for a Stop whose context has ended.
+const stopGrace = 100 * time.Millisecond
+
+// WaitWithGrace waits until done is closed and reports whether it was. Once
+// ctx has ended it waits stopGrace more: by the time a middleware is stopped
+// the Stop context has often ended already (a module before it used it up),
+// and giving up at once would leave the log neither flushed nor closed
+// although the proxies and writes finish in a moment.
+func WaitWithGrace(ctx context.Context, done <-chan struct{}) bool {
+	select {
+	case <-done:
+		return true
+	case <-ctx.Done():
+	}
+	grace := time.NewTimer(stopGrace)
+	defer grace.Stop()
+	select {
+	case <-done:
+		return true
+	case <-grace.C:
+		return false
+	}
+}
+
+// stop stops the proxies and writes, flushes the writer and, with
+// closeOutput, closes it.
+func (m *AccessLogModule) stop(ctx context.Context, closeOutput bool) error {
 	// Signal shutdown to prevent new writes
 	m.shutdown.Store(true)
 
@@ -159,33 +233,36 @@ func (m *AccessLogModule) Stop(ctx context.Context) error {
 			close(done)
 		}()
 
-		select {
-		case <-done:
-			// Proxies stopped
-		case <-ctx.Done():
+		if !WaitWithGrace(ctx, done) {
 			return fmt.Errorf("timeout waiting for channel proxies to stop: %w", ctx.Err())
 		}
 	}
 
-	// Wait for all in-flight writes to complete with timeout
+	// Wait for all in-flight writes to complete with timeout. The flag is
+	// set, so a write that gets the lock after this returns at once.
 	done := make(chan struct{})
 	go func() {
-		m.wg.Wait()
+		m.writes.Lock()
+		m.writes.Unlock() //nolint:staticcheck // SA2001: taken only to wait for the writes in progress
 		close(done)
 	}()
 
-	select {
-	case <-done:
-		// Writes completed
-	case <-ctx.Done():
+	if !WaitWithGrace(ctx, done) {
 		return fmt.Errorf("timeout waiting for in-flight writes to complete: %w", ctx.Err())
 	}
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
+	if m.outputClosed {
+		return nil // an earlier Stop closed it
+	}
+	if !closeOutput {
+		return output.Flush(m.writer, "access log")
+	}
 	// Flush and close the writer, except os.Stdout and os.Stderr, which the
 	// rest of the process keeps using (see output.FlushAndClose).
+	m.outputClosed = output.Closes(m.writer)
 	return output.FlushAndClose(m.writer, "access log")
 }
 
@@ -524,14 +601,18 @@ func (m *AccessLogModule) wrapEventStreamConsumerHandler(
 	}
 }
 
-// extractRequestID extracts the request ID from message headers.
+// extractRequestID extracts the request ID from message headers. The header
+// is written by the sender, so the value is sanitised (reqid.Sanitize: at
+// most reqid.MaxLen bytes of a fixed character set) before it reaches a log
+// line: as it came, it could forge fields of a text line or make a line as
+// long as the sender liked.
 func (m *AccessLogModule) extractRequestID(msg *types.Msg) string {
 	if msg.Header == nil {
 		return ""
 	}
 	values := msg.Header[m.requestIDHeader]
 	if len(values) > 0 {
-		return values[0]
+		return reqid.Sanitize(values[0])
 	}
 	return ""
 }
@@ -691,13 +772,16 @@ func (m *AccessLogModule) proxyOutboundChannel(proxy *channelProxy) {
 // Write failures are logged to stderr but do not propagate to prevent
 // logging failures from impacting service handlers.
 func (m *AccessLogModule) writeEntry(entry Entry) {
+	// Held for the whole write, so that stop cannot close the log under
+	// it; the flag is read under it, so a write either finishes before
+	// stop goes on or does not begin.
+	m.writes.RLock()
+	defer m.writes.RUnlock()
+
 	// Skip writes during shutdown
 	if m.shutdown.Load() {
 		return
 	}
-
-	m.wg.Add(1)
-	defer m.wg.Done()
 
 	m.mu.Lock()
 	defer m.mu.Unlock()

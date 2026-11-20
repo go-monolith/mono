@@ -27,7 +27,8 @@ func main() {
     // Create access log file
     accessFile, _ := os.OpenFile("access.log",
         os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-    // The module syncs and closes the file on Stop (never os.Stdout/os.Stderr)
+    // The module syncs and closes the file on Stop (never os.Stdout/os.Stderr);
+    // after that, Start on the same module returns accesslog.ErrOutputClosed
 
     // Create access log middleware with default settings
     accessModule, _ := accesslog.New(
@@ -116,7 +117,7 @@ ts=2024-01-15T10:30:01Z request_id=xyz789 module=payment service=process-payment
 | Field | Description | Example Value |
 |-------|-------------|---------------|
 | `ts` | UTC timestamp in RFC3339 format | `2024-01-15T10:30:00Z` |
-| `request_id` | Request ID from header (default: X-Request-ID) | `abc123` |
+| `request_id` | Request ID from header (default: X-Request-ID), sanitised: at most 128 bytes of ASCII letters, digits and `-_.:/=+@~`, anything else replaced by `_` | `abc123` |
 | `module` | Module name that registered the service | `order` |
 | `service` | Service handler name | `place-order` |
 | `method` | Service type: `request_reply`, `queue_group`, `stream_consumer` | `request_reply` |

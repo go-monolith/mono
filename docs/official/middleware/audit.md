@@ -61,6 +61,7 @@ func main() {
 
 - `WithOutput` is required: without it `New` returns the error `audit module requires WithOutput option`.
 - **The module closes the writer on `Stop`** (it calls `Sync()` and `Close()` when the writer implements them. `os.Stdout` and `os.Stderr` are never closed, and a pipe or terminal, which cannot be synced, does not fail `Stop`); do not close it yourself.
+- **A module whose log was closed cannot be started again**: `Start` returns `audit.ErrOutputClosed`. Build a new module with `audit.New` for a new application. When a failed `Start` of the application is rolled back, the log is flushed and left open, so a retried `Start` works (since v0.2.18); it is closed when the application is stopped instead.
 - **Hash chaining is off by default**: `audit.New(audit.WithOutput(file))` writes `prev_hash` and `entry_hash` empty.
 - The `WithUserContext` function is called with the `Start`/`Stop` context or `context.Background()`, not with a request context.
 
@@ -100,9 +101,26 @@ The `audit.EventType` constants:
 | `module.stopped` | `EventModuleStopped` | A module stopped; `details.error` when it failed |
 | `service.registered` | `EventServiceRegistered` | A service, event consumer or event stream consumer was registered; `details.service_type` |
 | `configuration.updated` | `EventConfigurationUpdate` | Deprecated, never emitted: the framework's configuration does not change at runtime, so it never calls `OnConfigurationChange` |
-| `custom.audit_trail` | `EventCustomAuditTrail` | Custom entries a module sends through `audit.NewAuditAdapter`: list `"audit"` in its `Dependencies()` and build the adapter from the container passed to `SetDependencyServiceContainer` for it (see the `NewAuditAdapter` godoc). `SaveAuditTrail` waits for the confirmation of each entry, `AsyncSaveAuditTrail` does not |
+| `custom.audit_trail` | `EventCustomAuditTrail` | Custom entries a module sends through `audit.NewAuditAdapter`: list `"audit"` in its `Dependencies()` and build the adapter from the container passed to `SetDependencyServiceContainer` for it (see the `NewAuditAdapter` godoc). `SaveAuditTrail` waits for the confirmation of each entry, `AsyncSaveAuditTrail` does not (see [Custom Audit Entries](#custom-audit-entries)) |
 
 Not recorded: module registration, middleware modules themselves, plugins, and service calls. Records of access to data or of transactions (PCI DSS, HIPAA, financial systems) need application code.
+
+## Custom Audit Entries
+
+A module that lists `"audit"` in its `Dependencies()` saves its own entries through the adapter:
+
+```go
+saved, err := m.audit.SaveAuditTrail(ctx, []audit.Entry{{
+    EventType:  audit.EventCustomAuditTrail,
+    ModuleName: "orders",
+    Details:    map[string]any{"action": "refund", "order_id": "o-1"},
+}})
+```
+
+- **`SaveAuditTrail` returns how many entries are in the log.** An entry the module could not write is not counted, and the first error is returned. Any number of entries can be saved in one call.
+- **Pass a context with a deadline.** When it ends first, the call returns the number confirmed so far and an error; entries already sent may still be written. After the audit module was stopped no confirmation arrives, so the call returns when the context ends.
+- **`AsyncSaveAuditTrail` does not wait** and cannot report a failed write. Entries it handed over before `Stop` are written by `Stop`; entries sent after `Stop` are not written.
+- **A failed write** is also reported on stderr (`CRITICAL: Failed to write audit entry`). The hash chain does not advance over an entry that is not in the log, so the entries that are still verify. A write that fails after part of its line was written leaves that torn line in the log; the next entry starts on a line of its own.
 
 ## Hash Chaining Explained
 
@@ -186,7 +204,7 @@ Other exported helpers: `audit.NewHashChain(lastSavedHash)` / `HashChain.AddEntr
 ## Performance
 
 - **Cost**: per registration or module lifecycle event, not per request
-- **I/O**: two unbuffered writes per entry (the JSON and the newline), serialized by a mutex; entries are written synchronously, so a slow output writer slows the events being recorded
+- **I/O**: one unbuffered write per entry (the JSON line), serialized by a mutex; entries are written synchronously, so a slow output writer slows the events being recorded
 - **Hash Algorithm**: SHA-256
 
 ## Troubleshooting

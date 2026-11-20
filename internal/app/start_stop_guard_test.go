@@ -455,3 +455,65 @@ func TestStop_DuringStart_BoundsRunningRollback(t *testing.T) {
 		})
 	}
 }
+
+// TestStop_StopsRolledBackMiddleware: middleware that the rollback of a
+// failed Start left startable (its log open) gets its final Stop when the
+// application stops, in every state Stop is reached from; an error of it is
+// returned, and nothing is done while a start that did not return may still
+// be at it.
+func TestStop_StopsRolledBackMiddleware(t *testing.T) {
+	t.Run("after a failed Start, without a retry", func(t *testing.T) {
+		lm := &GuardLifecycle{}
+		fw := NewGuardApp(lm, time.Second)
+		lm.startErr = errors.New("subscription setup failed")
+		lm.StartFunc = func(context.Context) error { return lm.startErr }
+		if err := fw.Start(context.Background()); err == nil {
+			t.Fatal("Start succeeded")
+		}
+		if err := fw.Stop(context.Background()); err != nil {
+			t.Fatalf("Stop: %v", err)
+		}
+		if got := lm.rolledBackStops.Load(); got != 1 {
+			t.Fatalf("rolled-back middleware stopped %d times, want once", got)
+		}
+	})
+
+	t.Run("after a run", func(t *testing.T) {
+		lm := &GuardLifecycle{}
+		fw := NewGuardApp(lm, time.Second)
+		if err := fw.Start(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		lm.rolledBackErr = errors.New("failed to close audit log")
+		err := fw.Stop(context.Background())
+		if !errors.Is(err, lm.rolledBackErr) {
+			t.Fatalf("Stop = %v, want the error of the middleware", err)
+		}
+		if got := lm.rolledBackStops.Load(); got != 1 {
+			t.Fatalf("called %d times, want once", got)
+		}
+	})
+
+	t.Run("not while a start that did not return is still running", func(t *testing.T) {
+		lm := &GuardLifecycle{}
+		fw := NewGuardApp(lm, time.Second)
+		release := make(chan struct{})
+		defer close(release)
+		entered := make(chan struct{})
+		lm.StartFunc = func(context.Context) error {
+			close(entered)
+			<-release // ignores the abort
+			return nil
+		}
+		go func() { _ = fw.Start(context.Background()) }()
+		<-entered
+		ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+		defer cancel()
+		if err := fw.Stop(ctx); err == nil {
+			t.Fatal("Stop reported success although the start did not return")
+		}
+		if got := lm.rolledBackStops.Load(); got != 0 {
+			t.Fatalf("rolled-back middleware stopped %d times beside a running start", got)
+		}
+	})
+}

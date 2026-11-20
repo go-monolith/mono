@@ -2732,7 +2732,7 @@ func TestStopMiddlewareModule(t *testing.T) {
 			0,
 		)
 
-		err := lm.(*lifecycleManager).stopMiddlewareModule(context.Background(), middleware)
+		err := lm.(*lifecycleManager).stopMiddlewareModule(context.Background(), middleware, false)
 		if err != nil {
 			t.Errorf("stopMiddlewareModule() should succeed, got error: %v", err)
 		}
@@ -2762,7 +2762,7 @@ func TestStopMiddlewareModule(t *testing.T) {
 			0,
 		)
 
-		err := lm.(*lifecycleManager).stopMiddlewareModule(context.Background(), middleware)
+		err := lm.(*lifecycleManager).stopMiddlewareModule(context.Background(), middleware, false)
 		if err == nil {
 			t.Error("stopMiddlewareModule() should return error")
 		}
@@ -2796,7 +2796,7 @@ func TestStopMiddlewareModule(t *testing.T) {
 			0,
 		)
 
-		err := lm.(*lifecycleManager).stopMiddlewareModule(context.Background(), middleware)
+		err := lm.(*lifecycleManager).stopMiddlewareModule(context.Background(), middleware, false)
 		if err == nil {
 			t.Error("stopMiddlewareModule() should return error on panic")
 		}

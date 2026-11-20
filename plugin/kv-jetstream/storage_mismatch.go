@@ -86,7 +86,8 @@ func (m *PluginModule) openBucket(ctx context.Context, streams streamStore, cfg 
 }
 
 // createBackupBucket creates the file-storage KV bucket backup, sourcing the
-// stream of bucket cfg.Name (nats.go adds the $KV subject transform), with
+// stream of bucket cfg.Name with its keys mapped to the backup's ($KV.<bucket>.>
+// to $KV.<backup>.>), with
 // the stream's per-key history (clamped to the KV limits), replicas,
 // placement and compression.
 func (m *PluginModule) createBackupBucket(ctx context.Context, cfg BucketConfig, backup string, info *jetstream.StreamInfo, ttl time.Duration) error {
@@ -110,7 +111,16 @@ func (m *PluginModule) createBackupBucket(ctx context.Context, cfg BucketConfig,
 		Replicas:    replicas,
 		Placement:   info.Config.Placement,
 		Compression: info.Config.Compression != jetstream.NoCompression,
-		Sources:     []*jetstream.StreamSource{{Name: cfg.Name}},
+		// The full stream name with its own subject transform: given a bare
+		// bucket name, nats.go takes one that starts with "KV_" for a stream
+		// name, so bucket "KV_x" was backed up from the stream of bucket "x".
+		Sources: []*jetstream.StreamSource{{
+			Name: kvStreamPrefix + cfg.Name,
+			SubjectTransforms: []jetstream.SubjectTransformConfig{{
+				Source:      "$KV." + cfg.Name + ".>",
+				Destination: "$KV." + backup + ".>",
+			}},
+		}},
 	})
 	return err
 }

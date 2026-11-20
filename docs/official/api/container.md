@@ -346,7 +346,8 @@ Before v0.2.15 such a configuration failed `Start` on every restart with the ser
 
 - **The consumer keeps its position.** Nothing it acknowledged is delivered again.
 - **The configured value is not in effect.** Watch for the warning after changing one of these settings; the application starting is not a sign that the change was applied.
-- **To apply the change, delete the consumer:** `nats consumer rm <stream> <consumer>`. The next start creates it with the configured values. It then starts from its deliver policy, so with the default (all) the stream is delivered again.
+- **To apply the change, delete the consumer and restart:** `nats consumer rm <stream> <consumer>`. The next start creates it with the configured values. It then starts from its deliver policy, so with the default (all) the stream is delivered again.
+- **A running instance does not create the consumer again.** Once it is deleted, the instance's fetch loop has nothing to pull: it logs `Consumer no longer exists` once at Error (since v0.2.18; a reminder follows every 5 minutes) and consumes nothing until the consumer exists again, through a restart of that instance or the start of another one. The same holds for a consumer the server removes after its inactivity threshold. The consumer is not recreated in place because it is deleted on purpose, and an instance of the previous version recreating it at once would undo that.
 - **`AckPolicy` decides what the handler must do.** While the existing policy is kept, the handler has to acknowledge the way *that* policy requires. A handler that stops acknowledging because the configuration now says `AckNonePolicy` gets each message redelivered until `MaxDeliver` is reached. So plan the consumer's deletion into a deployment that changes the ack policy: run `nats consumer rm <stream> <consumer>` once the instances with the old handler have stopped, and the new version creates the consumer with the new policy.
 - **A start time computed at startup** (`time.Now().Add(-time.Hour)`) differs on every start, so it is warned about at every start and the first value is kept. Use a fixed time.
 - **Other settings are still applied** in the same update: `FilterSubject`, `MaxDeliver`, `AckWait`, `MaxAckPending`, `InactiveThreshold` and the rest can be changed in place.
@@ -666,6 +667,11 @@ func (m *ReportModule) handleRollup(ctx context.Context, msg *mono.Msg) error {
     return nil // framework Acks
 }
 ```
+
+**Long-running handlers:**
+- The handler runs once per occurrence, one occurrence at a time per instance. While it runs, the framework tells the server every 10 seconds that the occurrence is in progress, so a job that takes minutes is not delivered a second time (since v0.2.18; before, it was delivered again after 30 seconds, to another instance while the first was still at work).
+- There is no handler time limit. A handler that never returns holds its occurrence, and the next ones of that service on that instance, for as long as the process lives; another instance takes the occurrence over only once this one is gone. Give long jobs a time limit of their own and return an error when it passes.
+- Delivery stays at-least-once: after a crash, or an acknowledgement lost at shutdown, the occurrence is delivered again. Keep handlers idempotent.
 
 **Changing and retiring a schedule:**
 - Re-publishing the schedule on every startup is idempotent (rollup by subject), so changing `Schedule`/`Payload`/`TimeZone`/`TTL` and redeploying overwrites the live schedule in place.
