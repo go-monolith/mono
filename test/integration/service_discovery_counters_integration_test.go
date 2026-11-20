@@ -107,8 +107,10 @@ func TestServiceDiscovery_StatsCountErrorsRejectedAndExpired(t *testing.T) {
 		t.Fatalf("stats = %+v", stats)
 	}
 	ep := stats.Endpoints[0]
-	if ep.NumRequests != 3 || ep.NumErrors != 1 || !strings.Contains(ep.LastError, "inventory exploded") {
-		t.Fatalf("endpoint = requests %d errors %d last_error %q, want 3/1/the panic text", ep.NumRequests, ep.NumErrors, ep.LastError)
+	// The statistics are readable by any client of the server, so they say
+	// that the handler panicked, not what it panicked with.
+	if ep.NumRequests != 3 || ep.NumErrors != 1 || ep.LastError != "handler panicked" || strings.Contains(ep.LastError, "inventory exploded") {
+		t.Fatalf("endpoint = requests %d errors %d last_error %q, want 3/1/\"handler panicked\"", ep.NumRequests, ep.NumErrors, ep.LastError)
 	}
 	var data struct {
 		Expired    int64 `json:"expired"`
