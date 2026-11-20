@@ -126,6 +126,23 @@ See [Sharing a Stream Between Registrations](../api/container.md#sharing-a-strea
 
 *v0.2.13.* The framework adds a metadata entry (`mono.registration`) to the streams and durable consumers it creates, in place at the next start, and logs a warning at every start for each marked one that no registration uses any more (after a module, service or event was renamed or removed). Nothing is deleted. Leftovers from before v0.2.13 are not recognised. The report runs during `Start` and can add up to 10 seconds when JetStream answers slowly, so allow for it in a startup probe. See [Renaming or Removing a Stream Registration](../api/container.md#renaming-or-removing-a-stream-registration).
 
+### Stream settings that can only be switched on (v0.2.14)
+
+*v0.2.14.* `DenyDelete`, `DenyPurge`, `Sealed`, `AllowMsgTTL` and `AllowMsgSchedules` can be enabled on an existing stream but not disabled again.
+
+- **Switching one off** failed `Start` with the server's generic error and now fails with `ErrStreamConfigImmutable`, naming the setting.
+- **A sealed stream keeps starting.** Sealing switches `DenyDelete` and `DenyPurge` on at the server, so a configuration with `Sealed` alone failed every `Start` after the one that sealed the stream. The framework now writes a sealed stream with both enabled (and `AllowRollup` disabled, which sealing also does).
+- **`Sealed` with `AllowMsgSchedules` is refused.** The server sealed such a stream and then rejected every later write, for good. `Start` now fails with `ErrInvalidConfiguration` before the stream is touched.
+- **Registrations of one stream that disagree** on one of these settings now fail the first `Start`, before anything is created. Before, the first start could succeed and the next one fail, depending on the order.
+
+See [Changing a Stream's Storage Type or Retention](../api/container.md#changing-a-streams-storage-type-or-retention).
+
+### Removing a cron service's `TTL` no longer fails `Start` (v0.2.14)
+
+*v0.2.14.* A cron service whose `TTL` was removed failed every `Start` (`message TTL status can not be disabled`): the framework enabled per-message TTLs on the service's stream only while `TTL` was set, and the server refuses to switch them off. The stream now keeps them enabled once they are on. A cron service that never had a `TTL` is unchanged, so rolling back stays possible for it.
+
+A `SourceSubject` under the service's own subjects (`services.<module>.<name>.<anything>`) is accepted as well; before, the server rejected the stream. A `SourceSubject` with a wildcard, which the scheduler never accepted, is now rejected when the service is registered instead of failing `Start` after the stream was written.
+
 ## New Features
 
 All optional.

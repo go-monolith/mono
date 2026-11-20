@@ -365,6 +365,22 @@ The new stream must listen on other subjects than the old one, otherwise the ser
 - **Default subjects** follow the service name or the event version, so a new name or version is enough.
 - **Custom subjects** (`Stream.Subjects` of a stream consumer service, or an event defined with its own subject) must be changed as well.
 
+**Settings that can only be switched on.** Five more `StreamConfig` settings can be enabled on an existing stream but never disabled again:
+
+| Setting | Notes |
+|---|---|
+| `DenyDelete`, `DenyPurge` | |
+| `AllowMsgTTL`, `AllowMsgSchedules` | |
+| `Sealed` | Can only be set on a stream that already exists. Sealing also switches `DenyDelete` and `DenyPurge` on and `AllowRollup` off at the server. Cannot be combined with `AllowMsgSchedules`. |
+
+Since v0.2.14:
+
+- **Switching one off fails `Start` with `ErrStreamConfigImmutable`.** The error names the setting (`has DenyPurge enabled and is configured with it disabled`). Before, it was the server's generic error. The way out is the same: keep the setting enabled, or move to a new stream side by side.
+- **A sealed stream keeps starting.** The framework writes a sealed stream with `DenyDelete` and `DenyPurge` enabled and `AllowRollup` disabled, as the server holds it. Before, every `Start` after the one that sealed the stream failed (`can not cancel deny message deletes`), unless both were set by hand.
+- **`Sealed` together with `AllowMsgSchedules`** fails `Start` with `ErrInvalidConfiguration` before the stream is touched. The server would seal such a stream and then reject every later write, and a sealed stream cannot be unsealed.
+- **`Sealed` on a stream that does not exist yet** fails `Start` with `ErrInvalidConfiguration` and says so: start once without `Sealed`, then set it.
+- **Registrations of one stream must agree** on these settings as well, or `Start` fails before anything is created.
+
 {% hint style="warning" %}
 **Why the framework does not migrate the stream itself.** Changing either setting means deleting the stream and creating it again, and no other stream can hold its subjects in the meantime without a moment in which no stream listens. A message published in that moment without an acknowledgement, such as an event sent with `EventDefinition.Publish` or `EventBus.Publish`, is dropped silently. Other instances and other clients keep publishing while one instance starts, so the framework cannot rule that out.
 {% endhint %}
@@ -398,7 +414,7 @@ Details:
 - **Subjects that cover each other** (`tasks.>` and `tasks.urgent`) are reduced to the covering one for the stream. Both consumers keep their own filter, so a message on `tasks.urgent` goes to both handlers.
 - **Subjects that overlap without one covering the other** (`a.*.c` and `a.b.*`) cannot be in one stream, unless a third subject on the stream covers both. `Start` fails with `ErrInvalidConfiguration`, naming both registrations, before anything is written.
 - **Other stream settings** (`MaxAge`, limits, `Description`) are not merged. Every registration writes them, and the one set up last wins. Services are set up in name order, modules first by name, then event stream consumers in registration order, so the result is the same on every start. Give the registrations of one stream the same settings.
-- **`Storage` and work-queue retention** must agree across the registrations of a stream, or `Start` fails with `ErrStreamConfigImmutable` (see above).
+- **`Storage`, work-queue retention and the settings that can only be switched on** must agree across the registrations of a stream, or `Start` fails with `ErrStreamConfigImmutable` (see above).
 - **Work-queue streams** accept one consumer per subject. Registrations with different subjects can share one; registrations whose subjects are the same or cover each other cannot.
 - **When a stream stops being shared** (the other registrations are removed), the remaining consumers keep the filter on their own subjects, also when those subjects change. The stream may still hold the removed registrations' messages, and they are not delivered to the remaining handlers. To free the space, purge them (`nats stream purge <stream> --subject <subject>`).
 - **Rolling deploy from an earlier version:** an instance of the earlier version that starts later overwrites the subjects again, until every instance runs v0.2.13 or later. The next start of a newer instance repairs them.
@@ -486,7 +502,7 @@ Acknowledgement is owned by the framework: return `nil` to Ack the occurrence, o
 | `Replicas` | `int` | Replicas of the service's stream (schedule and occurrences) and consumer in a cluster. `0` = the framework default (`WithJetStreamDefaultReplicas`, otherwise 1); at most 5. With one replica the schedule lives on one server and stops firing while that server is down; use 3 in a cluster of at least three servers |
 | `Deprecated` | `bool` | When true, purge the schedule on deploy and don't start the consumer (keep the code) |
 
-**Returns:** `error`, nil on success; non-nil if validation fails (e.g. empty `Schedule`, both `Payload` and `SourceSubject` set, invalid `TimeZone`, `Replicas` outside 0..5, nil handler, `TTL` set below 1s, `SourceSubject` equal to `services.<module>.<name>`).
+**Returns:** `error`, nil on success; non-nil if validation fails (e.g. empty `Schedule`, both `Payload` and `SourceSubject` set, invalid `TimeZone`, `Replicas` outside 0..5, nil handler, `TTL` set below 1s, `SourceSubject` with a wildcard, or equal to `services.<module>.<name>` or to its reserved `.schedule` or `.control` sub-subject).
 
 **Example:**
 ```go
@@ -511,6 +527,9 @@ func (m *ReportModule) handleRollup(ctx context.Context, msg *mono.Msg) error {
 
 **Changing and retiring a schedule:**
 - Re-publishing the schedule on every startup is idempotent (rollup by subject), so changing `Schedule`/`Payload`/`TimeZone`/`TTL` and redeploying overwrites the live schedule in place.
+- Removing `TTL` again works since v0.2.14. The service's stream keeps per-message TTLs enabled, because the server cannot switch them off; a schedule without `TTL` simply sends none. Before, removing `TTL` failed every `Start` (`message TTL status can not be disabled`).
+- `SourceSubject` may be a subject under the service's own subjects (`services.<module>.<name>.<anything>`) since v0.2.14; before, the server rejected the stream. The `.schedule` and `.control` sub-subjects are reserved.
+- `SourceSubject` must be a single subject. One with a wildcard (`*` or `>`) is rejected at registration since v0.2.14; before, `Start` failed after the stream was written (`message schedules source is invalid`).
 - To retire a service, set `Deprecated: true` and deploy (purges the schedule, keeps the code), then remove the `RegisterCronService` call in a later release.
 
 ## Service Discovery Methods

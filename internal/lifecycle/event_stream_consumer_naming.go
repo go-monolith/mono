@@ -491,7 +491,7 @@ func eventStreamConfig(cfg types.StreamConfig, marked bool) types.StreamConfig {
 // migration marker. Every write of the stream must use it, since a write
 // replaces the whole configuration.
 func (lm *lifecycleManager) plannedEventStreamConfig(cfg types.StreamConfig, migrated bool, owner string) types.StreamConfig {
-	cfg = eventStreamConfig(cfg, migrated)
+	cfg = SealedStreamConfig(eventStreamConfig(cfg, migrated))
 	cfg.Replicas = lm.streamReplicas(cfg.Replicas)
 	cfg.Subjects = lm.streamPlan.Subjects(cfg.Name, cfg.Subjects)
 	cfg.Metadata = WithRegistrationMarker(cfg.Metadata, lm.streamPlan.Marker(cfg.Name, owner))

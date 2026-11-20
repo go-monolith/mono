@@ -2102,6 +2102,8 @@ func (lm *lifecycleManager) setupStreamConsumer(ctx context.Context, entry *type
 		streamCfg.Storage = types.FileStorage
 	}
 	streamCfg.Replicas = lm.streamReplicas(streamCfg.Replicas)
+	// A sealed stream is written with the settings sealing switches on.
+	streamCfg = SealedStreamConfig(streamCfg)
 	// A stream shared with other registrations is written with the subjects
 	// of all of them, and marked as created by the framework.
 	owner := StreamConsumerServiceOwner(entry)
@@ -2213,14 +2215,18 @@ func (lm *lifecycleManager) setupCronService(ctx context.Context, entry *types.S
 		MaxAge:            defaultCronStreamMaxAge,
 		Replicas:          lm.streamReplicas(cfg.Replicas),
 	}
-	if cfg.SourceSubject != "" {
+	// A source subject under the service's own subjects is already covered
+	// by the wildcard, and a stream rejects subjects that overlap each other,
+	// so it is not added a second time. The service's own subjects are never
+	// reduced, whatever the source subject is.
+	if cfg.SourceSubject != "" && !SubjectCovers(types.CronSubjectsWildcard(targetSubject), cfg.SourceSubject) {
 		streamCfg.Subjects = append(streamCfg.Subjects, cfg.SourceSubject)
 	}
 	if cfg.TTL > 0 {
 		streamCfg.AllowMsgTTL = true
 	}
 
-	if _, err := es.CreateOrUpdateStream(ctx, streamCfg); err != nil {
+	if err := lm.WriteCronStream(ctx, es, streamCfg); err != nil {
 		return fmt.Errorf("failed to create cron schedule stream %q (server may not support message schedules; requires nats-server v2.14+): %w", streamName, err)
 	}
 

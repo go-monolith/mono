@@ -231,7 +231,7 @@ All in `monoerrors "github.com/go-monolith/mono/pkg/errors"`.
 | `ErrContainerNotBound` | Container used before it was bound to a module |
 | `ErrPluginNotFound`, `ErrPluginAlreadyRegistered` | Plugin lookup or registration |
 | `ErrServiceContractMismatch`, `ErrModuleBoundaryViolation` | Module boundaries (see above) |
-| `ErrStreamConfigImmutable` | `Start`: a stream's storage type, or its retention to or from work-queue, differs from the existing stream's. See [Changing a Stream's Storage Type or Retention](../api/container.md#changing-a-streams-storage-type-or-retention) |
+| `ErrStreamConfigImmutable` | `Start`: a stream's storage type, or its retention to or from work-queue, differs from the existing stream's, or a setting that can only be switched on is configured off. See [Changing a Stream's Storage Type or Retention](../api/container.md#changing-a-streams-storage-type-or-retention) |
 
 | Type | Fields | Helpers |
 |------|--------|---------|

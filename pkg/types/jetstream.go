@@ -439,14 +439,22 @@ type StreamConfig struct {
 	// Sealed streams do not allow messages to be published or deleted via limits or API,
 	// sealed streams can not be unsealed via configuration update. Can only
 	// be set on already created streams via the Update API.
+	//
+	// Sealing also enables DenyDelete and DenyPurge at the server. For a
+	// stream the framework creates for a stream consumer service or an
+	// event stream consumer, it writes a sealed stream with both enabled,
+	// and a configuration that unseals the stream fails Start with
+	// errors.ErrStreamConfigImmutable.
 	Sealed bool `json:"sealed,omitempty"`
 
 	// DenyDelete restricts the ability to delete messages from a stream via
-	// the API. Defaults to false.
+	// the API. Defaults to false. It cannot be disabled again on an
+	// existing stream (see Sealed for what the framework reports).
 	DenyDelete bool `json:"deny_delete,omitempty"`
 
 	// DenyPurge restricts the ability to purge messages from a stream via
-	// the API. Defaults to false.
+	// the API. Defaults to false. It cannot be disabled again on an
+	// existing stream.
 	DenyPurge bool `json:"deny_purge,omitempty"`
 
 	// AllowRollup allows the use of the Nats-Rollup header to replace all
@@ -459,11 +467,13 @@ type StreamConfig struct {
 	// stored under its subject and the server republishes its payload to the
 	// target subject on every scheduled occurrence. Requires nats-server
 	// v2.14+. Message scheduling additionally requires AllowRollup to be set
-	// and is incompatible with a DiscardNew discard policy.
+	// and is incompatible with a DiscardNew discard policy. It cannot be
+	// disabled again on an existing stream.
 	AllowMsgSchedules bool `json:"allow_msg_schedules,omitempty"`
 
 	// AllowMsgTTL enables header-initiated per-message TTLs (the Nats-TTL and
-	// Nats-Schedule-TTL headers). Requires nats-server v2.14+.
+	// Nats-Schedule-TTL headers). Requires nats-server v2.14+. It cannot be
+	// disabled again on an existing stream.
 	AllowMsgTTL bool `json:"allow_msg_ttl,omitempty"`
 
 	// SubjectDeleteMarkerTTL sets the TTL applied to subject delete markers.

@@ -27,6 +27,138 @@ const immutableStreamHelp = "NATS cannot change the storage type of an existing 
 	"or register a new service name or event version on a new stream and retire the old one once it is drained " +
 	"(deleting the stream loses its messages and consumer positions)"
 
+// oneWayStreamHelp is the way out named when a setting that can only be
+// switched on is configured off.
+const oneWayStreamHelp = "NATS cannot switch DenyDelete, DenyPurge, Sealed, AllowMsgTTL or AllowMsgSchedules off again on an existing stream; " +
+	"keep the setting enabled, or register a new service name or event version on a new stream and retire the old one once it is drained " +
+	"(deleting the stream loses its messages and consumer positions)"
+
+// OneWayStreamSetting is a stream setting that NATS lets a configuration
+// switch on for an existing stream but never off again.
+type OneWayStreamSetting struct {
+	// Name is the StreamConfig field.
+	Name string
+
+	// Existing and Configured read the setting from the stream as the
+	// server holds it and from the configuration of a registration.
+	Existing   func(jetstream.StreamConfig) bool
+	Configured func(types.StreamConfig) bool
+}
+
+// OneWayStreamSettings lists the settings a stream cannot have switched off
+// once they are on. Sealed comes first: sealing a stream also switches
+// DenyDelete and DenyPurge on (see SealedStreamConfig).
+var OneWayStreamSettings = []OneWayStreamSetting{
+	{"Sealed", func(c jetstream.StreamConfig) bool { return c.Sealed }, func(c types.StreamConfig) bool { return c.Sealed }},
+	{"DenyDelete", func(c jetstream.StreamConfig) bool { return c.DenyDelete }, func(c types.StreamConfig) bool { return c.DenyDelete }},
+	{"DenyPurge", func(c jetstream.StreamConfig) bool { return c.DenyPurge }, func(c types.StreamConfig) bool { return c.DenyPurge }},
+	{"AllowMsgTTL", func(c jetstream.StreamConfig) bool { return c.AllowMsgTTL }, func(c types.StreamConfig) bool { return c.AllowMsgTTL }},
+	{"AllowMsgSchedules", func(c jetstream.StreamConfig) bool { return c.AllowMsgSchedules }, func(c types.StreamConfig) bool { return c.AllowMsgSchedules }},
+}
+
+// SealedStreamConfig returns cfg as a sealed stream has to be written. When
+// the server seals a stream it switches DenyDelete and DenyPurge on and
+// AllowRollup off, and it refuses to switch the first two off again. A
+// configuration with Sealed alone would therefore be rejected on every start
+// after the one that sealed the stream, and one with Sealed and AllowRollup
+// already when sealing (roll-ups need the purge permission). A configuration
+// that is not sealed is returned unchanged.
+func SealedStreamConfig(cfg types.StreamConfig) types.StreamConfig {
+	if cfg.Sealed {
+		cfg.DenyDelete = true
+		cfg.DenyPurge = true
+		cfg.AllowRollup = false
+	}
+	return cfg
+}
+
+// NormalisedStreamConfig returns cfg with the one-way settings as the server
+// ends up holding them, to compare a configuration with an existing stream or
+// with another registration without reporting what the server changed by
+// itself:
+//
+//   - a subject delete marker TTL enables per-message TTLs;
+//   - message schedules and a subject delete marker TTL need roll-ups, for
+//     which the server clears DenyPurge (see ClearsDenyPurge);
+//   - sealing enables DenyDelete and DenyPurge (see SealedStreamConfig).
+func NormalisedStreamConfig(cfg types.StreamConfig) types.StreamConfig {
+	if cfg.SubjectDeleteMarkerTTL > 0 {
+		cfg.AllowMsgTTL = true
+	}
+	if ClearsDenyPurge(cfg) {
+		cfg.DenyPurge = false
+	}
+	return SealedStreamConfig(cfg)
+}
+
+// ClearsDenyPurge reports whether the server switches DenyPurge off for cfg
+// by itself: message schedules and a subject delete marker TTL need roll-ups,
+// which need the purge permission. A configuration that sets AllowRollup
+// together with DenyPurge is rejected outright instead, and a sealed stream
+// keeps DenyPurge.
+func ClearsDenyPurge(cfg types.StreamConfig) bool {
+	return !cfg.Sealed && !cfg.AllowRollup && (cfg.AllowMsgSchedules || cfg.SubjectDeleteMarkerTTL > 0)
+}
+
+// CheckSealedStream returns an error wrapping ErrInvalidConfiguration when
+// cfg seals a stream that runs message schedules. The server accepts the
+// update that seals such a stream and rejects every write after it, and a
+// sealed stream cannot be unsealed, so the stream would fail every later
+// start for good. The check runs before anything is written.
+func CheckSealedStream(cfg types.StreamConfig, owner string) error {
+	if cfg.Sealed && cfg.AllowMsgSchedules {
+		return fmt.Errorf("%w: stream %s of %s is configured with Sealed and AllowMsgSchedules; "+
+			"NATS rejects every write of a sealed stream that has message schedules enabled, and a sealed stream cannot be unsealed, "+
+			"so the stream is not sealed: remove Sealed, or use a stream without message schedules",
+			monoerrors.ErrInvalidConfiguration, cfg.Name, owner)
+	}
+	return nil
+}
+
+// OneWayStreamDiff returns one phrase per one-way setting that the existing
+// stream has on and cfg, as the server would hold it (NormalisedStreamConfig),
+// has off ("has DenyPurge enabled and is configured with it disabled"). When
+// the stream is sealed and cfg is not, only Sealed is named: DenyDelete and
+// DenyPurge were switched on by the sealing, not by a configuration.
+//
+// A configuration that has DenyPurge on but also something that makes the
+// server switch it off (ClearsDenyPurge) is named as such, since the
+// developer did not disable it. Likewise AllowMsgTTL that the server enabled
+// for a subject delete marker TTL, which the configuration no longer has.
+func OneWayStreamDiff(existing jetstream.StreamConfig, cfg types.StreamConfig) []string {
+	configuredDenyPurge := cfg.DenyPurge
+	cfg = NormalisedStreamConfig(cfg)
+	unsealing := existing.Sealed && !cfg.Sealed
+	var diffs []string
+	for _, setting := range OneWayStreamSettings {
+		if !setting.Existing(existing) || setting.Configured(cfg) {
+			continue
+		}
+		if unsealing && (setting.Name == "DenyDelete" || setting.Name == "DenyPurge") {
+			continue
+		}
+		if setting.Name == "DenyPurge" && configuredDenyPurge {
+			diffs = append(diffs, "has DenyPurge enabled and is configured with AllowMsgSchedules or SubjectDeleteMarkerTTL, which switches it off")
+			continue
+		}
+		if setting.Name == "AllowMsgTTL" && existing.SubjectDeleteMarkerTTL > 0 {
+			// The server enabled it for the marker TTL; the developer may
+			// never have written AllowMsgTTL.
+			diffs = append(diffs, "has AllowMsgTTL enabled, switched on by its SubjectDeleteMarkerTTL, and is configured without either")
+			continue
+		}
+		diffs = append(diffs, fmt.Sprintf("has %s enabled and is configured with it disabled", setting.Name))
+	}
+	return diffs
+}
+
+// IsStreamInvalidConfig reports whether err is the server rejecting a stream
+// configuration with the generic invalid configuration code (10052).
+func IsStreamInvalidConfig(err error) bool {
+	var apiErr *jetstream.APIError
+	return errors.As(err, &apiErr) && apiErr.ErrorCode == errCodeStreamInvalidConfig
+}
+
 // jetStreamStorage maps a StorageType onto JetStream's, as the stream is
 // created: anything other than MemoryStorage is file storage.
 func jetStreamStorage(s types.StorageType) jetstream.StorageType {
@@ -88,21 +220,32 @@ func immutableStreamDiff(haveStorage, wantStorage jetstream.StorageType, haveRet
 }
 
 // explainImmutableStreamChange returns createErr unless it is the server
-// rejecting a stream update that changes a setting NATS cannot change on an
-// existing stream. In that case it returns an error that wraps
-// ErrStreamConfigImmutable and createErr and names owner (what registered the
-// stream), the stream and both values.
+// rejecting a stream write for a reason the configuration alone does not
+// show:
 //
-// The stream is read back only after the update failed with the invalid
-// configuration code, so a start that succeeds makes no extra request. A
-// failed lookup, or a stream that agrees with cfg on these settings (the
-// update was rejected for another reason), returns createErr unchanged.
+//   - the configuration changes a setting NATS cannot change on an existing
+//     stream (storage type, retention to or from work-queue), or switches off
+//     a setting that can only be switched on (OneWayStreamSettings). The
+//     error wraps ErrStreamConfigImmutable and createErr and names owner
+//     (what registered the stream), the stream and the settings;
+//   - the configuration seals a stream that does not exist yet, which the
+//     server only allows for an existing stream. The error wraps
+//     ErrInvalidConfiguration and createErr.
+//
+// The stream is read back only after the write failed with the invalid
+// configuration code, so a start that succeeds makes no extra request. Any
+// other failed lookup, or a stream that agrees with cfg on these settings
+// (the write was rejected for another reason), returns createErr unchanged.
 func explainImmutableStreamChange(ctx context.Context, es types.EventStream, cfg types.StreamConfig, owner string, createErr error) error {
-	var apiErr *jetstream.APIError
-	if !errors.As(createErr, &apiErr) || apiErr.ErrorCode != errCodeStreamInvalidConfig {
+	if !IsStreamInvalidConfig(createErr) {
 		return createErr
 	}
 	stream, err := es.Stream(ctx, cfg.Name)
+	if errors.Is(err, jetstream.ErrStreamNotFound) && cfg.Sealed {
+		return fmt.Errorf("%w: stream %s of %s is configured with Sealed but does not exist yet; "+
+			"a stream can only be sealed after it was created, so start once without Sealed and set it afterwards: %w",
+			monoerrors.ErrInvalidConfiguration, cfg.Name, owner, createErr)
+	}
 	if err != nil || stream == nil {
 		return createErr
 	}
@@ -110,15 +253,24 @@ func explainImmutableStreamChange(ctx context.Context, es types.EventStream, cfg
 	if info == nil {
 		return createErr
 	}
-	diffs := immutableStreamDiff(
+	immutable := immutableStreamDiff(
 		info.Config.Storage, jetStreamStorage(cfg.Storage),
 		info.Config.Retention, jetStreamRetention(cfg.Retention),
 		"exists with", "is configured with")
-	if len(diffs) == 0 {
+	oneWay := OneWayStreamDiff(info.Config, cfg)
+	if len(immutable) == 0 && len(oneWay) == 0 {
 		return createErr
 	}
+	var help []string
+	if len(immutable) > 0 {
+		help = append(help, immutableStreamHelp)
+	}
+	if len(oneWay) > 0 {
+		help = append(help, oneWayStreamHelp)
+	}
 	return fmt.Errorf("%w: stream %s of %s %s; %s: %w",
-		monoerrors.ErrStreamConfigImmutable, cfg.Name, owner, strings.Join(diffs, ", and "), immutableStreamHelp, createErr)
+		monoerrors.ErrStreamConfigImmutable, cfg.Name, owner,
+		strings.Join(append(immutable, oneWay...), ", and "), strings.Join(help, "; "), createErr)
 }
 
 // eventStreamOwner names an event stream consumer registration in errors.
