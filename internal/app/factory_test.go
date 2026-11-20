@@ -669,3 +669,54 @@ func TestBuildNATSOptions_NoAutoTLSByDefault(t *testing.T) {
 		t.Errorf("AutoTLS = %v, want nil when unconfigured", applied.AutoTLS)
 	}
 }
+
+// With a config file, Host, Port and MaxPayload override the file when they
+// were given by an option, also when the value equals the default. Comparing
+// with the default alone dropped an explicit WithNATSHost("127.0.0.1"), and
+// the server listened on all interfaces.
+func TestBuildNATSOptions_ConfigFileKeepsExplicitDefaults(t *testing.T) {
+	tests := []struct {
+		name           string
+		cfg            types.NATSOptions
+		wantHost       bool
+		wantPort       bool
+		wantMaxPayload bool
+	}{
+		{
+			name: "defaults are left to the file",
+			cfg:  types.NATSOptions{ConfigFile: "nats.conf", Host: defaultNATSHost, Port: defaultNATSPort, MaxPayload: defaultNATSMaxPayload},
+		},
+		{
+			name: "explicit values equal to the defaults override the file",
+			cfg: types.NATSOptions{
+				ConfigFile: "nats.conf", Host: defaultNATSHost, Port: defaultNATSPort, MaxPayload: defaultNATSMaxPayload,
+				HostSet: true, PortSet: true, MaxPayloadSet: true,
+			},
+			wantHost: true, wantPort: true, wantMaxPayload: true,
+		},
+		{
+			name:     "values that differ from the defaults override the file without the flags",
+			cfg:      types.NATSOptions{ConfigFile: "nats.conf", Host: "10.0.0.1", Port: 4333, MaxPayload: 2 * defaultNATSMaxPayload},
+			wantHost: true, wantPort: true, wantMaxPayload: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var got nats.NATSConfig
+			for _, opt := range buildNATSOptions(tt.cfg) {
+				if err := opt(&got); err != nil {
+					t.Fatalf("option failed: %v", err)
+				}
+			}
+			if got.HostSet != tt.wantHost {
+				t.Errorf("host passed on = %v, want %v", got.HostSet, tt.wantHost)
+			}
+			if got.PortSet != tt.wantPort {
+				t.Errorf("port passed on = %v, want %v", got.PortSet, tt.wantPort)
+			}
+			if got.MaxPayloadSet != tt.wantMaxPayload {
+				t.Errorf("max payload passed on = %v, want %v", got.MaxPayloadSet, tt.wantMaxPayload)
+			}
+		})
+	}
+}

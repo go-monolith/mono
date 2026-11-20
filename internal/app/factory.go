@@ -92,12 +92,16 @@ func buildNATSOptions(cfg types.NATSOptions) []nats.NATSOption {
 		opts = append(opts, nats.WithConfigFile(cfg.ConfigFile))
 	}
 
-	// Add Host and Port configuration
-	// When using config file, only add if explicitly changed from defaults
-	if cfg.Host != "" && (!hasConfigFile || cfg.Host != defaultNATSHost) {
+	// Add Host and Port configuration. With a config file they override the
+	// file only when they were given by an option. That is what HostSet and
+	// PortSet say; a value that differs from the default counts as given too,
+	// for a configuration that was not built by the options. Comparing with
+	// the default alone dropped an explicit WithNATSHost("127.0.0.1"), and
+	// the server then listened on all interfaces.
+	if cfg.Host != "" && (!hasConfigFile || cfg.HostSet || cfg.Host != defaultNATSHost) {
 		opts = append(opts, nats.WithHost(cfg.Host))
 	}
-	if cfg.Port > 0 && (!hasConfigFile || cfg.Port != defaultNATSPort) {
+	if cfg.Port > 0 && (!hasConfigFile || cfg.PortSet || cfg.Port != defaultNATSPort) {
 		opts = append(opts, nats.WithPort(cfg.Port))
 	}
 
@@ -170,9 +174,9 @@ func buildNATSOptions(cfg types.NATSOptions) []nats.NATSOption {
 		opts = append(opts, nats.WithSystemAccount(cfg.SystemAccountUsername, cfg.SystemAccountPassword))
 	}
 
-	// Add max payload if configured
-	// When using config file, only add if explicitly changed from defaults
-	if cfg.MaxPayload > 0 && (!hasConfigFile || cfg.MaxPayload != defaultNATSMaxPayload) {
+	// Add max payload if configured. With a config file, only when it was
+	// given by an option (see Host and Port above).
+	if cfg.MaxPayload > 0 && (!hasConfigFile || cfg.MaxPayloadSet || cfg.MaxPayload != defaultNATSMaxPayload) {
 		opts = append(opts, nats.WithMaxPayload(cfg.MaxPayload))
 	}
 

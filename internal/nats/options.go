@@ -68,10 +68,12 @@ type NATSConfig struct {
 	// 1. They are synced back to m.config for client connection URL construction
 	// 2. They have non-zero defaults that would otherwise always override config file
 	//
-	// Other fields like MaxPayload, DontListen, etc. use default-value detection
-	// or are additive (JetStream, Clustering) so they don't need explicit tracking.
-	HostSet bool // true if Host was explicitly set via WithHost option
-	PortSet bool // true if Port was explicitly set via WithPort option
+	// MaxPayload is tracked for the second reason. Other fields (DontListen,
+	// etc.) default to their zero value or are additive (JetStream,
+	// Clustering), so they need no tracking.
+	HostSet       bool // true if Host was explicitly set via WithHost option
+	PortSet       bool // true if Port was explicitly set via WithPort option
+	MaxPayloadSet bool // true if MaxPayload was explicitly set via WithMaxPayload option
 
 	// AutoTLS holds the ACME certificate configuration for the client
 	// listener. Nil means AutoTLS is disabled; the pointer itself is the
@@ -292,6 +294,7 @@ func WithMaxPayload(bytes int32) NATSOption {
 			return fmt.Errorf("max payload must be at most %d bytes (8 MB), got %d", maxPayload, bytes)
 		}
 		cfg.MaxPayload = bytes
+		cfg.MaxPayloadSet = true
 		return nil
 	}
 }
@@ -330,7 +333,10 @@ func WithStartupReadyTimeout(timeout time.Duration) NATSOption {
 // Override behavior:
 //   - Host/Port: Programmatic options (WithHost/WithPort) override config file values.
 //     If not explicitly set, config file values are used for client connection.
-//   - MaxPayload: Only applied if different from default (1MB), preserving config file value.
+//   - MaxPayload: WithMaxPayload overrides the config file value; otherwise the
+//     file's value is kept.
+//   - A file that sets no host makes the server listen on all interfaces
+//     (nats-server's default) unless WithHost is used; this is logged at Warn.
 //   - DontListen: Only applied if explicitly enabled (default is false).
 //   - JetStream/Clustering: Programmatic options override or merge with config file settings.
 //
