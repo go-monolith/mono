@@ -18,6 +18,7 @@ package requestid
 import (
 	"context"
 
+	"github.com/go-monolith/mono/internal/reqid"
 	"github.com/go-monolith/mono/pkg/types"
 	"github.com/google/uuid"
 )
@@ -234,14 +235,18 @@ func (m *RequestIDModule) ensureRequestID(ctx context.Context, msg *types.Msg) c
 	return context.WithValue(ctx, requestIDKey, requestID)
 }
 
-// extractRequestID extracts request ID from message header.
+// extractRequestID extracts request ID from message header. The header is
+// written by the sender, and the ID goes into the handler's context, every
+// nested call and the logs, so it is sanitised first (reqid.Sanitize: at most
+// reqid.MaxLen bytes of a fixed character set). The access log applies the
+// same rule, so both report the same value.
 func (m *RequestIDModule) extractRequestID(msg *types.Msg) string {
 	if msg.Header == nil {
 		return ""
 	}
 	values := msg.Header[m.headerName]
 	if len(values) > 0 {
-		return values[0]
+		return reqid.Sanitize(values[0])
 	}
 	return ""
 }

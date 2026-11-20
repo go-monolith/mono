@@ -27,6 +27,7 @@ import (
 	"time"
 
 	"github.com/go-monolith/mono/internal/output"
+	"github.com/go-monolith/mono/internal/reqid"
 	"github.com/go-monolith/mono/middleware/requestid"
 	"github.com/go-monolith/mono/pkg/types"
 )
@@ -524,14 +525,18 @@ func (m *AccessLogModule) wrapEventStreamConsumerHandler(
 	}
 }
 
-// extractRequestID extracts the request ID from message headers.
+// extractRequestID extracts the request ID from message headers. The header
+// is written by the sender, so the value is sanitised (reqid.Sanitize: at
+// most reqid.MaxLen bytes of a fixed character set) before it reaches a log
+// line: as it came, it could forge fields of a text line or make a line as
+// long as the sender liked.
 func (m *AccessLogModule) extractRequestID(msg *types.Msg) string {
 	if msg.Header == nil {
 		return ""
 	}
 	values := msg.Header[m.requestIDHeader]
 	if len(values) > 0 {
-		return values[0]
+		return reqid.Sanitize(values[0])
 	}
 	return ""
 }
