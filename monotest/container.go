@@ -173,6 +173,11 @@ func (c *Container) dispatchRequestReply(_ context.Context, entry *types.Service
 		var pubErr error
 		switch {
 		case err != nil:
+			// The reply carries a fixed text for a panic; its value is
+			// logged, as the framework does.
+			if panicked, ok := err.(*handlerPanicError); ok {
+				c.logger.Error("monotest: request-reply handler panicked", "service", name, "panic", panicked.value)
+			}
 			pubErr = c.bus.PublishMsg(errorReply(msg.Reply, err))
 		case response == nil:
 			// The framework answers a nil response with an empty reply.

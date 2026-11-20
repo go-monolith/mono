@@ -157,11 +157,18 @@ func (r *Reloader) Certificate() *tls.Certificate {
 	r.mu.Lock()
 	now := r.now()
 	if r.checking || now.Sub(r.checked) < r.cfg.CheckInterval {
+		// This is the path of every handshake while a check hangs, so
+		// what there is to say is said after the lock is released: a log
+		// sink that blocks must not hold the handshakes up as well.
+		var say func()
 		if r.checking {
-			r.warnIfStalled(now)
+			say = r.stalledWarning(now)
 		}
 		cert := r.cert
 		r.mu.Unlock()
+		if say != nil {
+			say()
+		}
 		return cert
 	}
 	// The files are read without the lock held: on a file system that
@@ -178,6 +185,8 @@ func (r *Reloader) Certificate() *tls.Certificate {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.checking = false
+	// The read returned: a later one that hangs is said again.
+	r.stallWarned = time.Time{}
 	switch {
 	case err != nil:
 		r.warn(err)
@@ -220,20 +229,34 @@ const ExpiryWarnInterval = time.Hour
 // certificate is not reloaded.
 const StalledCheckAfter = time.Minute
 
-// warnIfStalled warns that the check of the files has not returned, and,
-// as that check cannot, that the certificate has expired. Called with the
-// lock held, by the callers that find a check in progress.
-func (r *Reloader) warnIfStalled(now time.Time) {
-	if now.Sub(r.checkStarted) < StalledCheckAfter {
-		return
+// stalledWarning returns the function that warns that the check of the
+// files has not returned (and, as that check cannot, that the certificate
+// has expired), or nil when there is nothing to say now. It is called with
+// the lock held, by the callers that find a check in progress; what it
+// returns is called without it.
+func (r *Reloader) stalledWarning(now time.Time) func() {
+	if r.cfg.Logger == nil || now.Sub(r.checkStarted) < StalledCheckAfter {
+		return nil
 	}
-	r.warnIfExpired(now)
-	if r.cfg.Logger == nil || (!r.stallWarned.IsZero() && now.Sub(r.stallWarned) < ExpiryWarnInterval) {
-		return
+	if !r.stallWarned.IsZero() && now.Sub(r.stallWarned) < ExpiryWarnInterval {
+		return nil
 	}
 	r.stallWarned = now
-	r.cfg.Logger.Warn("Reading the "+r.cfg.Name+" certificate files has not returned; the certificate is not reloaded until it does",
-		"cert_file", r.cfg.CertFile, "key_file", r.cfg.KeyFile, "reading_for", now.Sub(r.checkStarted))
+	logger, name := r.cfg.Logger, r.cfg.Name
+	certFile, keyFile := r.cfg.CertFile, r.cfg.KeyFile
+	readingFor := now.Sub(r.checkStarted)
+	var expired time.Time
+	if r.cert != nil && r.cert.Leaf != nil && now.After(r.cert.Leaf.NotAfter) {
+		expired = r.cert.Leaf.NotAfter
+	}
+	return func() {
+		logger.Warn("Reading the "+name+" certificate files has not returned; the certificate is not reloaded until it does",
+			"cert_file", certFile, "key_file", keyFile, "reading_for", readingFor)
+		if !expired.IsZero() {
+			logger.Warn("The "+name+" certificate has expired and its files were not renewed; peers that check it refuse the connection",
+				"cert_file", certFile, "not_after", expired)
+		}
+	}
 }
 
 // warnIfExpired warns, at most every ExpiryWarnInterval, that the

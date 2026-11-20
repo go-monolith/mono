@@ -28,8 +28,10 @@ type JetStreamKVBackend struct {
 	kv         jetstream.KeyValue
 	logger     *slog.Logger
 	// replicas is the bucket's replica count once it was read from its
-	// status (0: not read yet); see SingleReplica.
-	replicas atomic.Int32
+	// status (0: not read yet), at replicasRead (Unix nanoseconds); see
+	// SingleReplica.
+	replicas     atomic.Int32
+	replicasRead atomic.Int64
 }
 
 // Compile-time interface checks.
@@ -126,9 +128,10 @@ func (b *JetStreamKVBackend) Set(key string, val []byte, exp time.Duration) erro
 // replicated bucket may be answered by a replica that has not caught up, so
 // a key written a moment ago could be reported missing and then not be
 // deleted; there the marker is written as before. The same could happen to
-// a bucket that another stream mirrors with direct access (mirror_direct),
-// which also answers reads for it: the plugin creates no such mirror, and a
-// bucket that has one should not rely on the lookup being exact.
+// a bucket that another stream of the account mirrors: the server lets a
+// mirror answer reads for its origin, and the origin cannot tell that it
+// has one. The plugin creates no mirror (its backups copy as sources); a
+// bucket that is mirrored should not rely on the lookup being exact.
 func (b *JetStreamKVBackend) DeleteWithContext(ctx context.Context, key string) error {
 	if b.SingleReplica(ctx) {
 		if _, err := b.kv.Get(ctx, key); errors.Is(err, jetstream.ErrKeyNotFound) {
@@ -145,16 +148,22 @@ func (b *JetStreamKVBackend) DeleteWithContext(ctx context.Context, key string) 
 	return nil
 }
 
+// singleReplicaFor is how long a replica count of one is trusted before the
+// bucket's status is read again: a bucket can be given more replicas while
+// the application runs, and from then on the lookup before a delete must
+// stop. A count above one is kept for good, which errs on the safe side.
+const singleReplicaFor = time.Minute
+
 // SingleReplica reports whether the bucket is known to have one replica,
-// which is read from the bucket's status once. While the status cannot be
-// read the answer is no, and it is asked again.
+// from the bucket's status, which is read again every singleReplicaFor
+// while the answer is yes. While the status cannot be read the answer is
+// no, and it is asked again at the next call.
 func (b *JetStreamKVBackend) SingleReplica(ctx context.Context) bool {
-	switch b.replicas.Load() {
-	case 0:
-	case 1:
-		return true
-	default:
+	switch replicas := b.replicas.Load(); {
+	case replicas > 1:
 		return false
+	case replicas == 1 && time.Since(time.Unix(0, b.replicasRead.Load())) < singleReplicaFor:
+		return true
 	}
 	status, err := b.kv.Status(ctx)
 	if err != nil {
@@ -162,12 +171,13 @@ func (b *JetStreamKVBackend) SingleReplica(ctx context.Context) bool {
 	}
 	bucket, ok := status.(*jetstream.KeyValueBucketStatus)
 	if !ok || bucket.StreamInfo() == nil {
+		// Not a status the count can be read from: taken for replicated,
+		// without asking again at every delete.
+		b.replicas.Store(2)
 		return false
 	}
-	replicas := bucket.StreamInfo().Config.Replicas
-	if replicas < 1 {
-		replicas = 1
-	}
+	replicas := max(bucket.StreamInfo().Config.Replicas, 1)
+	b.replicasRead.Store(time.Now().UnixNano())
 	b.replicas.Store(int32(replicas)) //nolint:gosec // G115: a stream has at most 5 replicas
 	return replicas == 1
 }

@@ -372,10 +372,14 @@ func (m *natsManager) Start(ctx context.Context) error {
 	m.server = ns
 
 	// Start the server in a goroutine
-	go ns.Start()
+	started := make(chan struct{})
+	go func() {
+		ns.Start()
+		close(started)
+	}()
 
 	// Wait for the server to be ready, or to say that it will not be.
-	if err := AwaitServerReady(ns, fatal, m.config.StartupReadyTimeout); err != nil {
+	if err := AwaitServerReady(ns, fatal, started, m.config.StartupReadyTimeout); err != nil {
 		ns.Shutdown()
 		m.server = nil
 		return err
@@ -787,26 +791,26 @@ func ListenAddress(addr net.Addr, fallbackHost string, fallbackPort int) (string
 	return tcp.IP.String(), tcp.Port
 }
 
-// IsListenFailure reports whether a fatal message of the server says that
-// one of its listeners could not be opened (the client port, or a route,
-// gateway, leafnode, websocket or MQTT port). The server waits for every
-// configured listener before it is ready, so after such a message it never
-// is. Other messages the server calls fatal do not all stop it from starting
-// (a profiling port that is in use does not).
-func IsListenFailure(message string) bool {
-	return strings.HasPrefix(message, "Error listening on") || strings.HasPrefix(message, "Unable to listen for")
-}
+// startedReadyGrace is how long a server whose Start has returned with a
+// fatal message is still given to become ready.
+const startedReadyGrace = time.Second
 
 // AwaitServerReady waits until ns accepts connections, for at most timeout.
-// When the server reports that a listener could not be opened, it returns
-// that at once instead of waiting for a readiness that cannot come. Any
-// other fatal message does not end the wait: the server may start all the
-// same, however long it takes (the message is logged, and is the reason
-// given when the server is not ready in time).
-func AwaitServerReady(ns *server.Server, fatal *FatalCapture, timeout time.Duration) error {
+// started is closed when the server's Start has returned.
+//
+// A server that cannot start says so only as a fatal message, and its Start
+// then returns without it ever becoming ready: a port in use, a store it
+// cannot open, a pid file it cannot write. In that case (Start has returned,
+// a fatal message was reported, and the server is not ready
+// startedReadyGrace later) the message is returned, without waiting for the
+// rest of the timeout. A fatal message alone does not end the wait: not all
+// of them stop the server (a profiling port in use does not), and Start goes
+// on, recovering a store for as long as that takes, before it returns.
+func AwaitServerReady(ns *server.Server, fatal *FatalCapture, started <-chan struct{}, timeout time.Duration) error {
 	ready := make(chan bool, 1)
 	go func() { ready <- ns.ReadyForConnections(timeout) }()
 
+	var grace <-chan time.Time
 	for {
 		select {
 		case ok := <-ready:
@@ -814,13 +818,18 @@ func AwaitServerReady(ns *server.Server, fatal *FatalCapture, timeout time.Durat
 				return nil
 			}
 			if reason := fatal.Last(); reason != "" {
-				return fmt.Errorf("NATS server failed to start: %s", RedactURLText(reason))
+				return fmt.Errorf("NATS server not ready after %s timeout (the server reported: %s)", timeout, RedactURLText(reason))
 			}
 			return fmt.Errorf("NATS server not ready after %s timeout", timeout)
-		case reason := <-fatal.Fatal():
-			if IsListenFailure(reason) {
-				return fmt.Errorf("NATS server failed to start: %s", RedactURLText(reason))
+		case <-started:
+			started = nil
+			if fatal.Last() != "" {
+				timer := time.NewTimer(startedReadyGrace)
+				defer timer.Stop()
+				grace = timer.C
 			}
+		case <-grace:
+			return fmt.Errorf("NATS server failed to start: %s", RedactURLText(fatal.Last()))
 		}
 	}
 }

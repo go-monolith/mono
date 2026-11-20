@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/go-monolith/mono/pkg/types"
+	"github.com/nats-io/nats-server/v2/server"
 )
 
 // writeConfigFile writes a NATS config file and returns its path.
@@ -319,20 +320,68 @@ func TestAwaitServerReady_FatalThatDoesNotStopTheServer(t *testing.T) {
 	}
 }
 
-func TestIsListenFailure(t *testing.T) {
-	for message, want := range map[string]bool{
-		`Error listening on port: 127.0.0.1:4222, "listen tcp 127.0.0.1:4222: bind: address already in use"`: true,
-		"Error listening on router port: 6222 - bind: address already in use":                                true,
-		"Error listening on leafnode port: 7422 - x":                                                         true,
-		"Error listening on gateway port: 7222 - x":                                                          true,
-		"Unable to listen for websocket connections: x":                                                      true,
-		"Unable to listen for MQTT connections: x":                                                           true,
-		"error starting profiler: listen tcp :6060: bind: address already in use":                            false,
-		"Can't start JetStream: storage directory is not writable":                                           false,
-		"": false,
-	} {
-		if got := IsListenFailure(message); got != want {
-			t.Errorf("IsListenFailure(%q) = %v, want %v", message, got, want)
+// TestRedactURLText_ParseMarker: the Go URL parser's own quoting of what it
+// could not parse is cut as well.
+func TestRedactURLText_ParseMarker(t *testing.T) {
+	got := RedactURLText(`nats.conf:9:5: invalid proxy URL: parse "svc_user:pw@proxy:3128": first path segment in URL cannot contain colon`)
+	if strings.Contains(got, "svc_user") || strings.Contains(got, "pw@") || !strings.Contains(got, "invalid proxy URL: parse") {
+		t.Fatalf("redacted = %s", got)
+	}
+}
+
+// TestAwaitServerReady_FailsOnceStartReturnedWithAFatalMessage: a server
+// whose Start returned after a fatal message, and that is not ready, has
+// failed; the rest of the ready timeout is not waited for. A fatal message
+// while Start is still at work does not end the wait.
+func TestAwaitServerReady_FailsOnceStartReturnedWithAFatalMessage(t *testing.T) {
+	ns, err := server.NewServer(&server.Options{Host: "127.0.0.1", Port: -1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ns.Shutdown()
+	// Never started: it does not become ready.
+	fatal := NewFatalCapture(newMockLogger(), nil)
+	started := make(chan struct{})
+
+	result := make(chan error, 1)
+	begun := time.Now()
+	go func() { result <- AwaitServerReady(ns, fatal, started, 30*time.Second) }()
+
+	fatal.Fatalf("Can't start JetStream: %s", "store directory is not writable")
+	select {
+	case err := <-result:
+		t.Fatalf("returned %v while Start was still running", err)
+	case <-time.After(startedReadyGrace + 500*time.Millisecond):
+	}
+	close(started)
+	select {
+	case err := <-result:
+		if err == nil || !strings.Contains(err.Error(), "Can't start JetStream") || !strings.Contains(err.Error(), "failed to start") {
+			t.Fatalf("err = %v, want the server's reason", err)
 		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("still waiting for the ready timeout after Start returned with a fatal message")
+	}
+	if waited := time.Since(begun); waited > 10*time.Second {
+		t.Fatalf("waited %v", waited)
+	}
+}
+
+// TestAwaitServerReady_TimeoutNamesTheReportedMessage: when the timeout is
+// what ends the wait, the error says so and adds what the server reported.
+func TestAwaitServerReady_TimeoutNamesTheReportedMessage(t *testing.T) {
+	ns, err := server.NewServer(&server.Options{Host: "127.0.0.1", Port: -1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ns.Shutdown()
+	fatal := NewFatalCapture(newMockLogger(), nil)
+	fatal.Fatalf("error starting profiler: %s", "address already in use")
+	err = AwaitServerReady(ns, fatal, make(chan struct{}), 300*time.Millisecond)
+	if err == nil || !strings.Contains(err.Error(), "not ready after 300ms") || !strings.Contains(err.Error(), "error starting profiler") {
+		t.Fatalf("err = %v", err)
+	}
+	if err := AwaitServerReady(ns, NewFatalCapture(newMockLogger(), nil), make(chan struct{}), 100*time.Millisecond); err == nil || strings.Contains(err.Error(), "reported") {
+		t.Fatalf("err without a fatal message = %v", err)
 	}
 }

@@ -725,7 +725,8 @@ func (m *AccessLogModule) proxyInboundChannel(proxy *channelProxy) {
 			}
 
 			// Check for shutdown. A nil message has nothing to log and is
-			// forwarded as it is: the channel router drops it.
+			// forwarded as it is (the channel router drops one a provider
+			// sends; one a consumer sends reaches the provider).
 			if m.shutdown.Load() || msg == nil {
 				// Forward without logging during shutdown
 				select {

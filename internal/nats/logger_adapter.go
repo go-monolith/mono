@@ -108,7 +108,7 @@ func (c *FatalCapture) Fatalf(format string, v ...any) {
 	case c.fatal <- msg:
 	default:
 	}
-	c.logger.Error("[FATAL] " + msg)
+	c.logger.Error("[FATAL] " + RedactURLText(msg))
 }
 
 // Noticef forwards a notice.
@@ -168,15 +168,20 @@ func RedactConfigError(err error) error {
 // ("error parsing route url [...]"), whatever the URL looks like.
 const urlErrorMarker = " url ["
 
+// urlParseMarker is how the Go URL parser quotes what it could not parse
+// (`parse "user:pw@proxy:3128": first path segment in URL cannot contain
+// colon`), which nats-server passes on for a leafnode proxy URL.
+const urlParseMarker = `parse "`
+
 // urlNotShown replaces what is cut from a line.
 const urlNotShown = " (the URL is not shown: it may hold credentials)"
 
 // RedactURLText cuts every line of text before a URL it may quote: after
-// the parser's own marker for a URL it rejected (which need not have a
-// scheme: "user:pass@host:6222" is rejected for its first colon), and before
-// anything with "://" in it.
+// the config parser's own marker for a URL it rejected (which need not have
+// a scheme: "user:pass@host:6222" is rejected for its first colon), after
+// the Go URL parser's, and before anything with "://" in it.
 func RedactURLText(text string) string {
-	if !strings.Contains(text, "://") && !strings.Contains(text, urlErrorMarker) {
+	if !strings.Contains(text, "://") && !strings.Contains(text, urlErrorMarker) && !strings.Contains(text, urlParseMarker) {
 		return text
 	}
 	lines := strings.Split(text, "\n")
@@ -184,6 +189,9 @@ func RedactURLText(text string) string {
 		cut := -1
 		if at := strings.Index(line, urlErrorMarker); at >= 0 {
 			cut = at + len(" url")
+		}
+		if at := strings.Index(line, urlParseMarker); at >= 0 && (cut < 0 || at+len("parse") < cut) {
+			cut = at + len("parse")
 		}
 		if at := strings.Index(line, "://"); at >= 0 {
 			before := max(strings.LastIndexByte(line[:at], ' '), 0)

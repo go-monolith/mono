@@ -283,7 +283,9 @@ func (eb *natsEventBus) ChanSubscribe(subject string, ch chan *types.Msg) (types
 	}
 
 	go ForwardChanSubscription(natsCh, ch, ended, func(dropped int) {
-		eb.logger.Warn("Messages of a channel subscription that has ended were not taken and are dropped",
+		// The ordinary way to stop is to unsubscribe and stop reading,
+		// which leaves what was delivered meanwhile untaken: not a warning.
+		eb.logger.Debug("Messages of a channel subscription that has ended were not taken and are dropped",
 			"subject", subject, "dropped", dropped, "waited", chanForwardGrace)
 	})
 
