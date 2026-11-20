@@ -60,6 +60,7 @@ type lifecycleManager struct {
 	boundaries                 map[string]*boundary.Recorder // boundary observations by module, for ModuleBoundaries
 	moduleBuses                map[string]types.EventBus     // the scoped event bus handed to each module
 	cronProgressInterval       time.Duration                 // interval of the in-progress signal of a running cron handler (0 = default)
+	abandonedStops             map[string]int                // Stops given up on that have not returned yet, by "<kind> <name>" (see RunStop)
 }
 
 // subscriptionRecord ties a framework-managed subscription to the worker pool
@@ -737,6 +738,14 @@ func (lm *lifecycleManager) detectMiddlewareModules() {
 // order (rollback), then the started middleware in reverse order, then the
 // plugins (rollbackStartedInfrastructure).
 func (lm *lifecycleManager) Start(ctx context.Context) (err error) {
+	// A Stop that an earlier stop or rollback gave up on may still be
+	// running: starting the same module beside it would run its Start and
+	// its Stop at the same time.
+	if abandoned := lm.AbandonedStops(); len(abandoned) > 0 {
+		return fmt.Errorf("cannot start while an earlier Stop is still running (%s): %w",
+			strings.Join(abandoned, ", "), monoerrors.ErrStopAbandoned)
+	}
+
 	// Step -1: wait until JetStream answers, so that plugins and modules that
 	// use it in Start, and the JetStream setup after them, find it ready even
 	// while the servers of a cluster are still electing leaders.
@@ -1469,7 +1478,7 @@ func (lm *lifecycleManager) Stop(ctx context.Context) error {
 		middlewares := lm.middlewareChain.Middlewares()
 		for i := len(middlewares) - 1; i >= 0; i-- {
 			mw := middlewares[i]
-			if err := lm.stopMiddlewareModule(ctx, mw); err != nil {
+			if err := lm.stopMiddlewareModule(ctx, mw, false); err != nil {
 				errors = append(errors, err)
 			}
 		}
@@ -1501,21 +1510,19 @@ func (lm *lifecycleManager) Stop(ctx context.Context) error {
 	return nil
 }
 
-// stopModule stops a single module with panic recovery
-func (lm *lifecycleManager) stopModule(ctx context.Context, module types.Module) (err error) {
+// stopModule stops a single module with panic recovery. A Stop that does not
+// return after its context ended is abandoned (see RunStop).
+func (lm *lifecycleManager) stopModule(ctx context.Context, module types.Module) error {
 	moduleName := module.Name()
-
-	// Panic recovery
-	defer func() {
-		if r := recover(); r != nil {
-			err = monoerrors.WrapModulePanic(moduleName, "stop", r)
-			lm.logger.Error("Module panic during stop", "module", moduleName, "panic", r)
-		}
-	}()
 
 	lm.logger.Info("Stopping module", "module", moduleName)
 
-	if err := module.Stop(ctx); err != nil {
+	panicValue, err := lm.RunStop(ctx, "module", moduleName, module.Stop)
+	if panicValue != nil {
+		lm.logger.Error("Module panic during stop", "module", moduleName, "panic", panicValue)
+		return monoerrors.WrapModulePanic(moduleName, "stop", panicValue)
+	}
+	if err != nil {
 		lm.logger.Error("Module stop failed", "module", moduleName, "error", err)
 
 		// Notify middleware of module stopped with error
@@ -1547,21 +1554,26 @@ func (lm *lifecycleManager) stopModule(ctx context.Context, module types.Module)
 	return nil
 }
 
-// stopMiddlewareModule stops a single middleware module with panic recovery
-func (lm *lifecycleManager) stopMiddlewareModule(ctx context.Context, mw types.MiddlewareModule) (err error) {
+// stopMiddlewareModule stops a single middleware module with panic recovery.
+// For the rollback of a failed Start, a middleware that can tell it from the
+// final stop (types.RollbackAwareMiddleware) gets RollbackStart instead of
+// Stop, so that it can be started again. A Stop that does not return after
+// its context ended is abandoned (see RunStop).
+func (lm *lifecycleManager) stopMiddlewareModule(ctx context.Context, mw types.MiddlewareModule, rollback bool) error {
 	moduleName := mw.Name()
-
-	// Panic recovery
-	defer func() {
-		if r := recover(); r != nil {
-			err = monoerrors.WrapModulePanic(moduleName, "stop", r)
-			lm.logger.Error("Middleware module panic during stop", "module", moduleName, "panic", r)
-		}
-	}()
 
 	lm.logger.Info("Stopping middleware module", "module", moduleName)
 
-	if err := mw.Stop(ctx); err != nil {
+	stop := mw.Stop
+	if aware, ok := mw.(types.RollbackAwareMiddleware); ok && rollback {
+		stop = aware.RollbackStart
+	}
+	panicValue, err := lm.RunStop(ctx, "middleware module", moduleName, stop)
+	if panicValue != nil {
+		lm.logger.Error("Middleware module panic during stop", "module", moduleName, "panic", panicValue)
+		return monoerrors.WrapModulePanic(moduleName, "stop", panicValue)
+	}
+	if err != nil {
 		lm.logger.Error("Middleware module stop failed", "module", moduleName, "error", err)
 		return fmt.Errorf("failed to stop middleware module %s: %w", moduleName, err)
 	}
@@ -1844,7 +1856,7 @@ func (lm *lifecycleManager) rollback(ctx context.Context, started []string, orig
 func (lm *lifecycleManager) rollbackStartedInfrastructure(ctx context.Context, startedMiddleware []types.MiddlewareModule) {
 	for i := len(startedMiddleware) - 1; i >= 0; i-- {
 		mw := startedMiddleware[i]
-		if err := lm.stopMiddlewareModule(ctx, mw); err != nil {
+		if err := lm.stopMiddlewareModule(ctx, mw, true); err != nil {
 			lm.logger.Error("Failed to stop middleware module during rollback", "module", mw.Name(), "error", err)
 		}
 	}
@@ -2054,19 +2066,17 @@ func (lm *lifecycleManager) stopPlugins(ctx context.Context) error {
 	return nil
 }
 
-// stopPlugin stops a single plugin with panic recovery.
-func (lm *lifecycleManager) stopPlugin(ctx context.Context, plugin types.PluginModule, alias string) (err error) {
-	// Panic recovery
-	defer func() {
-		if r := recover(); r != nil {
-			err = monoerrors.WrapPluginStopFailed(alias, fmt.Errorf("panic: %v", r))
-			lm.logger.Error("Plugin panic during stop", "alias", alias, "panic", r)
-		}
-	}()
-
+// stopPlugin stops a single plugin with panic recovery. A Stop that does not
+// return after its context ended is abandoned (see RunStop).
+func (lm *lifecycleManager) stopPlugin(ctx context.Context, plugin types.PluginModule, alias string) error {
 	lm.logger.Info("Stopping plugin", "alias", alias, "module", plugin.Name())
 
-	if err := plugin.Stop(ctx); err != nil {
+	panicValue, err := lm.RunStop(ctx, "plugin", alias, plugin.Stop)
+	if panicValue != nil {
+		lm.logger.Error("Plugin panic during stop", "alias", alias, "panic", panicValue)
+		return monoerrors.WrapPluginStopFailed(alias, fmt.Errorf("panic: %v", panicValue))
+	}
+	if err != nil {
 		lm.logger.Error("Plugin stop failed", "alias", alias, "error", err)
 		return monoerrors.WrapPluginStopFailed(alias, err)
 	}

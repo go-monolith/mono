@@ -59,6 +59,13 @@ var (
 	// ErrModulePanic is returned when a module panics during lifecycle operations
 	ErrModulePanic = errors.New("module panic")
 
+	// ErrStopAbandoned is returned when the Stop of a module, middleware
+	// module or plugin had not returned shortly after its context ended and
+	// the framework went on without it, leaving that Stop running; the
+	// error wraps it together with ErrModuleStopFailed. Start returns it
+	// while such a Stop is still running.
+	ErrStopAbandoned = errors.New("stop abandoned")
+
 	// ErrContainerNotBound is returned when ServiceContainer is not bound to a module
 	ErrContainerNotBound = errors.New("container not bound to module")
 
@@ -357,7 +364,7 @@ func WrapModuleStopFailed(moduleName string, err error) error {
 	return &ModuleError{
 		ModuleName: moduleName,
 		Operation:  "stop",
-		Err:        fmt.Errorf("%w: %v", ErrModuleStopFailed, err),
+		Err:        fmt.Errorf("%w: %w", ErrModuleStopFailed, err),
 	}
 }
 
@@ -404,7 +411,7 @@ func WrapPluginStopFailed(alias string, err error) error {
 	return &ModuleError{
 		ModuleName: alias,
 		Operation:  "stop",
-		Err:        fmt.Errorf("%w: %v", ErrModuleStopFailed, err),
+		Err:        fmt.Errorf("%w: %w", ErrModuleStopFailed, err),
 	}
 }
 
