@@ -232,6 +232,8 @@ All in `monoerrors "github.com/go-monolith/mono/pkg/errors"`.
 | `ErrPluginNotFound`, `ErrPluginAlreadyRegistered` | Plugin lookup or registration |
 | `ErrServiceContractMismatch`, `ErrModuleBoundaryViolation` | Module boundaries (see above) |
 | `ErrStreamConfigImmutable` | `Start`: a stream's storage type, or its retention to or from work-queue, differs from the existing stream's, or a setting that can only be switched on is configured off. See [Changing a Stream's Storage Type or Retention](../api/container.md#changing-a-streams-storage-type-or-retention) |
+| `ErrWorkQueueConsumerConflict` | `Start`: a consumer on a work-queue stream whose subjects another consumer already covers (two registrations of the application, or the durable of a renamed module or service). See [Work-Queue Streams: One Consumer per Subject](../api/container.md#work-queue-streams-one-consumer-per-subject) |
+| `ErrStreamSubjectsOverlap` | `Start`: a stream asks for subjects another stream holds (a renamed stream, or a service switched between stream consumer and cron). See [Renaming a Stream, or Switching a Service Between Stream Consumer and Cron](../api/container.md#renaming-a-stream-or-switching-a-service-between-stream-consumer-and-cron) |
 
 | Type | Fields | Helpers |
 |------|--------|---------|

@@ -2112,11 +2112,11 @@ func (lm *lifecycleManager) setupStreamConsumer(ctx context.Context, entry *type
 	if streamCfg.Metadata, err = lm.keepLegacyMigrationMarker(ctx, es, streamCfg.Name, streamCfg.Metadata); err != nil {
 		return err
 	}
-	stream, err := es.CreateOrUpdateStream(ctx, streamCfg)
+	// A rejection the configuration alone does not explain (a setting NATS
+	// cannot change, subjects another stream holds, consumer limits an
+	// existing consumer exceeds) is returned as an error that does.
+	stream, err := lm.WriteStream(ctx, es, streamCfg, owner)
 	if err != nil {
-		// A storage type or work-queue retention that differs from the
-		// existing stream's is reported as ErrStreamConfigImmutable.
-		err = explainImmutableStreamChange(ctx, es, streamCfg, owner, err)
 		return fmt.Errorf("failed to create stream %s: %w", cfg.Stream.Name, err)
 	}
 	// On a shared stream, the durables that already exist get their filter
@@ -2140,6 +2140,8 @@ func (lm *lifecycleManager) setupStreamConsumer(ctx context.Context, entry *type
 	if consumerCfg.AckPolicy == 0 {
 		consumerCfg.AckPolicy = types.AckExplicitPolicy
 	}
+	// On a work-queue stream, a consumer that already covers the subjects is
+	// named in the error, with the way out (see ensureStreamConsumer).
 	consumer, err := lm.ensureStreamConsumer(ctx, es, cfg.Stream.Name, consumerCfg, entry)
 	if err != nil {
 		return err
@@ -2227,6 +2229,13 @@ func (lm *lifecycleManager) setupCronService(ctx context.Context, entry *types.S
 	}
 
 	if err := lm.WriteCronStream(ctx, es, streamCfg); err != nil {
+		// Subjects another stream holds (the stream of a stream consumer
+		// service this cron service replaces, for example) have nothing to
+		// do with the server version.
+		owner := fmt.Sprintf("cron service %s.%s", module, entry.Name)
+		if err = lm.streamPlan.ExplainSubjectsOverlap(ctx, es, streamCfg, owner, err); errors.Is(err, monoerrors.ErrStreamSubjectsOverlap) {
+			return fmt.Errorf("failed to create cron schedule stream %q: %w", streamName, err)
+		}
 		return fmt.Errorf("failed to create cron schedule stream %q (server may not support message schedules; requires nats-server v2.14+): %w", streamName, err)
 	}
 
@@ -2484,11 +2493,11 @@ func (lm *lifecycleManager) setupEventStreamConsumer(ctx context.Context, entry 
 	// stream gets its migration marker re-applied.
 	owner := eventStreamOwner(entry)
 	streamCfg := lm.plannedEventStreamConfig(cfg.Stream, durable.migrated, owner)
-	stream, err := es.CreateOrUpdateStream(ctx, streamCfg)
+	// A rejection the configuration alone does not explain (a setting NATS
+	// cannot change, subjects another stream holds, consumer limits an
+	// existing consumer exceeds) is returned as an error that does.
+	stream, err := lm.WriteStream(ctx, es, streamCfg, owner)
 	if err != nil {
-		// A storage type or work-queue retention that differs from the
-		// existing stream's is reported as ErrStreamConfigImmutable.
-		err = explainImmutableStreamChange(ctx, es, streamCfg, owner, err)
 		return fmt.Errorf("failed to create stream %s: %w", cfg.Stream.Name, err)
 	}
 	// On a shared stream, the durables that already exist get their filter
@@ -2538,6 +2547,9 @@ func (lm *lifecycleManager) setupEventStreamConsumer(ctx context.Context, entry 
 			return es.CreateOrUpdateConsumer(ctx, cfg.Stream.Name, c)
 		})
 	if err != nil {
+		// On a work-queue stream, a consumer that already covers the
+		// subjects is named, with the way out.
+		err = lm.streamPlan.ExplainWorkQueueConflict(ctx, stream, cfg.Stream.Name, consumerName, callerFilters(consumerCfg), owner, err)
 		return fmt.Errorf("failed to create consumer %s: %w", consumerName, err)
 	}
 

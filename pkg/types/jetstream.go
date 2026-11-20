@@ -329,13 +329,27 @@ type RePublish struct {
 
 // StreamConsumerLimits are the limits for a consumer on a stream. These can
 // be overridden on a per consumer basis.
+//
+// The server checks a limit that is added or lowered on an existing stream
+// against the consumers as they exist. For MaxAckPending the framework
+// brings the existing consumers of the stream's registrations under the new
+// limit itself; an InactiveThreshold limit that an existing consumer exceeds
+// fails Start.
 type StreamConsumerLimits struct {
 	// InactiveThreshold is a duration which instructs the server to clean
 	// up the consumer if it has been inactive for the specified duration.
+	//
+	// A consumer whose own InactiveThreshold is zero inherits this value,
+	// durable consumers included: the durable of a stream consumer service
+	// or an event stream consumer is then deleted, with its position, once
+	// no instance of the application has pulled it for that long (every
+	// instance down), and created again from its deliver policy at the next
+	// start. Leave it unset unless that is intended.
 	InactiveThreshold time.Duration `json:"inactive_threshold,omitempty"`
 
 	// MaxAckPending is a maximum number of outstanding unacknowledged
-	// messages for a consumer.
+	// messages for a consumer. A consumer whose own MaxAckPending is zero
+	// takes this value; one that asks for more is rejected by the server.
 	MaxAckPending int `json:"max_ack_pending,omitempty"`
 }
 

@@ -40,11 +40,30 @@ import (
 // a warning (see UpdateKeepingImmutable); since the consumer is durable it no
 // longer disappears by itself, so deleting it (nats consumer rm <stream>
 // <consumer>) is what applies the change.
+//
+// On a work-queue stream, a rejection because another consumer already
+// covers the subjects is returned as ErrWorkQueueConsumerConflict, naming
+// that consumer (see ExplainWorkQueueConflict), with the filter the consumer
+// was actually sent with.
 func (lm *lifecycleManager) ensureStreamConsumer(ctx context.Context, es types.EventStream, stream string, cfg types.ConsumerConfig, entry *types.ServiceEntry) (jetstream.Consumer, error) {
 	owner := "stream consumer service"
 	if entry != nil {
 		owner = StreamConsumerServiceOwner(entry)
 	}
+	consumer, applied, err := lm.ensureStreamConsumerApplied(ctx, es, stream, cfg, owner, entry)
+	if err != nil && IsWorkQueueConsumerConflict(err) {
+		// Looked up only after the rejection.
+		if handle, lookupErr := es.Stream(ctx, stream); lookupErr == nil {
+			err = lm.streamPlan.ExplainWorkQueueConflict(ctx, handle, stream, applied.Name, callerFilters(applied), owner, err)
+		}
+	}
+	return consumer, err
+}
+
+// ensureStreamConsumerApplied does the work of ensureStreamConsumer. Besides
+// the consumer it returns the configuration it sent last, which may carry a
+// filter kept from the existing consumer.
+func (lm *lifecycleManager) ensureStreamConsumerApplied(ctx context.Context, es types.EventStream, stream string, cfg types.ConsumerConfig, owner string, entry *types.ServiceEntry) (jetstream.Consumer, types.ConsumerConfig, error) {
 	// Settings NATS cannot change on an existing consumer are kept as they
 	// are, with a warning (see UpdateKeepingImmutable).
 	createOrUpdate := func(cfg types.ConsumerConfig) (jetstream.Consumer, error) {
@@ -56,7 +75,8 @@ func (lm *lifecycleManager) ensureStreamConsumer(ctx context.Context, es types.E
 
 	store, ok := es.(cronConsumerStore)
 	if !ok {
-		return createOrUpdate(cfg)
+		consumer, err := createOrUpdate(cfg)
+		return consumer, cfg, err
 	}
 
 	info, err := store.ConsumerInfo(ctx, stream, cfg.Name)
@@ -68,11 +88,13 @@ func (lm *lifecycleManager) ensureStreamConsumer(ctx context.Context, es types.E
 	}
 	switch {
 	case isCronConsumerMissing(err):
-		return createOrUpdate(cfg)
+		consumer, err := createOrUpdate(cfg)
+		return consumer, cfg, err
 	case err != nil:
-		return nil, fmt.Errorf("failed to look up consumer %s: %w", cfg.Name, err)
+		return nil, cfg, fmt.Errorf("failed to look up consumer %s: %w", cfg.Name, err)
 	case info.Config.Durable != "":
-		return createOrUpdate(cfg)
+		consumer, err := createOrUpdate(cfg)
+		return consumer, cfg, err
 	}
 
 	// The first update of the conversion decides which immutable settings
@@ -83,20 +105,21 @@ func (lm *lifecycleManager) ensureStreamConsumer(ctx context.Context, es types.E
 	if isCronConsumerMissing(err) {
 		// Deleted between the lookup and the update (its inactivity
 		// threshold expired): create it instead.
-		return createOrUpdate(cfg)
+		consumer, err := createOrUpdate(cfg)
+		return consumer, cfg, err
 	}
 	if err != nil {
-		return nil, fmt.Errorf("failed to convert consumer %s to durable: %w", cfg.Name, err)
+		return nil, cfg, fmt.Errorf("failed to convert consumer %s to durable: %w", cfg.Name, err)
 	}
 	consumer, err := store.UpdateConsumer(ctx, stream, cfg)
 	if err != nil {
-		return nil, fmt.Errorf("failed to clear the inactivity threshold of consumer %s: %w", cfg.Name, err)
+		return nil, cfg, fmt.Errorf("failed to clear the inactivity threshold of consumer %s: %w", cfg.Name, err)
 	}
 	lm.logger.Info("Stream consumer converted to durable",
 		"service", entry.Name,
 		"stream", stream,
 		"consumer", cfg.Name)
-	return consumer, nil
+	return consumer, cfg, nil
 }
 
 func (lm *lifecycleManager) createOrUpdateStreamConsumer(ctx context.Context, es types.EventStream, stream string, cfg types.ConsumerConfig) (jetstream.Consumer, error) {

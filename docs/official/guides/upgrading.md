@@ -154,6 +154,21 @@ A `SourceSubject` under the service's own subjects (`services.<module>.<name>.<a
 
 See [Changing a Consumer Setting That Cannot Be Changed](../api/container.md#changing-a-consumer-setting-that-cannot-be-changed).
 
+### Clear errors for work-queue consumers and overlapping stream subjects (v0.2.16)
+
+*v0.2.16.* Three configurations that failed `Start` with a server error naming nothing now say what is in the way. Nothing is deleted or moved automatically.
+
+- **A second consumer on a work-queue stream** (a renamed module or service, or two modules consuming one event) fails with `ErrWorkQueueConsumerConflict`, naming the existing consumer and `nats consumer rm`. Removing the old consumer loses no message: what it had not acknowledged is delivered to the new one.
+- **A stream asking for subjects another stream holds** (`Stream.Name` renamed, or a stream consumer service turned into a cron service of the same name, or the reverse) fails with `ErrStreamSubjectsOverlap`, naming the stream that holds them.
+- **Lowering `ConsumerLimits.MaxAckPending`** on an existing stream no longer fails: the existing consumers of the stream's registrations are lowered to the limit and keep their position. A consumer the application does not register, or an `InactiveThreshold` limit an existing consumer exceeds, still fails `Start`, with an error that says what to change.
+
+**Configurations that used to start and may now fail**, because the registrations are checked before anything is created:
+
+- **Two registrations on the same subjects of one work-queue stream.** The server rejects the second consumer when it is *created*, so such a configuration normally never started. It did start when the second consumer already existed with a filter and the filter was then removed from the configuration: the server accepts that update. Two consumers then competed for the same messages. `Start` now fails with `ErrWorkQueueConsumerConflict`; give the registrations subjects or filters that do not overlap, or use interest retention on a new stream.
+- **Two registrations with overlapping subjects on streams with different names.** This always failed, at the second stream's write; it now fails before the first stream is created, with `ErrStreamSubjectsOverlap`.
+
+See [Work-Queue Streams: One Consumer per Subject](../api/container.md#work-queue-streams-one-consumer-per-subject), [Renaming a Stream, or Switching a Service Between Stream Consumer and Cron](../api/container.md#renaming-a-stream-or-switching-a-service-between-stream-consumer-and-cron) and [Lowering a Stream's Consumer Limits](../api/container.md#lowering-a-streams-consumer-limits).
+
 ## New Features
 
 All optional.
@@ -170,6 +185,7 @@ All optional.
 | [`BucketConfig.RecreateOnStorageMismatch`](../plugins/kv-jetstream.md#changing-a-buckets-storage-type), `kvjetstream.ErrStorageMismatch` | v0.2.10 | A kv-jetstream bucket whose stream exists with another storage type fails `Start` with a clear error, or, with the opt-in, is recreated: **the bucket is emptied**, after its keys are copied to a backup bucket (kept 7 days by default; `SkipBackupOnRecreate`, `RecreateBackupTTL`). Set it only for a bucket whose contents can be lost |
 | [fs-jetstream `BucketConfig.RecreateOnStorageMismatch`](../plugins/fs-jetstream.md#changing-a-buckets-storage-type), `fsjetstream.ErrStorageMismatch` | v0.2.11 | The same for object store buckets: a bucket whose stream exists with another storage type fails `Start` with a clear error, or, with the opt-in, is recreated: **the bucket is emptied**, after its objects are copied to a backup bucket (kept 7 days by default; `SkipBackupOnRecreate`, `RecreateBackupTTL`, `RecreateBackupTimeout`, default 10 minutes). Set it only for a bucket whose contents can be lost. `WithLogger(nil)` is now rejected, and without `WithLogger` the logger is resolved at `Start` |
 | [`monoerrors.ErrStreamConfigImmutable`](../api/container.md#changing-a-streams-storage-type-or-retention) | v0.2.12 | A stream consumer service or event stream consumer whose `Storage`, or `Retention` to or from work-queue, differs from the existing stream's fails `Start` with a clear error instead of the server's generic one. It failed before as well; the stream is never deleted. Two event stream consumers that register one stream with different values now fail before the stream is created |
+| [`monoerrors.ErrWorkQueueConsumerConflict`](../api/container.md#work-queue-streams-one-consumer-per-subject), [`monoerrors.ErrStreamSubjectsOverlap`](../api/container.md#renaming-a-stream-or-switching-a-service-between-stream-consumer-and-cron) | v0.2.16 | `Start` errors for a second consumer on the same subjects of a work-queue stream, and for a stream that asks for subjects another stream holds. Both failed before as well, with the server's error; nothing is deleted |
 | [`WithNATSSystemAccount(user, password)`](../api/framework.md#withnatssystemaccount) | v0.2.2 | A system account user for `nats server report` and `nats server raft peer-remove`. Clients that send credentials of their own are rejected once it is on, unless they are the system account user's |
 | `mono.ServiceLookup` | v0.1.2 | The read side of `ServiceContainer`, accepted by the typed contracts and helpers |
 | [`monotest.CheckImports`](module-boundaries.md#checking-imports) | v0.1.2 | Checks the contract package import rule; put the test in the application's root directory |

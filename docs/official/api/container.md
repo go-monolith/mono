@@ -449,7 +449,7 @@ Details:
 - **Subjects that overlap without one covering the other** (`a.*.c` and `a.b.*`) cannot be in one stream, unless a third subject on the stream covers both. `Start` fails with `ErrInvalidConfiguration`, naming both registrations, before anything is written.
 - **Other stream settings** (`MaxAge`, limits, `Description`) are not merged. Every registration writes them, and the one set up last wins. Services are set up in name order, modules first by name, then event stream consumers in registration order, so the result is the same on every start. Give the registrations of one stream the same settings.
 - **`Storage`, work-queue retention and the settings that can only be switched on** must agree across the registrations of a stream, or `Start` fails with `ErrStreamConfigImmutable` (see above).
-- **Work-queue streams** accept one consumer per subject. Registrations with different subjects can share one; registrations whose subjects are the same or cover each other cannot.
+- **Work-queue streams** accept one consumer per subject. Registrations with different subjects can share one; registrations whose subjects are the same or cover each other cannot, and fail `Start` with `ErrWorkQueueConsumerConflict` (see [Work-Queue Streams: One Consumer per Subject](#work-queue-streams-one-consumer-per-subject)).
 - **When a stream stops being shared** (the other registrations are removed), the remaining consumers keep the filter on their own subjects, also when those subjects change. The stream may still hold the removed registrations' messages, and they are not delivered to the remaining handlers. To free the space, purge them (`nats stream purge <stream> --subject <subject>`).
 - **Rolling deploy from an earlier version:** an instance of the earlier version that starts later overwrites the subjects again, until every instance runs v0.2.13 or later. The next start of a newer instance repairs them.
 
@@ -466,9 +466,9 @@ A rename therefore creates a **new** durable, and the old one stays on the serve
 
 | What changed | Limits stream | Interest stream | Work-queue stream |
 |---|---|---|---|
-| Module or service renamed | The new durable starts from its deliver policy: with the default, the stream is delivered again | Handled messages are kept, because the old durable never acknowledges them | `Start` fails: the old durable holds the subjects |
+| Module or service renamed | The new durable starts from its deliver policy: with the default, the stream is delivered again | Handled messages are kept, because the old durable never acknowledges them | `Start` fails with [`ErrWorkQueueConsumerConflict`](#work-queue-streams-one-consumer-per-subject): the old durable holds the subjects |
 | Registration removed | Nothing is consumed; the stream keeps its messages | Messages the remaining consumers handled are kept | Messages are kept |
-| Service removed or changed to another kind | The stream keeps storing what is published to the service subject | The same | The same |
+| Service removed or changed to another kind | The stream keeps storing what is published to the service subject. Changed to a cron service of the same name, `Start` fails with [`ErrStreamSubjectsOverlap`](#renaming-a-stream-or-switching-a-service-between-stream-consumer-and-cron) | The same | The same |
 
 Messages are kept until the stream's own limits (`MaxAge`, `MaxMsgs`, `MaxBytes`) remove them. Without limits, which is the default, they are kept without bound.
 
@@ -491,6 +491,94 @@ WARN Stream left behind by a stream registration this application no longer has 
 - **It runs during `Start`.** With a JetStream that answers slowly it can add up to those 10 seconds to startup; allow for that in a startup probe.
 
 A new durable cannot take over the old one's position, so on a limits stream a rename means the stream is delivered again. Handlers should be idempotent in any case, because delivery is at least once.
+
+### Work-Queue Streams: One Consumer per Subject
+
+A stream with `Retention: WorkQueuePolicy` delivers each message to **one** consumer and then removes it. NATS therefore refuses a second consumer on the same subjects of such a stream. Since v0.2.16 `Start` fails with `ErrWorkQueueConsumerConflict` (package `github.com/go-monolith/mono/pkg/errors`), which names the stream, the registrations and the consumers involved. Before, it failed with the server's error (`multiple non-filtered consumers not allowed on workqueue stream`), which names none of them.
+
+There are two cases.
+
+**Two registrations of the application collide.** `Start` fails before anything is created:
+
+| Registrations on one work-queue stream | Result |
+|---|---|
+| Two modules consume the same event | Rejected |
+| One module registers the same event twice | Rejected |
+| Services whose subjects are the same, or of which one covers the other (`jobs.>` and `jobs.urgent`) | Rejected |
+| Services or events on different subjects | Accepted: each consumer is filtered on its own |
+| The same subjects, with `Consumer.FilterSubject` values that do not overlap | Accepted |
+
+- **To let every module get every message, use `InterestPolicy`.** That is the retention under which each consumer receives each message and a message is removed once all of them acknowledged it.
+- **The retention of an existing stream cannot be changed** to or from work-queue, so this takes a new stream (see [Changing a Stream's Storage Type or Retention](#changing-a-streams-storage-type-or-retention)).
+
+**A consumer that already exists is in the way.** This is what renaming a module or a service does: the durable name is derived from them, so the rename asks for a new durable while the old one still holds the subjects.
+
+```text
+consumer invoicing-orders-OrderPlaced-v1 (not filtered) of the event stream consumer of module invoicing
+for event orders.OrderPlaced cannot be created or updated on work-queue stream TASKS, because of existing
+consumer billing-orders-OrderPlaced-v1 (not filtered, created by the framework for the event stream consumer
+of module billing for event orders.OrderPlaced, which this application does not register); ...
+```
+
+- **Remove the old consumer once nothing uses it:** `nats consumer rm <stream> <consumer>`, then start again.
+- **No message is lost by removing it.** A work-queue stream is not purged when a consumer is deleted. The messages the old consumer had not acknowledged, including those it had already been handed, are delivered to the new consumer.
+- **The framework does not remove it itself.** During a rolling deploy an instance of the previous version still pulls from it, and the framework cannot tell that apart from a consumer left behind.
+- **Going back to the previous name starts again**, as long as the old consumer exists.
+
+A healthy start is not affected: the stream's consumers are only listed after the server rejected one.
+
+### Renaming a Stream, or Switching a Service Between Stream Consumer and Cron
+
+A subject belongs to one stream for as long as that stream exists. A registration that asks for the same subjects under another stream name is rejected by the server. Since v0.2.16 `Start` fails with `ErrStreamSubjectsOverlap` (package `github.com/go-monolith/mono/pkg/errors`), which names the stream that holds the subjects and what created it. Before, it failed with the server's error (`subjects overlap with an existing stream`), which does not say which stream.
+
+| Change | Why it collides |
+|---|---|
+| `Stream.Name` of a stream consumer service or an event stream consumer is changed | The stream with the old name keeps the subjects |
+| A stream consumer service becomes a cron service of the same name, or the reverse | Both kinds use the service subjects `services.<module>.<service>`, on different streams |
+| Two registrations put overlapping subjects on streams with different names (two modules consuming one event, each with its own stream name) | Rejected before anything is created |
+
+```text
+stream ORDERS_B of the stream consumer service orders.ingest cannot listen on its subjects, because stream
+ORDERS_A (listening on services.orders.ingest, services.orders.ingest.>; created by the framework for the
+stream consumer service orders.ingest; no registration of this application uses this stream) holds
+services.orders.ingest, services.orders.ingest.>; ...
+```
+
+Ways out:
+
+- **Keep the stream name.** Going back to the previous configuration starts again.
+- **Move to new subjects beside the old stream:** a new service name or event version on a new stream, as described under [Changing a Stream's Storage Type or Retention](#changing-a-streams-storage-type-or-retention). Switch the publishers, let the old stream drain, then remove it. Nothing is lost.
+- **For a service that changes kind** (stream consumer to cron, or the reverse): use another service name.
+- **Two modules consuming one event:** give both registrations the same stream name. They then [share the stream](#sharing-a-stream-between-registrations).
+
+{% hint style="danger" %}
+**Deleting the old stream** (`nats stream rm <stream>`) and restarting also works, but it permanently deletes every message in it and the position of every consumer on it. Use it only when the stream holds nothing you need.
+{% endhint %}
+
+The framework does not hand the subjects over from one stream to the other by itself. For a moment no stream would listen, and a publish without acknowledgement (`EventBus.Publish`) in that moment would be dropped silently.
+
+A healthy start is not affected: the lookup is only made after the server rejected the stream.
+
+### Lowering a Stream's Consumer Limits
+
+`StreamConfig.ConsumerLimits` bounds what the consumers of a stream may be configured with. The server checks a new, lower limit against the consumers **as they exist**, and the framework writes a stream before its consumer. A deployment that lowered a limit therefore failed `Start` on every restart, although the consumer configuration it shipped complied:
+
+```text
+nats: API error: code=500 err_code=10069 description=change to limits violates consumers: orders-ingest
+```
+
+Since v0.2.16:
+
+- **`ConsumerLimits.MaxAckPending` can be lowered in one deployment.** When the server rejects the stream for it, the framework lowers the `MaxAckPending` of the consumers the server names to the limit, logs each one at Info, and writes the stream again. The consumers keep their position. A consumer left at the default (1000) is lowered too.
+- **It is all or nothing.** The framework lowers consumers only when that is all it takes: every consumer the server names belongs to a registration of the stream, and none exceeds an `InactiveThreshold` limit. Otherwise `Start` fails and no consumer was changed, so instances of the previous version keep running as they were.
+- **`Consumer.MaxAckPending` must not exceed the limit**, or the server rejects the consumer (`consumer max ack pending exceeds system limit`). Zero takes the limit; `-1` (no limit of its own) is accepted by the server as it is.
+- **A consumer the application does not register is never changed.** If another application's consumer, or one left behind by a rename, exceeds the limit, `Start` fails with an error that says so and wraps the server's, which names the consumer. Change it (`nats consumer edit <stream> <consumer>`) or remove it, then start again.
+- **`ConsumerLimits.InactiveThreshold` is never applied by lowering a consumer.** If an existing consumer exceeds it, `Start` fails with a clear error. Set `Consumer.InactiveThreshold` in one deployment and the stream's limit in the next.
+- **Registrations that share a stream should use the same limits.** Each registration writes the stream, and the one set up last wins. With different limits the stream is rejected, a consumer lowered and the stream written again at every start.
+
+{% hint style="warning" %}
+**`ConsumerLimits.InactiveThreshold` makes durable consumers disappear.** A consumer whose own `InactiveThreshold` is zero inherits the stream's limit, and the server deletes a consumer that is not pulled for that long, **with its position**. The framework pulls continuously while the application runs, so this happens when every instance is down for longer than the threshold. The next start then creates the consumer again from its deliver policy: with the default, the whole stream is delivered again, and on an interest stream the messages only this consumer still needed are gone. Leave the limit unset unless that is what you want.
+{% endhint %}
 
 ### RegisterCronService
 

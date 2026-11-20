@@ -11,7 +11,6 @@ import (
 
 	"github.com/nats-io/nats.go/jetstream"
 
-	"github.com/go-monolith/mono/internal/eventbus"
 	monoerrors "github.com/go-monolith/mono/pkg/errors"
 	"github.com/go-monolith/mono/pkg/types"
 )
@@ -53,6 +52,10 @@ type StreamRegistration struct {
 	// CallerFilter reports whether the registration's consumer configuration
 	// carries a subject filter of the caller's, which the framework keeps.
 	CallerFilter bool
+
+	// Filters holds that filter: the caller's FilterSubject and
+	// FilterSubjects. It is empty when CallerFilter is false.
+	Filters []string
 
 	// Event reports whether the registration is an event stream consumer
 	// rather than a stream consumer service.
@@ -125,6 +128,7 @@ func StreamRegistrations(services []*types.ServiceEntry, events []types.EventStr
 			Stream:       entry.StreamConsumerConfig.Stream,
 			Consumer:     StreamConsumerServiceDurable(entry),
 			CallerFilter: hasSubjectFilter(entry.StreamConsumerConfig.Consumer),
+			Filters:      callerFilters(entry.StreamConsumerConfig.Consumer),
 		})
 	}
 	names := eventStreamConsumerNames(events)
@@ -134,6 +138,7 @@ func StreamRegistrations(services []*types.ServiceEntry, events []types.EventStr
 			Stream:       entry.Config.Stream,
 			Consumer:     names[i],
 			CallerFilter: hasSubjectFilter(entry.Config.Consumer),
+			Filters:      callerFilters(entry.Config.Consumer),
 			Event:        true,
 		})
 	}
@@ -149,7 +154,14 @@ func StreamRegistrations(services []*types.ServiceEntry, events []types.EventStr
 //   - wrapping ErrInvalidConfiguration when two of their subjects overlap
 //     without one covering the other (see CheckStreamSubjects), or when one
 //     of them seals a stream that runs message schedules (see
-//     CheckSealedStream).
+//     CheckSealedStream);
+//   - wrapping ErrWorkQueueConsumerConflict when two of them put a consumer
+//     on the same subjects of a work-queue stream (see
+//     CheckWorkQueueConsumers).
+//
+// It also returns an error, wrapping ErrStreamSubjectsOverlap, when two
+// streams of the plan would listen on overlapping subjects (see
+// CheckStreamsDisjoint).
 func NewStreamPlan(regs []StreamRegistration) (*StreamPlan, error) {
 	if err := CheckStreamRegistrations(regs); err != nil {
 		return nil, err
@@ -180,7 +192,22 @@ func NewStreamPlan(regs []StreamRegistration) (*StreamPlan, error) {
 		}
 		stream.Subjects = MinimiseSubjects(all)
 	}
+	if err := plan.CheckStreamsDisjoint(); err != nil {
+		return nil, err
+	}
+	if err := plan.CheckWorkQueueConsumers(); err != nil {
+		return nil, err
+	}
 	return plan, nil
+}
+
+// callerFilters returns the subject filters a consumer configuration carries.
+func callerFilters(cfg types.ConsumerConfig) []string {
+	filters := slices.Clone(cfg.FilterSubjects)
+	if cfg.FilterSubject != "" {
+		filters = append(filters, cfg.FilterSubject)
+	}
+	return filters
 }
 
 // hasSubjectFilter reports whether a consumer configuration carries a subject
@@ -269,6 +296,16 @@ func withRegistrationFilter(cfg types.ConsumerConfig, filters []string) types.Co
 	cfg.FilterSubject, cfg.FilterSubjects = splitFilters(filters)
 	cfg.Metadata = withMetadata(cfg.Metadata, FilterMetadataKey, FilterMetadataValue)
 	return cfg
+}
+
+// EffectiveFilters returns the subject filters the consumer of reg is sent
+// with: the caller's own, or the registration's subjects on a shared stream
+// (see FilterConsumer, which decides it). Nothing means the consumer is not
+// filtered and gets every message of its stream.
+func (p *StreamPlan) EffectiveFilters(reg StreamRegistration) []string {
+	var cfg types.ConsumerConfig
+	cfg.FilterSubject, cfg.FilterSubjects = splitFilters(reg.Filters)
+	return callerFilters(p.FilterConsumer(reg.Stream.Name, reg.Stream.Subjects, cfg))
 }
 
 // KeepRegistrationFilter returns cfg filtered on own, the subjects of the
@@ -385,15 +422,10 @@ func (p *StreamPlan) FilterExistingConsumers(ctx context.Context, name string, s
 		}
 		cfg.FilterSubject, cfg.FilterSubjects = splitFilters(want)
 		cfg.Metadata = withMetadata(cfg.Metadata, FilterMetadataKey, FilterMetadataValue)
-		_, err = stream.UpdateConsumer(ctx, cfg)
-		if errors.Is(err, jetstream.ErrConsumerMultipleFilterSubjectsNotSupported) {
-			// A server that recovered the consumer from its store answers
-			// the first update that adds several filters with the
-			// configuration from before, although it applied them; the
-			// consumer is read back to tell.
-			_, err = eventbus.AppliedDespiteStaleAnswer(ctx, cfg, err, stream.Consumer)
-		}
-		if err != nil {
+		if err := updateExistingConsumer(ctx, stream, cfg); err != nil {
+			// On a work-queue stream, a consumer that already covers the
+			// filter is named, with the way out.
+			err = p.ExplainWorkQueueConflict(ctx, stream, name, reg.Consumer, want, reg.Owner, err)
 			return fmt.Errorf("failed to filter consumer %s on shared stream %s: %w", reg.Consumer, name, err)
 		}
 	}
