@@ -55,6 +55,7 @@ requestid.New(
 When a request arrives at a service handler:
 
 1. The middleware checks for an existing request ID in the message header (default: `X-Request-ID`)
+   - The header is written by the sender, so the ID is sanitised first: at most 128 bytes of ASCII letters, digits and `-_.:/=+@~`, every other byte replaced by `_`
 2. If found, the existing ID is used
 3. If not found, a new UUID is generated
 4. The request ID is injected into the handler's `context.Context`

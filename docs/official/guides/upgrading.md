@@ -202,6 +202,57 @@ See [`Start`](../api/framework.md#start) and [`Stop`](../api/framework.md#stop).
 - **`audit.VerifyChain`** accepts the untampered log of a normal run; it rejected every log that held a clean `module.stopped` entry. Existing logs verify without being rewritten. See [Verifying Audit Log Integrity](../middleware/audit.md#verifying-audit-log-integrity).
 - **fs-jetstream:** a `Put` whose context is cancelled or times out no longer leaves its chunks in the bucket, where they counted towards `MaxBytes` and could not be removed. Chunks left behind by earlier versions are not removed automatically. For a deadline that passes during the upload `Put` now returns `context.DeadlineExceeded` instead of `nats: timeout`. See [Uploads That Are Given Up](../plugins/fs-jetstream.md#uploads-that-are-given-up).
 
+### A `Stop` that ignores its context no longer holds the shutdown (v0.2.18)
+
+*v0.2.18.* The `Stop` of a module, middleware module or plugin that did not return kept the application's `Stop` blocked past the shutdown timeout: the modules after it were not stopped and NATS never was.
+
+- **Such a `Stop` is now abandoned** 250ms after its context ended. It is left running in its goroutine, `Stop` goes on with the other modules and NATS, and returns an error wrapping `monoerrors.ErrStopAbandoned` that names the module.
+- **A `Stop` that honours its context is not affected**: it returns when the context ends, and its own error is reported.
+- **`WrapModuleStopFailed` errors now wrap the `Stop`'s own error**, so `errors.Is(err, context.DeadlineExceeded)` and the like find it; the message is unchanged.
+
+See [`Stop`](../api/framework.md#stop).
+
+### A `Start` retried after a failed one works (v0.2.18)
+
+*v0.2.18.* After a failed `Start` the application returns to the created state and `Start` may be called again, but what the failed attempt had registered stayed:
+
+- **Events:** with an `EventEmitterModule` every retry failed with `event ... already registered`. Without one, event consumers were registered a second time: a second subscription in the queue group and a second durable (`...-2`), so a stored event was handled once per attempt. The event registry is now put back as `Start` found it.
+- **Channel services:** the routers of the failed attempt kept running and took replies meant for the consumers of the retry. They now end with the attempt.
+- **Audit middleware:** every retry failed with `audit module already started`. **Access log middleware:** it started but logged nothing.
+- **A `Start` while an abandoned `Stop` is still running** (see above) fails with `monoerrors.ErrStopAbandoned`.
+
+Custom middleware whose `Stop` gives up something it cannot get back can implement [`types.RollbackAwareMiddleware`](../middleware/README.md#middleware-lifecycle), as the built-in ones do.
+
+### Audit middleware: failed writes, `Stop` and large saves (v0.2.18)
+
+*v0.2.18.*
+
+- **A write that fails is reported.** `SaveAuditTrail` counted an entry as saved when the write to the log had failed, and the hash chain had already advanced over it, so every later entry failed `audit.VerifyChain`. The entry is now not counted, the error is returned, and the chain continues from the last entry that is in the log.
+- **`Stop` writes what was accepted.** Entries sent with `AsyncSaveAuditTrail` right before `Stop` were dropped (2 to 4 of 100 were written), and a save after `Stop` panicked on a closed channel. `Stop` now writes the accepted entries, and a save after `Stop` does not panic: `SaveAuditTrail` returns an error when its context ends, so give it a context with a deadline.
+- **`SaveAuditTrail` with many entries completes.** With more than about 200 entries it lost confirmations and waited until its context ended.
+- **On a context that ends**, `SaveAuditTrail` returns the number of entries confirmed so far; it returned 0 before.
+- **After `Stop` closed the log file**, `Start` on the same module fails with `audit.ErrOutputClosed` (access log: `accesslog.ErrOutputClosed`). Build a new module with `New` for a new application.
+
+See [Audit Middleware](../middleware/audit.md#custom-audit-entries).
+
+### Request IDs from message headers are sanitised (v0.2.18)
+
+*v0.2.18.* The request ID header is written by the sender of a message, which includes any client that can reach the NATS port. The access log wrote it into every line as it came: a value with spaces forged fields of a text line (`x module=billing status=success`), control characters reached the terminal, and a 900 KB value made a 900 KB line. The request ID middleware put the same value into the handler's context and into every nested call.
+
+- **Both middleware now keep at most 128 bytes** of ASCII letters, digits and `-_.:/=+@~`, and replace every other byte with `_`. UUIDs, ULIDs, trace IDs and base64 values are unchanged.
+- **An ID with other characters changes** (a space or a non-ASCII letter becomes `_`), in the context, in nested calls and in the log alike.
+
+See [Request ID Middleware](../middleware/requestid.md#how-it-works).
+
+### Other fixes in v0.2.18
+
+- **Cron:** a handler that ran longer than 30 seconds had its occurrence delivered again while it was still running: to another instance at once, so the job ran twice at the same time. The framework now tells the server every 10 seconds that the occurrence is in progress. See [`RegisterCronService`](../api/container.md#registercronservice).
+- **A consumer deleted under a running application** (`nats consumer rm`, or a consumer the server removes after its inactivity threshold) left its fetch loop logging a `no responders` warning every 10 seconds, as for a failure that clears by itself. It is now logged once at Error (`Consumer no longer exists`), with a reminder every 5 minutes: the instance consumes nothing from it until it is restarted or the consumer exists again. See [Changing a Consumer Setting That Cannot Be Changed](../api/container.md#changing-a-consumer-setting-that-cannot-be-changed).
+- **kv-jetstream:** with `RecreateOnStorageMismatch`, a bucket whose name starts with `KV_` (say `KV_x`) was backed up from the bucket `x` and then deleted without a copy of its own keys. The backup now copies the bucket's own stream, and a backup that copies another stream is never accepted.
+- **kv-jetstream and fs-jetstream:** a backup bucket left attached by a recreate that was interrupted kept copying everything the recreated bucket received. Such backups are detached at the next recreate (they are kept, and logged at Warn).
+- **kv-jetstream:** `Keys` returned a shorter list and a nil error when its context ended during the listing. It now returns the context's error.
+- **AutoTLS:** one connection held open on the ACME challenge port (a request whose body never arrives) blocked `Stop` until the client went away. The challenge server now limits reading, writing and idle connections, and is closed after 2 seconds of shutdown.
+
 ## New Features
 
 All optional.
@@ -221,6 +272,10 @@ All optional.
 | [`monoerrors.ErrWorkQueueConsumerConflict`](../api/container.md#work-queue-streams-one-consumer-per-subject), [`monoerrors.ErrStreamSubjectsOverlap`](../api/container.md#renaming-a-stream-or-switching-a-service-between-stream-consumer-and-cron) | v0.2.16 | `Start` errors for a second consumer on the same subjects of a work-queue stream, and for a stream that asks for subjects another stream holds. Both failed before as well, with the server's error; nothing is deleted |
 | `helper.DecodeBatch`, `helper.ErrUndecodableMessage` | v0.2.17 | Decode a batch leaving out the messages that fail to unmarshal; the error the typed batch handlers return for such a batch |
 | `audit.CanonicalDetails`, `audit.HashEntry`, `audit.LegacyEmptyDetailsHash` | v0.2.17 | The form an audit entry's details are hashed in, and the hash earlier versions gave an entry with empty details |
+| `monoerrors.ErrStopAbandoned` | v0.2.18 | The error `Stop` returns for a module, middleware module or plugin whose `Stop` did not return after its context ended, and `Start` while such a `Stop` is still running |
+| [`types.RollbackAwareMiddleware`](../middleware/README.md#middleware-lifecycle) | v0.2.18 | Optional `RollbackStart(ctx)` of a middleware module, called instead of `Stop` when a failed `Start` is rolled back, so the middleware can be started again |
+| `audit.ErrOutputClosed`, `accesslog.ErrOutputClosed` | v0.2.18 | `Start` of a module whose log `Stop` has closed |
+| `audit.HashChain.Next`, `Commit`, `audit.ConfirmationError` | v0.2.18 | Compute the next entry of a chain and advance the chain once it is written; the error a confirmation of the audit-trail service reports |
 | [`WithNATSSystemAccount(user, password)`](../api/framework.md#withnatssystemaccount) | v0.2.2 | A system account user for `nats server report` and `nats server raft peer-remove`. Clients that send credentials of their own are rejected once it is on, unless they are the system account user's |
 | `mono.ServiceLookup` | v0.1.2 | The read side of `ServiceContainer`, accepted by the typed contracts and helpers |
 | [`monotest.CheckImports`](module-boundaries.md#checking-imports) | v0.1.2 | Checks the contract package import rule; put the test in the application's root directory |

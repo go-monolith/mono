@@ -57,6 +57,9 @@ Starts plugins, middleware and all registered modules in dependency order (the e
 - `application already stopped, cannot restart` after `Stop`.
 - `application is already starting` for a second `Start` while one is running, and `application is stopping, cannot start` during `Stop`. Only one `Start` runs at a time.
 - An error wrapping `context.Canceled` when `Stop` was called while `Start` was running (see [`Stop`](#stop)).
+- An error wrapping `monoerrors.ErrStopAbandoned` while the `Stop` of a module that an earlier stop or rollback gave up on is still running (see [`Stop`](#stop)).
+
+After a failed `Start` the application is back in `StateCreated` and `Start` may be called again. Since v0.2.18 the retry finds nothing of the failed attempt: the events and event consumers it registered are forgotten, its channel routers have ended, and the built-in audit and access log middleware start again with their log still open.
 
 When `Start` fails, what it had started is stopped with a context of its own, not with `ctx`: `ctx` has usually ended by then, and a module's `Stop` given an ended context would skip its cleanup. That context is bounded by the shutdown timeout ([`WithShutdownTimeout`](#withshutdowntimeout), default 30 seconds). A `Stop` that aborts the start hands over its own bound: the stopping ends when that `Stop`'s context does.
 
@@ -76,6 +79,12 @@ Gracefully shuts down the application, in this order:
 4. Stops NATS.
 
 The configured shutdown timeout bounds the whole operation when `ctx` has no deadline. See [`WithShutdownTimeout`](#withshutdowntimeout) and [`WithShutdownDrainTimeout`](#withshutdowndraintimeout).
+
+**A module `Stop` that does not return** (since v0.2.18; before, it held the shutdown for as long as it ran, with NATS never stopped):
+
+- Each `Stop` of a module, middleware module or plugin is waited for until its context has ended and 250ms more. A `Stop` that honours its context returns in that time and is reported as it is.
+- One that has not returned by then is abandoned: it keeps running in its goroutine, the shutdown goes on with the other modules and then NATS, and `Stop` returns an error wrapping `monoerrors.ErrStopAbandoned` that names it. Its eventual return is logged at Warn.
+- The abandoned `Stop` runs on after NATS has stopped, so whatever it still does with the event bus fails. Make `Stop` return when its context ends.
 
 **Calls that overlap** (since v0.2.17; before, each of them ran, see the [upgrade guide](../guides/upgrading.md#start-and-stop-are-guarded-against-each-other-v0217)):
 

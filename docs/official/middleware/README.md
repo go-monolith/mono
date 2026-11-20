@@ -97,6 +97,15 @@ The audit middleware is not on the request path: it only records registrations a
 
 - The framework calls `Start`, `Stop`, the hooks and, when the middleware implements `ServiceProviderModule`, `RegisterServices` on a bound container of its own (before `Start`; the middleware's own registrations are not passed through the chain). A module that lists the middleware in `Dependencies()` receives that container in `SetDependencyServiceContainer`, as it would a module's. The framework does not call `SetDependencyServiceContainer`, `SetEventBus` or `RegisterEventConsumers` on a middleware.
 - `OnConfigurationChange` is deprecated and never called: the framework's configuration does not change at runtime. Implement it as a pass-through.
+- **A failed `Start` of the application** stops the middleware that had started, and the application may be started again with the same middleware. A middleware whose `Stop` gives up something it cannot get back (the built-in audit and access log middleware close their log file) can implement the optional `types.RollbackAwareMiddleware` (since v0.2.18): the framework then calls `RollbackStart(ctx)` instead of `Stop` for that rollback, and `Stop` only when the application stops.
+
+```go
+// RollbackStart stops the middleware after a failed application Start and
+// leaves it able to be started again.
+func (m *MyMiddleware) RollbackStart(ctx context.Context) error {
+    return m.flush() // keep the output open; Stop closes it
+}
+```
 
 ## Middleware vs Modules
 
