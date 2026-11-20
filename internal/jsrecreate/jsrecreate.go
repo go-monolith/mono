@@ -492,6 +492,9 @@ func completeBackup[T any](ctx context.Context, s Spec[T], backup string, info *
 			return false, err
 		}
 		if done {
+			if err := checkNothingSkipped(ctx, s, backupStream, backup, streamName, info.State.LastSeq); err != nil {
+				return false, err
+			}
 			bcfg := binfo.Config
 			bcfg.Sources = nil
 			updated, err := s.JS.UpdateStream(ctx, bcfg)
@@ -515,6 +518,45 @@ func completeBackup[T any](ctx context.Context, s Spec[T], backup string, info *
 		case <-ticker.C:
 		}
 	}
+}
+
+// checkNothingSkipped refuses a backup that holds fewer messages than the
+// bucket. The copy counts as complete by the source sequence of the backup's
+// last message, which does not see a message skipped before it: the backup
+// stream drops a message that carries the Nats-Msg-Id of another one it
+// stored within its duplicate window, and the whole copy fits into that
+// window. (KV and object store writes carry no such ID; a foreign writer
+// that sets and reuses one does.) The bucket would then be deleted with a
+// key that is in no backup.
+//
+// The counts can only be compared when nothing was written to the bucket
+// since it was read (its last sequence is still lastSeq): then every message
+// it holds had to be copied, while the backup may hold more (messages that
+// expired or were removed from the bucket after they were copied). When the
+// bucket was written to in the meantime, as by instances of another version
+// during a rolling deploy, the check is skipped, as it cannot tell a skipped
+// message from one that is yet to be copied; that case is as it was.
+func checkNothingSkipped[T any](ctx context.Context, s Spec[T], backupStream jetstream.Stream, backup, streamName string, lastSeq uint64) error {
+	cur, err := s.Streams.StreamInfo(ctx, streamName)
+	if err != nil || cur == nil {
+		// A stream that is gone, or cannot be read, is dealt with by the
+		// repair check before the delete.
+		return nil
+	}
+	if cur.State.LastSeq != lastSeq {
+		return nil
+	}
+	binfo, err := backupStream.Info(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to read backup bucket %q: %w", backup, err)
+	}
+	if binfo.State.Msgs >= cur.State.Msgs {
+		return nil
+	}
+	return fmt.Errorf("backup bucket %q holds fewer messages (%d) than stream %s (%d): some were not copied, "+
+		"as happens to a message that reuses the Nats-Msg-Id of another one (the backup drops it as a duplicate). "+
+		"The %s cannot be backed up this way: remove stream %s by hand, or set SkipBackupOnRecreate",
+		backup, binfo.State.Msgs, streamName, cur.State.Msgs, s.Kind, streamName)
 }
 
 // backupCopied reports whether the backup described by binfo has copied the

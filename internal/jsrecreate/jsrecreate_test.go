@@ -368,11 +368,16 @@ func TestOpen_BackupFailures(t *testing.T) {
 		js := startJetStream(t)
 		fileBucket(t, js, "locks", 2)
 		real := StreamAPI{JS: js}
+		// As first read, the stream held 10 more messages, which have
+		// expired since: its last sequence stays, its count went down.
+		reads := 0
 		info := func(ctx context.Context, name string) (*jetstream.StreamInfo, error) {
 			i, err := real.StreamInfo(ctx, name)
 			if err == nil {
 				i.State.LastSeq += 10
-				i.State.Msgs += 10
+				if reads++; reads == 1 {
+					i.State.Msgs += 10
+				}
 			}
 			return i, err
 		}
@@ -795,4 +800,67 @@ func TestCompleteBackup_DetachedByAnotherInstance(t *testing.T) {
 			t.Fatalf("completeBackup = %v, %v, want repaired", repaired, err)
 		}
 	})
+}
+
+// TestOpen_BackupThatSkippedAMessage: the backup stream drops a message that
+// carries the Nats-Msg-Id of another one it stored within its duplicate
+// window (two minutes; the copy takes a moment). When the skipped message is
+// not the last, the copy looked complete and the bucket was deleted with a
+// key that was in no backup. A backup that holds fewer messages than the
+// bucket is not accepted.
+func TestOpen_BackupThatSkippedAMessage(t *testing.T) {
+	js := startJetStream(t)
+	ctx := context.Background()
+	fileBucket(t, js, "locks", 1)
+	// The bucket deduplicates too, within its own window: shorten it, so
+	// that two messages with one ID are both stored, as they are when a
+	// foreign writer reuses an ID after the window.
+	stream, err := js.Stream(ctx, "KV_locks")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := stream.CachedInfo().Config
+	cfg.Duplicates = 100 * time.Millisecond
+	if _, err := js.UpdateStream(ctx, cfg); err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"first", "second"} {
+		if _, err := js.Publish(ctx, "$KV.locks."+key, []byte("v"), jetstream.WithMsgID("same-id")); err != nil {
+			t.Fatal(err)
+		}
+		time.Sleep(300 * time.Millisecond)
+	}
+	if _, err := js.Publish(ctx, "$KV.locks.last", []byte("v")); err != nil {
+		t.Fatal(err)
+	}
+	if stream, err = js.Stream(ctx, "KV_locks"); err != nil {
+		t.Fatal(err)
+	}
+	if msgs := stream.CachedInfo().State.Msgs; msgs != 4 {
+		t.Fatalf("the bucket holds %d messages, want the four that were written", msgs)
+	}
+
+	deletes := 0
+	var logs bytes.Buffer
+	spec := kvSpec(js, fakeStreams{StreamAPI: StreamAPI{JS: js}, deletes: &deletes}, "locks", Options{Recreate: true}, &logs)
+	_, err = Open(ctx, spec)
+	if err == nil {
+		kv, kvErr := js.KeyValue(ctx, backups(t, js, "locks")[0])
+		if kvErr != nil {
+			t.Fatal(kvErr)
+		}
+		if _, getErr := kv.Get(ctx, "second"); getErr != nil {
+			t.Fatalf("the bucket was recreated although its backup lacks a key: %v", getErr)
+		}
+		return
+	}
+	if !errors.Is(err, errMismatch) || !strings.Contains(err.Error(), "fewer messages") {
+		t.Fatalf("err = %v, want the backup refused as incomplete", err)
+	}
+	if deletes != 0 {
+		t.Fatalf("the bucket's stream was deleted %d time(s)", deletes)
+	}
+	if left := backups(t, js, "locks"); len(left) != 0 {
+		t.Fatalf("backups left behind: %v", left)
+	}
 }
