@@ -615,6 +615,9 @@ func TestStreamPlan_InactiveThresholdLimit(t *testing.T) {
 // threshold from its stream, and only about that.
 func TestSetupStreamConsumers_InheritedInactiveThreshold(t *testing.T) {
 	warnings := func(logger *mockLogger) []string {
+		// The fetch loops started by the setup log as well.
+		logger.mu.Lock()
+		defer logger.mu.Unlock()
 		var found []string
 		for _, entry := range logger.entries {
 			if strings.HasPrefix(entry, "WARN: "+InheritedInactiveThresholdWarning) {
