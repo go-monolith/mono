@@ -484,6 +484,49 @@ func eventStreamConfig(cfg types.StreamConfig, marked bool) types.StreamConfig {
 	return cfg
 }
 
+// plannedEventStreamConfig returns the stream configuration written for an
+// event stream consumer registered by owner: cfg with the framework defaults
+// and the default replicas, the subjects of every registration of the stream
+// (see StreamPlan), the registration marker and, when migrated, the legacy
+// migration marker. Every write of the stream must use it, since a write
+// replaces the whole configuration.
+func (lm *lifecycleManager) plannedEventStreamConfig(cfg types.StreamConfig, migrated bool, owner string) types.StreamConfig {
+	cfg = eventStreamConfig(cfg, migrated)
+	cfg.Replicas = lm.streamReplicas(cfg.Replicas)
+	cfg.Subjects = lm.streamPlan.Subjects(cfg.Name, cfg.Subjects)
+	cfg.Metadata = WithRegistrationMarker(cfg.Metadata, lm.streamPlan.Marker(cfg.Name, owner))
+	return cfg
+}
+
+// keepLegacyMigrationMarker returns metadata, a map of the caller's that may
+// be modified, with the legacy migration marker of the named stream when the
+// stream carries it. A stream write replaces the metadata, and a stream
+// consumer service is set up before the event stream consumers are planned:
+// on a stream the service shares with an event stream consumer, its write
+// would otherwise remove the marker and the migration would run again on
+// every start.
+//
+// The stream is only read when the plan has an event stream consumer on it,
+// so a service with a stream of its own costs no request.
+func (lm *lifecycleManager) keepLegacyMigrationMarker(ctx context.Context, es types.EventStream, stream string, metadata map[string]string) (map[string]string, error) {
+	planned := lm.streamPlan.Stream(stream)
+	if planned == nil || !planned.HasEvents {
+		return metadata, nil
+	}
+	store, ok := es.(eventConsumerStore)
+	if !ok {
+		return metadata, nil
+	}
+	existing, err := store.StreamMetadata(ctx, stream)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read metadata of stream %s: %w", stream, err)
+	}
+	if existing[legacyMigrationMarkerKey] == legacyMigrationMarkerValue {
+		metadata[legacyMigrationMarkerKey] = legacyMigrationMarkerValue
+	}
+	return metadata, nil
+}
+
 // markLegacyMigrationDone writes the migration marker on every stream that did
 // not carry it yet, once all event stream consumers are set up. A failure is
 // only logged: the consumers are running, and the next boot repeats the
@@ -511,10 +554,11 @@ func (lm *lifecycleManager) markLegacyMigrationDone(ctx context.Context, entries
 		last[stream] = i
 	}
 	for _, stream := range order {
-		cfg := eventStreamConfig(entries[last[stream]].Config.Stream, true)
-		// The same replicas setupEventStreamConsumer wrote: a 0 here would
-		// scale a stream created with the default replicas back to one.
-		cfg.Replicas = lm.streamReplicas(cfg.Replicas)
+		// The same configuration setupEventStreamConsumer wrote, with the
+		// marker added: replicas (a 0 here would scale a stream created with
+		// the default replicas back to one), the subjects of every
+		// registration of the stream, and the registration marker.
+		cfg := lm.plannedEventStreamConfig(entries[last[stream]].Config.Stream, true, eventStreamOwner(entries[last[stream]]))
 		if _, err := es.CreateOrUpdateStream(ctx, cfg); err != nil {
 			lm.logger.Warn("Could not mark stream as migrated; the legacy durable migration runs again on the next boot",
 				"stream", stream,

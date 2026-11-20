@@ -129,36 +129,3 @@ func eventStreamOwner(entry types.EventStreamConsumerEntry) string {
 	}
 	return fmt.Sprintf("event stream consumer of module %s for event %s.%s", module, entry.EventDef.ModuleName, entry.EventDef.Name)
 }
-
-// checkEventStreamRegistrations returns an error wrapping
-// ErrStreamConfigImmutable when two event stream consumer registrations name
-// the same stream with different storage types, or with retention policies of
-// which exactly one is work-queue. Every registration writes the stream
-// configuration, so the second one would be rejected by the server; checking
-// the registrations first fails before anything is created, on a new
-// deployment too, and names both of them. Other settings may differ: they can
-// be updated, and the last registration wins, as before.
-func checkEventStreamRegistrations(entries []types.EventStreamConsumerEntry) error {
-	first := make(map[string]int, len(entries))
-	for i, entry := range entries {
-		stream := entry.Config.Stream
-		j, seen := first[stream.Name]
-		if !seen {
-			first[stream.Name] = i
-			continue
-		}
-		other := entries[j].Config.Stream
-		diffs := immutableStreamDiff(
-			jetStreamStorage(other.Storage), jetStreamStorage(stream.Storage),
-			jetStreamRetention(other.Retention), jetStreamRetention(stream.Retention),
-			"the first with", "the second with")
-		if len(diffs) == 0 {
-			continue
-		}
-		return fmt.Errorf("%w: stream %s is registered by the %s and by the %s, %s; "+
-			"NATS cannot change the storage type of an existing stream, or its retention to or from work-queue, "+
-			"so every registration of a stream must agree on them",
-			monoerrors.ErrStreamConfigImmutable, stream.Name, eventStreamOwner(entries[j]), eventStreamOwner(entry), strings.Join(diffs, ", and "))
-	}
-	return nil
-}

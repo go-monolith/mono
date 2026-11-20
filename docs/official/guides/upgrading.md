@@ -106,6 +106,26 @@ This includes non-durable consumers your application creates itself. The server 
 
 *v0.1.2.* `Entries()` on the container passed to `SetDependencyServiceContainer` returns deep copies without handlers and channels (nil). A module that read `RequestHandler`, `QueueHandlers[i].Handler`, `InChannel` or `OutChannel` from a dependency now finds nil; use `GetRequestReplyService`, `GetQueueGroupService`, `GetStreamConsumerService` or `GetChannelService`. The framework logs one warning for the first such call per dependency. `app.Services(name).Entries()` in the host program is unchanged.
 
+### Registrations that share a stream no longer overwrite each other (v0.2.13)
+
+*v0.2.13.* Registrations that name the same stream but listen on different subjects (two stream consumer services, two events, or a service and an event) used to overwrite each other's subjects: only one registration's messages were stored, and the handlers received each other's messages. The stream is now written with the subjects of all of them and each consumer is filtered on its own.
+
+- **Existing deployments** are repaired at the next start. Durable consumers keep their position. Messages that were never stored cannot be recovered.
+- **Handlers stop receiving foreign messages.** A handler that relied on receiving another registration's messages must register for them.
+- **Nothing changes** for a registration with a stream of its own, or for registrations with the same subjects on one stream.
+- **Setup order:** services are now set up in name order, so which registration's other stream settings win no longer varies between starts.
+- **A configuration that used to start may now fail.** Two registrations on one stream whose subjects overlap without one covering the other (`a.*.c` and `a.b.*`) started before, because each write replaced the other's subjects, and one of them lost its messages. `Start` now fails with `ErrInvalidConfiguration`, naming both registrations. Give them subjects that do not overlap, or separate streams.
+
+See [Sharing a Stream Between Registrations](../api/container.md#sharing-a-stream-between-registrations).
+
+### Adding several filters to an existing consumer no longer fails once (v0.2.13)
+
+*v0.2.13.* Adding `Consumer.FilterSubjects` with two or more subjects to a consumer that already existed failed the first `Start` after a restart with `multiple consumer filter subjects not supported by nats-server`, and the next `Start` succeeded: the server had applied the filters but answered with the earlier configuration. The framework now reads the consumer back and accepts the update when the filters are in place.
+
+### Leftover streams and consumers are reported (v0.2.13)
+
+*v0.2.13.* The framework adds a metadata entry (`mono.registration`) to the streams and durable consumers it creates, in place at the next start, and logs a warning at every start for each marked one that no registration uses any more (after a module, service or event was renamed or removed). Nothing is deleted. Leftovers from before v0.2.13 are not recognised. The report runs during `Start` and can add up to 10 seconds when JetStream answers slowly, so allow for it in a startup probe. See [Renaming or Removing a Stream Registration](../api/container.md#renaming-or-removing-a-stream-registration).
+
 ## New Features
 
 All optional.

@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"reflect"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -47,6 +49,7 @@ type lifecycleManager struct {
 	jsReadyTimeout             time.Duration                 // JetStream wait and setup retry budget (0 = default)
 	jsDefaultReplicas          int                           // replicas of framework-created streams left at 0 (0 = 1)
 	streamConsumers            map[string]context.CancelFunc // cancel funcs for stream consumer fetch loops
+	streamPlan                 *StreamPlan                   // registrations per stream of this start (see NewStreamPlan); nil plans nothing
 	queueGroupOptimisticWindow time.Duration                 // Optimistic publish window for queue groups
 	defaultServiceConcurrency  int                           // MaxConcurrency for subscriptions that leave it at 0 (0 = built-in default)
 	pools                      map[string][]*workerpool.Pool // worker pools of request-reply, queue group and event consumer subscriptions, by module
@@ -1054,12 +1057,37 @@ func (lm *lifecycleManager) setupNATSSubscriptions(ctx context.Context) error {
 		return err
 	}
 
+	// Containers and their services are set up in name order, so that the
+	// same registrations are set up in the same order on every start.
+	moduleNames := slices.Sorted(maps.Keys(containers))
+	entriesOf := make(map[string][]*types.ServiceEntry, len(containers))
+	var streamServices []*types.ServiceEntry
+	for _, moduleName := range moduleNames {
+		entries := containers[moduleName].Entries()
+		sort.Slice(entries, func(i, j int) bool { return entries[i].Name < entries[j].Name })
+		entriesOf[moduleName] = entries
+		streamServices = append(streamServices, entries...)
+	}
+
+	// Plan the streams before the first one is written: registrations that
+	// share a stream each write its configuration, and the plan gives every
+	// write the subjects of all of them.
+	var streamEvents []types.EventStreamConsumerEntry
+	if lm.eventRegistry != nil {
+		streamEvents = lm.eventRegistry.StreamConsumerEntries()
+	}
+	plan, err := NewStreamPlan(StreamRegistrations(streamServices, streamEvents))
+	if err != nil {
+		return fmt.Errorf("failed to plan stream registrations: %w", err)
+	}
+	lm.streamPlan = plan
+
 	// Track cron stream names registered this boot for best-effort orphan
 	// detection after all services are set up.
 	registeredCronStreams := make(map[string]struct{})
 
-	for moduleName, moduleContainer := range containers {
-		entries := moduleContainer.Entries()
+	for _, moduleName := range moduleNames {
+		entries := entriesOf[moduleName]
 
 		for _, entry := range entries {
 			switch entry.Type {
@@ -1342,13 +1370,8 @@ func (lm *lifecycleManager) setupNATSSubscriptions(ctx context.Context) error {
 		// These use JetStream durable pull consumers for at-least-once delivery.
 		// Durable names are planned for all registrations at once so that legacy
 		// durables shared between registrations can be recognized.
-		streamConsumers := lm.eventRegistry.StreamConsumerEntries()
+		streamConsumers := streamEvents
 		if len(streamConsumers) > 0 {
-			// Registrations of one stream must agree on the settings NATS
-			// cannot change afterwards; checked before anything is created.
-			if err := checkEventStreamRegistrations(streamConsumers); err != nil {
-				return fmt.Errorf("failed to plan event stream consumers: %w", err)
-			}
 			var durables []eventStreamDurable
 			if err := lm.retryJetStream(ctx, "plan event stream consumers", func(ctx context.Context) error {
 				var err error
@@ -1370,6 +1393,10 @@ func (lm *lifecycleManager) setupNATSSubscriptions(ctx context.Context) error {
 			lm.markLegacyMigrationDone(ctx, streamConsumers, durables)
 		}
 	}
+
+	// Best-effort: report streams and durable consumers the framework created
+	// for a registration that this application no longer has.
+	lm.ReportLeftovers(ctx)
 
 	// Services protocol responders, after every request-reply subscription is
 	// recorded so stats are never requested for an unknown endpoint.
@@ -2075,18 +2102,33 @@ func (lm *lifecycleManager) setupStreamConsumer(ctx context.Context, entry *type
 		streamCfg.Storage = types.FileStorage
 	}
 	streamCfg.Replicas = lm.streamReplicas(streamCfg.Replicas)
-	_, err = es.CreateOrUpdateStream(ctx, streamCfg)
+	// A stream shared with other registrations is written with the subjects
+	// of all of them, and marked as created by the framework.
+	owner := StreamConsumerServiceOwner(entry)
+	streamCfg.Subjects = lm.streamPlan.Subjects(streamCfg.Name, streamCfg.Subjects)
+	streamCfg.Metadata = WithRegistrationMarker(streamCfg.Metadata, lm.streamPlan.Marker(streamCfg.Name, owner))
+	if streamCfg.Metadata, err = lm.keepLegacyMigrationMarker(ctx, es, streamCfg.Name, streamCfg.Metadata); err != nil {
+		return err
+	}
+	stream, err := es.CreateOrUpdateStream(ctx, streamCfg)
 	if err != nil {
 		// A storage type or work-queue retention that differs from the
 		// existing stream's is reported as ErrStreamConfigImmutable.
-		err = explainImmutableStreamChange(ctx, es, streamCfg,
-			fmt.Sprintf("stream consumer service %s.%s", entry.ModuleName, entry.Name), err)
+		err = explainImmutableStreamChange(ctx, es, streamCfg, owner, err)
 		return fmt.Errorf("failed to create stream %s: %w", cfg.Stream.Name, err)
+	}
+	// On a shared stream, the durables that already exist get their filter
+	// before this registration's consumer is created.
+	if err := lm.streamPlan.FilterExistingConsumers(ctx, cfg.Stream.Name, stream); err != nil {
+		return err
 	}
 
 	// Create/Update Consumer (idempotent)
-	consumerName := types.SanitizeConsumerName(entry.ModuleName + "-" + entry.Name)
-	consumerCfg := cfg.Consumer
+	consumerName := StreamConsumerServiceDurable(entry)
+	// On a shared stream the consumer is filtered on the service's own
+	// subjects; the marker lets a later start recognise it.
+	consumerCfg := lm.streamPlan.FilterConsumer(cfg.Stream.Name, cfg.Stream.Subjects, cfg.Consumer)
+	consumerCfg.Metadata = WithRegistrationMarker(consumerCfg.Metadata, owner)
 	// Set required fields that must be managed by the framework. The consumer
 	// is durable (Name and Durable both sent), so the server keeps it, and its
 	// position, across restarts and idle periods; a caller's Name or Durable
@@ -2434,21 +2476,30 @@ func (lm *lifecycleManager) setupEventStreamConsumer(ctx context.Context, entry 
 	// Stream.Subjects is already set to eventDef.Subject during registration.
 	// Writing the configuration replaces the stream's metadata, so a migrated
 	// stream gets its migration marker re-applied.
-	streamCfg := eventStreamConfig(cfg.Stream, durable.migrated)
-	streamCfg.Replicas = lm.streamReplicas(streamCfg.Replicas)
-	_, err = es.CreateOrUpdateStream(ctx, streamCfg)
+	owner := eventStreamOwner(entry)
+	streamCfg := lm.plannedEventStreamConfig(cfg.Stream, durable.migrated, owner)
+	stream, err := es.CreateOrUpdateStream(ctx, streamCfg)
 	if err != nil {
 		// A storage type or work-queue retention that differs from the
 		// existing stream's is reported as ErrStreamConfigImmutable.
-		err = explainImmutableStreamChange(ctx, es, streamCfg, eventStreamOwner(entry), err)
+		err = explainImmutableStreamChange(ctx, es, streamCfg, owner, err)
 		return fmt.Errorf("failed to create stream %s: %w", cfg.Stream.Name, err)
+	}
+	// On a shared stream, the durables that already exist get their filter
+	// before this registration's consumer is created.
+	if err := lm.streamPlan.FilterExistingConsumers(ctx, cfg.Stream.Name, stream); err != nil {
+		return err
 	}
 
 	// Create/Update Consumer (idempotent)
 	// The durable name depends only on the consuming module and the event (see
 	// types.EventStreamConsumerName), so it is the same on every boot.
 	consumerName := durable.name
-	consumerCfg := cfg.Consumer
+	// On a stream shared with other events or services the consumer is
+	// filtered on the event's own subject; the marker lets a later start
+	// recognise it.
+	consumerCfg := lm.streamPlan.FilterConsumer(cfg.Stream.Name, cfg.Stream.Subjects, cfg.Consumer)
+	consumerCfg.Metadata = WithRegistrationMarker(consumerCfg.Metadata, owner)
 	// Set required fields that must be managed by the framework. Durable makes
 	// the server keep the consumer regardless of inactivity; a consumer with a
 	// Name only is non-durable and is deleted after 5s without pull requests.
@@ -2465,6 +2516,12 @@ func (lm *lifecycleManager) setupEventStreamConsumer(ctx context.Context, entry 
 			return err
 		}
 		durable.legacy = nil
+	}
+
+	// A filter the consumer was given while its stream was shared is kept
+	// once the stream is no longer shared.
+	if consumerCfg, err = KeepExistingFilter(ctx, stream, cfg.Stream.Subjects, consumerCfg); err != nil {
+		return err
 	}
 
 	consumer, err := es.CreateOrUpdateConsumer(ctx, cfg.Stream.Name, consumerCfg)

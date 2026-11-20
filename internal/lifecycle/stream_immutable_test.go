@@ -178,7 +178,7 @@ func TestExplainImmutableStreamChange(t *testing.T) {
 	}
 }
 
-func TestCheckEventStreamRegistrations(t *testing.T) {
+func TestCheckStreamRegistrations_Events(t *testing.T) {
 	entry := func(module, stream string, storage types.StorageType, retention types.RetentionPolicy) types.EventStreamConsumerEntry {
 		e := streamEntry(module, stream, paymentProcessedV1)
 		e.Config.Stream.Storage = storage
@@ -248,7 +248,7 @@ func TestCheckEventStreamRegistrations(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := checkEventStreamRegistrations(tt.entries)
+			err := CheckStreamRegistrations(StreamRegistrations(nil, tt.entries))
 			if tt.want == nil {
 				if err != nil {
 					t.Fatalf("error = %v, want nil", err)
