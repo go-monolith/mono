@@ -540,3 +540,72 @@ func TestOpen_AfterCopy(t *testing.T) {
 		}
 	})
 }
+
+func TestIsBackupName(t *testing.T) {
+	made, err := BackupName("locks")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tests := []struct {
+		bucket, name string
+		want         bool
+	}{
+		{"locks", made, true},
+		{"locks", "locks-backup-20260101T000000Z-0123456789abcdef", true},
+		{"locks", "locks-backup-20260101T000000Z-0123456789ABCDEF", false},
+		{"locks", "locks-backup-20260101T000000Z-0123456789abcde", false},
+		{"locks", "locks-backup-20260101T000000Z_0123456789abcdef", false},
+		{"locks", "locks-backup-20261301T000000Z-0123456789abcdef", false},
+		{"locks", "locks-backup-mine", false},
+		{"locks", "locks-backup-", false},
+		{"locks", "locks", false},
+		{"locks", "other-backup-20260101T000000Z-0123456789abcdef", false},
+		{"lock", "locks-backup-20260101T000000Z-0123456789abcdef", false},
+	}
+	for _, tt := range tests {
+		if got := IsBackupName(tt.bucket, tt.name); got != tt.want {
+			t.Errorf("IsBackupName(%q, %q) = %v, want %v", tt.bucket, tt.name, got, tt.want)
+		}
+	}
+}
+
+func TestSourceStream(t *testing.T) {
+	for header, want := range map[string]string{
+		"KV_x 2 $KV.x.> $KV.b.> $KV.x.k": "KV_x",
+		"KV_x":                           "KV_x",
+		"":                               "",
+		"   ":                            "",
+	} {
+		if got := SourceStream(header); got != want {
+			t.Errorf("SourceStream(%q) = %q, want %q", header, got, want)
+		}
+	}
+}
+
+// TestOpen_BackupOfAnotherStream: a backup that copies another stream never
+// counts as a copy of the bucket, so the bucket is not deleted.
+func TestOpen_BackupOfAnotherStream(t *testing.T) {
+	js := startJetStream(t)
+	fileBucket(t, js, "locks", 2)
+	fileBucket(t, js, "other", 5)
+	deletes := 0
+	spec := kvSpec(js, fakeStreams{StreamAPI: StreamAPI{JS: js}, deletes: &deletes}, "locks", Options{Recreate: true}, nil)
+	spec.CreateBackup = func(ctx context.Context, backup string, _ *jetstream.StreamInfo, ttl time.Duration) error {
+		_, err := js.CreateKeyValue(ctx, jetstream.KeyValueConfig{Bucket: backup, TTL: ttl, Storage: jetstream.FileStorage,
+			Sources: []*jetstream.StreamSource{{Name: "other"}}})
+		return err
+	}
+	_, err := Open(context.Background(), spec)
+	if !errors.Is(err, errMismatch) || !strings.Contains(err.Error(), "copies stream KV_other, not only stream KV_locks") {
+		t.Fatalf("err = %v", err)
+	}
+	if deletes != 0 {
+		t.Fatalf("the bucket's stream was deleted %d time(s)", deletes)
+	}
+	if got, msgs := storageOf(t, js, "KV_locks"); got != jetstream.FileStorage || msgs != 2 {
+		t.Fatalf("bucket storage=%v msgs=%d, want it untouched", got, msgs)
+	}
+	if left := backups(t, js, "locks"); len(left) != 0 {
+		t.Fatalf("backups left behind: %v", left)
+	}
+}

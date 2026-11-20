@@ -34,7 +34,10 @@ const (
 
 	// BackupNameSuffixLen is the length BackupName adds to a bucket name:
 	// "-backup-", a UTC time (16) and "-" plus 16 hex digits.
-	BackupNameSuffixLen = len("-backup-") + len("20060102T150405Z") + 1 + 16
+	BackupNameSuffixLen = len("-backup-") + len(backupTimeLayout) + 1 + 16
+
+	// backupTimeLayout is the UTC time in a backup bucket name.
+	backupTimeLayout = "20060102T150405Z"
 
 	// pollInterval is how often the progress of a copy is checked.
 	pollInterval = 50 * time.Millisecond
@@ -167,6 +170,9 @@ func (s Spec[T]) check() error {
 // create is tried once more and both errors are returned if it fails again.
 // The stream is deleted only when the create was rejected as an invalid
 // configuration (10052), the code the server uses for a storage change.
+//
+// After a recreate, backups of the bucket that an interrupted recreate left
+// copying its stream are detached (see detachLeftoverBackups).
 func Open[T any](ctx context.Context, s Spec[T]) (T, error) {
 	var zero T
 	if err := s.check(); err != nil {
@@ -260,7 +266,102 @@ func Open[T any](ctx context.Context, s Spec[T]) (T, error) {
 		return zero, fmt.Errorf("stream %s was deleted, but recreating bucket %q with %s storage failed (the next Start creates it): %w",
 			streamName, s.Bucket, want, err)
 	}
+	// A backup an interrupted recreate left attached follows the stream by
+	// name, so it would copy everything the recreated bucket receives.
+	detachLeftoverBackups(ctx, s, backup)
 	return h, nil
+}
+
+const (
+	// maxLeftoverBackups bounds how many leftover backups one recreate
+	// inspects.
+	maxLeftoverBackups = 64
+
+	// leftoverTimeout bounds the search for leftover backups.
+	leftoverTimeout = 10 * time.Second
+)
+
+// detachLeftoverBackups removes the source from the backup buckets of the
+// bucket that still copy its stream: backups of a recreate that was
+// interrupted (the process was killed during the copy) before it detached
+// them. A stream source names its stream, so such a backup attaches itself to
+// the recreated bucket and copies whatever that receives, into file storage,
+// for as long as the backup lives. current, the backup just made, is skipped.
+//
+// It runs after the bucket was recreated, so a copy another instance is
+// making at the same moment is not cut off before that instance sees the
+// repair. A leftover is detached, never deleted: it holds part of what the
+// bucket held, and whether that is still wanted is not for the plugin to
+// decide. Only names BackupName makes, with exactly this stream as their one
+// source, are touched; an application's own bucket that copies this one is
+// left alone. Best effort: a failure is logged and the bucket stays open.
+func detachLeftoverBackups[T any](ctx context.Context, s Spec[T], current string) {
+	ctx, cancel := context.WithTimeout(ctx, leftoverTimeout)
+	defer cancel()
+	streamName := s.StreamPrefix + s.Bucket
+
+	var candidates []string
+	lister := s.JS.StreamNames(ctx)
+	for name := range lister.Name() {
+		bucket, ok := strings.CutPrefix(name, s.StreamPrefix)
+		if ok && bucket != current && IsBackupName(s.Bucket, bucket) {
+			candidates = append(candidates, bucket)
+		}
+	}
+	if err := lister.Err(); err != nil {
+		s.Logger.Warn("Failed to look for leftover "+s.Kind+" backups that still copy the bucket",
+			"bucket", s.Bucket, "error", err)
+		return
+	}
+	if len(candidates) > maxLeftoverBackups {
+		s.Logger.Warn("Too many "+s.Kind+" backups to inspect them all for one that still copies the bucket",
+			"bucket", s.Bucket, "backups", len(candidates), "inspected", maxLeftoverBackups)
+		candidates = candidates[:maxLeftoverBackups]
+	}
+	for _, backup := range candidates {
+		stream, err := s.JS.Stream(ctx, s.StreamPrefix+backup)
+		if err != nil {
+			if !errors.Is(err, jetstream.ErrStreamNotFound) {
+				s.Logger.Warn("Failed to inspect "+s.Kind+" backup", "bucket", s.Bucket, "backup_bucket", backup, "error", err)
+			}
+			continue
+		}
+		info := stream.CachedInfo()
+		if len(info.Config.Sources) != 1 || info.Config.Sources[0] == nil || info.Config.Sources[0].Name != streamName {
+			continue
+		}
+		cfg := info.Config
+		cfg.Sources = nil
+		if _, err := s.JS.UpdateStream(ctx, cfg); err != nil {
+			s.Logger.Warn("Failed to detach a leftover "+s.Kind+" backup that still copies the bucket; it keeps copying what the bucket receives",
+				"bucket", s.Bucket, "backup_bucket", backup, "error", err)
+			continue
+		}
+		s.Logger.Warn("Detached a leftover "+s.Kind+" backup that still copied the bucket: an earlier recreate was interrupted before it finished, so it may be incomplete; it is kept, delete it when it is not needed",
+			"bucket", s.Bucket,
+			"backup_bucket", backup,
+			"stream", s.StreamPrefix+backup,
+			"messages", info.State.Msgs)
+	}
+}
+
+// IsBackupName reports whether name is a backup bucket name of bucket as
+// BackupName makes them: <bucket>-backup-<UTC time>-<16 hex digits>.
+func IsBackupName(bucket, name string) bool {
+	rest, ok := strings.CutPrefix(name, bucket+"-backup-")
+	if !ok || len(rest) != BackupNameSuffixLen-len("-backup-") {
+		return false
+	}
+	n := len(backupTimeLayout)
+	stamp, random := rest[:n], rest[n+1:]
+	if rest[n] != '-' {
+		return false
+	}
+	if _, err := time.Parse(backupTimeLayout, stamp); err != nil {
+		return false
+	}
+	_, err := hex.DecodeString(random)
+	return err == nil && strings.ToLower(random) == random
 }
 
 // backupBucket copies the bucket described by info into a new backup bucket
@@ -346,6 +447,11 @@ func completeBackup[T any](ctx context.Context, s Spec[T], backup string, info *
 			return false, fmt.Errorf("backup bucket %q has no source", backup)
 		}
 		src := binfo.Sources[0]
+		// A backup that copies another stream must never stand for this one:
+		// the bucket is deleted once the copy counts as complete.
+		if len(binfo.Sources) != 1 || src.Name != streamName {
+			return false, fmt.Errorf("backup bucket %q copies stream %s, not only stream %s", backup, SourceNames(binfo.Sources), streamName)
+		}
 		if src.Error != nil {
 			if sourceErrors++; sourceErrors >= sourceErrorRounds {
 				return false, fmt.Errorf("backup bucket %q cannot copy stream %s: %w", backup, streamName, src.Error)
@@ -393,9 +499,14 @@ func backupCopied(ctx context.Context, js jetstream.JetStream, backup jetstream.
 		if err != nil {
 			return false, 0, fmt.Errorf("failed to read the last message of backup stream %s: %w", binfo.Config.Name, err)
 		}
-		seq, ok := SourceSequence(msg.Header.Get(streamSourceHeader))
+		header := msg.Header.Get(streamSourceHeader)
+		seq, ok := SourceSequence(header)
 		if !ok {
 			return false, 0, fmt.Errorf("the last message of backup stream %s has no source sequence", binfo.Config.Name)
+		}
+		// A sequence of another stream says nothing about this one.
+		if from := SourceStream(header); from != streamName {
+			return false, 0, fmt.Errorf("the last message of backup stream %s was copied from stream %s, not %s", binfo.Config.Name, from, streamName)
 		}
 		copied = seq
 	}
@@ -431,6 +542,27 @@ func SourceSequence(header string) (uint64, bool) {
 	return seq, err == nil
 }
 
+// SourceStream returns the stream a message was copied from, the first field
+// of its Nats-Stream-Source header, or "" when the header is empty.
+func SourceStream(header string) string {
+	fields := strings.Fields(header)
+	if len(fields) == 0 {
+		return ""
+	}
+	return fields[0]
+}
+
+// SourceNames lists the streams the given sources copy, for an error message.
+func SourceNames(sources []*jetstream.StreamSourceInfo) string {
+	names := make([]string, 0, len(sources))
+	for _, src := range sources {
+		if src != nil {
+			names = append(names, src.Name)
+		}
+	}
+	return strings.Join(names, ", ")
+}
+
 // bucketRepaired reports whether the bucket's stream, read again, is gone,
 // was replaced since info was read, or already has storage want: another
 // instance starting at the same time has repaired it. A failed read is not a
@@ -463,7 +595,7 @@ func BackupName(bucket string) (string, error) {
 	if _, err := rand.Read(b[:]); err != nil {
 		return "", fmt.Errorf("failed to name backup bucket: %w", err)
 	}
-	return fmt.Sprintf("%s-backup-%s-%s", bucket, time.Now().UTC().Format("20060102T150405Z"), hex.EncodeToString(b[:])), nil
+	return fmt.Sprintf("%s-backup-%s-%s", bucket, time.Now().UTC().Format(backupTimeLayout), hex.EncodeToString(b[:])), nil
 }
 
 // isPlainStream reports whether info describes a stream created for the
