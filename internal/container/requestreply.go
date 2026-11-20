@@ -120,6 +120,13 @@ type requestReplyClient struct {
 	moduleName      string
 }
 
+// WaitedSince returns how long a call that ran into its deadline waited,
+// for its timeout error. The client's default timeout was reported instead,
+// so a call under a 2s context "timed out after 30s".
+func WaitedSince(started time.Time) time.Duration {
+	return time.Since(started).Round(time.Millisecond)
+}
+
 // ensureContextDeadline ensures the context has a deadline, applying the default timeout if needed.
 // Returns an error if the deadline is already expired.
 func (c *requestReplyClient) ensureContextDeadline(ctx context.Context) (context.Context, context.CancelFunc, error) {
@@ -199,6 +206,7 @@ func (c *requestReplyClient) runMiddleware(ctx context.Context, msg *types.Msg) 
 //	defer cancel()
 //	response, err := client.Call(ctx, []byte("request data"))
 func (c *requestReplyClient) Call(ctx context.Context, data []byte) (*types.Msg, error) {
+	started := time.Now()
 	ctx, cancel, err := c.ensureContextDeadline(ctx)
 	if err != nil {
 		return nil, err
@@ -224,7 +232,7 @@ func (c *requestReplyClient) Call(ctx context.Context, data []byte) (*types.Msg,
 	if err != nil {
 		// Wrap context deadline exceeded errors with timeout error
 		if errors.Is(err, context.DeadlineExceeded) {
-			return nil, monoerrors.WrapTimeout("request-reply", c.timeout, err)
+			return nil, monoerrors.WrapTimeout("request-reply", WaitedSince(started), err)
 		}
 		return nil, err
 	}
@@ -252,6 +260,7 @@ func (c *requestReplyClient) Call(ctx context.Context, data []byte) (*types.Msg,
 //	}
 //	response, err := client.CallMsg(ctx, msg)
 func (c *requestReplyClient) CallMsg(ctx context.Context, msg *types.Msg) (*types.Msg, error) {
+	started := time.Now()
 	ctx, cancel, err := c.ensureContextDeadline(ctx)
 	if err != nil {
 		return nil, err
@@ -278,7 +287,7 @@ func (c *requestReplyClient) CallMsg(ctx context.Context, msg *types.Msg) (*type
 	if err != nil {
 		// Wrap context deadline exceeded errors with timeout error
 		if errors.Is(err, context.DeadlineExceeded) {
-			return nil, monoerrors.WrapTimeout("request-reply", c.timeout, err)
+			return nil, monoerrors.WrapTimeout("request-reply", WaitedSince(started), err)
 		}
 		return nil, err
 	}

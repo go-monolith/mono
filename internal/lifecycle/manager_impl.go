@@ -571,6 +571,9 @@ type overloadReporter struct {
 	lastExpiredLog atomic.Int64 // unix nanoseconds of the last expired-requests line
 	expired        atomic.Int64 // expired requests dropped since that line
 	lastSkewLog    atomic.Int64 // unix nanoseconds of the last clock-skew warning
+
+	lastReplylessLog atomic.Int64 // unix nanoseconds of the last line about messages without a reply subject
+	replylessCount   atomic.Int64 // such messages handled since that line
 	// Monotonic totals for SubscriptionStats (the counters above are reset
 	// at every log line).
 	rejectedTotal atomic.Int64
@@ -690,7 +693,12 @@ func frameworkErrorReply(reply, errorType, message string) *types.Msg {
 //
 // It returns true when the pool accepted the job.
 func submitToPool(pool *workerpool.Pool, eventBus types.EventBus, logger types.Logger, reporter *overloadReporter, msg *types.Msg, job workerpool.Job) bool {
-	wait := msg.Reply == ""
+	return submitToPoolWait(pool, eventBus, logger, reporter, msg, job, msg.Reply == "")
+}
+
+// submitToPoolWait is submitToPool with the choice whether the caller waits
+// for room in the pool.
+func submitToPoolWait(pool *workerpool.Pool, eventBus types.EventBus, logger types.Logger, reporter *overloadReporter, msg *types.Msg, job workerpool.Job, wait bool) bool {
 	err := pool.Submit(job, wait)
 	if err == nil {
 		return true
@@ -1218,7 +1226,9 @@ func (lm *lifecycleManager) setupNATSSubscriptions(ctx context.Context) error {
 					// services protocol stats.
 					start := time.Now()
 					response, err := invokeRequestReplyHandler(ctx, handler, msg)
-					metrics.record(start.Sub(arrival), time.Since(start), err)
+					// The statistics are readable by any client of the server:
+					// they get the public text of a panic, not its value.
+					metrics.record(start.Sub(arrival), time.Since(start), PublicError(err))
 					if err != nil {
 						logger.Error("RequestReply handler error",
 							append([]any{"service", serviceName, "module", modName, "subject", msg.Subject}, handlerErrorFields(err)...)...)
@@ -1229,17 +1239,16 @@ func (lm *lifecycleManager) setupNATSSubscriptions(ctx context.Context) error {
 								Subject: msg.Reply,
 								Header: types.Header{
 									types.HeaderError:        []string{"true"},
-									types.HeaderErrorMessage: []string{err.Error()},
+									types.HeaderErrorMessage: []string{PublicErrorText(err)},
 								},
 								Data: nil,
 							}
 
 							// Add error type classification (optional header). A recovered
 							// panic gets the framework's own type so clients can map it to
-							// ErrHandlerPanic; other errors use the reflected type name.
-							if _, isPanic := panicStack(err); isPanic {
-								errorMsg.Header[types.HeaderErrorType] = []string{types.ErrorTypeHandlerPanic}
-							} else if errorType := getErrorTypeName(err); errorType != "" {
+							// ErrHandlerPanic; other errors use the reflected type name,
+							// which is never one of the framework's (HandlerErrorType).
+							if errorType := HandlerErrorType(err); errorType != "" {
 								errorMsg.Header[types.HeaderErrorType] = []string{errorType}
 							}
 
@@ -1249,21 +1258,35 @@ func (lm *lifecycleManager) setupNATSSubscriptions(ctx context.Context) error {
 						}
 						return
 					}
-					// Manually publish response to the reply subject when sender specifies one
-					// automatic reply handling to maintain explicit control over error handling
-					if msg.Reply != "" && response != nil {
-						if pubErr := eventBus.Publish(msg.Reply, response); pubErr != nil {
-							logger.Error("Failed to publish response", "service", serviceName, "error", pubErr)
+					// A message published to the subject without a reply subject:
+					// the response has nowhere to go.
+					if msg.Reply == "" {
+						reporter.replyless()
+						return
+					}
+					// The caller waits for a reply, so it gets one whatever the
+					// handler returned: a nil response is an empty reply, and a
+					// response that cannot be published (larger than the server's
+					// maximum payload) is answered with an error. Before, both
+					// left the caller waiting for its timeout.
+					if response == nil {
+						response = []byte{}
+					}
+					if pubErr := eventBus.Publish(msg.Reply, response); pubErr != nil {
+						logger.Error("Failed to publish response", "service", serviceName, "module", modName,
+							"response_size", len(response), "error", pubErr)
+						replyMsg := frameworkErrorReply(msg.Reply, types.ErrorTypeReplyFailed,
+							"the handler ran, but its response could not be sent: "+pubErr.Error())
+						if errPubErr := eventBus.PublishMsg(replyMsg); errPubErr != nil {
+							logger.Error("Failed to publish error response", "service", serviceName, "module", modName, "error", errPubErr)
 						}
-					} else {
-						logger.Warn("No reply subject specified, response not sent", "service", serviceName)
 					}
 				}
 
 				// Create NATS request-reply subscription with queue group for "at most one" delivery
 				sub, err := eventBus.QueueSubscribe(entry.Subject, queueGroup, func(reqCtx context.Context, msg *types.Msg) {
 					arrival := time.Now()
-					submitToPool(pool, eventBus, logger, reporter, msg, func() { handleRequest(reqCtx, msg, arrival) })
+					submitRequestToPool(pool, eventBus, logger, reporter, msg, func() { handleRequest(reqCtx, msg, arrival) })
 				})
 				if err != nil {
 					return fmt.Errorf("failed to subscribe to %s: %w", entry.Subject, err)

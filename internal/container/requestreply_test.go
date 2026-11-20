@@ -1141,3 +1141,32 @@ func TestCheckForErrorResponse(t *testing.T) {
 		}
 	})
 }
+
+// TestTimeoutErrorReportsTheTimeWaited: a call that runs into the deadline
+// of the caller's context reports how long it waited, not the client's
+// default timeout of 30s.
+func TestTimeoutErrorReportsTheTimeWaited(t *testing.T) {
+	eventBus := &mockEventBus{
+		requestWithCtxHandler: func(ctx context.Context, _ string, _ []byte) (*types.Msg, error) {
+			<-ctx.Done()
+			return nil, ctx.Err()
+		},
+	}
+	client := &requestReplyClient{
+		eventBus:    eventBus,
+		subject:     "services.orders.place",
+		serviceName: "place",
+		moduleName:  "orders",
+		timeout:     30 * time.Second,
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
+	defer cancel()
+	_, err := client.Call(ctx, []byte("x"))
+	var timeout *monoerrors.TimeoutError
+	if !errors.As(err, &timeout) {
+		t.Fatalf("err = %v, want a TimeoutError", err)
+	}
+	if timeout.Duration < 100*time.Millisecond || timeout.Duration > 5*time.Second {
+		t.Fatalf("reported duration = %v for a call under a 150ms context (%v)", timeout.Duration, err)
+	}
+}

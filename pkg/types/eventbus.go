@@ -47,6 +47,14 @@ const (
 	// differences but not queue wait before arrival.
 	HeaderTimeout = "Mono-Timeout"
 
+	// ErrorTypeReplyFailed is the HeaderErrorType value of the error response
+	// the framework sends when a request-reply handler ran but its response
+	// could not be published (for example because it is larger than the
+	// server's maximum payload). The caller gets an error with this type
+	// and the reason instead of waiting for its timeout; the handler's work
+	// is done, so retrying repeats it.
+	ErrorTypeReplyFailed = "reply-failed"
+
 	// ErrorTypeShuttingDown is the HeaderErrorType value of the error response
 	// the framework sends to a request that arrives while the instance is
 	// shutting down and no longer accepts work. Clients map it to

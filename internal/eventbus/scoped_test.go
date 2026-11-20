@@ -239,3 +239,50 @@ func TestScopedKeepsConnAndPassthroughs(t *testing.T) {
 
 // noConnBus is a minimal EventBus without a NATS connection.
 type noConnBus struct{ types.EventBus }
+
+// TestScopedWildcardFirstTokenSubscriptions: a subscription whose first token
+// is a wildcard reaches the service tree as well (">" and "*.billing.charge"
+// receive another module's requests), so it is held to the same rule as one
+// under services.
+func TestScopedWildcardFirstTokenSubscriptions(t *testing.T) {
+	bus, _ := newScopedForTest(t, true)
+	nop := func(context.Context, *types.Msg) {}
+	for _, subject := range []string{">", "*.>", "*.inventory.check-stock", "*.inventory.>", "*.*.check-stock", "*.*.*", "*.payment.process.schedule"} {
+		if _, err := bus.Subscribe(subject, nop); !errors.Is(err, monoerrors.ErrModuleBoundaryViolation) {
+			t.Errorf("Subscribe(%q) = %v, want ErrModuleBoundaryViolation", subject, err)
+		}
+	}
+	// These cannot match a service subject of another module.
+	for _, subject := range []string{"*", "*.x", "events.>", "events.*.created", "*.order.place", "*.order.>", "orders.>", "_INBOX.>"} {
+		sub, err := bus.Subscribe(subject, nop)
+		if err != nil {
+			t.Errorf("Subscribe(%q) = %v, want it accepted", subject, err)
+			continue
+		}
+		_ = sub.Unsubscribe()
+	}
+
+	// Non-strict: recorded under the module the pattern names, or "*".
+	loose, rec := newScopedForTest(t, false)
+	for _, subject := range []string{">", "*.inventory.check-stock"} {
+		sub, err := loose.Subscribe(subject, nop)
+		if err != nil {
+			t.Fatalf("non-strict Subscribe(%q): %v", subject, err)
+		}
+		_ = sub.Unsubscribe()
+	}
+	rep := rec.Report()
+	if len(rep.Violations) != 2 {
+		t.Fatalf("Violations = %+v", rep.Violations)
+	}
+	got := map[string]string{}
+	for _, v := range rep.Violations {
+		if v.Kind != types.BoundaryViolationForeignServiceSubscription {
+			t.Errorf("violation = %+v", v)
+		}
+		got[v.Subject] = v.Dependency
+	}
+	if got[">"] != "*" || got["*.inventory.check-stock"] != "inventory" {
+		t.Errorf("violations by subject = %v", got)
+	}
+}

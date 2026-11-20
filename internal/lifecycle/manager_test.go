@@ -210,6 +210,7 @@ type mockEventBus struct {
 	eventStreamErr       error             // Error to return from EventStream()
 	queueSubscribeErr    error             // Error to return from QueueSubscribe
 	queueSubscribeErrFor string            // Only fail QueueSubscribe for this subject (empty = all)
+	publishDataErr       error             // returned by Publish only (see setPublishDataError)
 }
 
 type publishedMessage struct {
@@ -230,6 +231,9 @@ func (m *mockEventBus) Publish(subject string, data []byte) error {
 	defer m.mu.Unlock()
 	if m.publishErr != nil {
 		return m.publishErr
+	}
+	if m.publishDataErr != nil {
+		return m.publishDataErr
 	}
 	m.publishedMessages = append(m.publishedMessages, publishedMessage{subject: subject, data: data})
 
@@ -259,6 +263,14 @@ func (m *mockEventBus) setPublishError(err error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.publishErr = err
+}
+
+// setPublishDataError makes Publish fail and leaves PublishMsg working: the
+// response of a handler cannot be sent, an error reply can.
+func (m *mockEventBus) setPublishDataError(err error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.publishDataErr = err
 }
 
 func (m *mockEventBus) getHandlers(subject string) []types.MsgHandler {
