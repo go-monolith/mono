@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/nats-io/nats.go/jetstream"
 
@@ -279,6 +280,82 @@ func ExplainConsumerLimits(cfg types.StreamConfig, owner string, writeErr error)
 		"An InactiveThreshold is never lowered automatically, because the server deletes a consumer that is not pulled for that long, with its position: "+
 		"set it on the consumers in one deployment and on the stream's limits in the next: %w",
 		cfg.Name, owner, strings.Join(limits, ", "), cfg.Name, writeErr)
+}
+
+// InheritedInactiveThresholdWarning is logged at every start for a
+// registration whose durable consumer inherits an inactivity threshold from
+// the consumer limits of its stream.
+const InheritedInactiveThresholdWarning = "Durable consumer inherits the InactiveThreshold of its stream's ConsumerLimits: " +
+	"the server deletes it, with its position, once a server has run for that long without the consumer being pulled. " +
+	"That is the case while a server runs without this registration (another version of the application in a rolling deploy or a cluster), " +
+	"when starting up or shutting down takes longer than the threshold, and when a handler holds its fetch loop for longer; " +
+	"a downtime of the whole application does not count. " +
+	"The consumer is then created again from its deliver policy (with the default, the whole stream is delivered again), " +
+	"and on an interest stream the messages only it still needed are gone. " +
+	"Remove ConsumerLimits.InactiveThreshold from the stream unless that is intended"
+
+// InactiveThresholdLimit returns the InactiveThreshold consumer limit the
+// named stream may carry for a registration whose own stream configuration
+// sets the limit own: own when it is set, and otherwise the shortest one
+// another registration of the stream sets. Zero means none.
+//
+// Every registration writes the configuration of its stream, so on a shared
+// stream the limit of another registration is on the stream from that
+// registration's write until this one's, and across a restart when that
+// registration is set up last. A consumer without a threshold of its own
+// takes the stream's limit whenever the server applies its defaults.
+func (p *StreamPlan) InactiveThresholdLimit(stream string, own time.Duration) time.Duration {
+	if own > 0 {
+		return own
+	}
+	planned := p.Stream(stream)
+	if planned == nil {
+		return 0
+	}
+	var shortest time.Duration
+	for _, reg := range planned.Registrations {
+		limit := reg.Stream.ConsumerLimits.InactiveThreshold
+		if limit > 0 && (shortest == 0 || limit < shortest) {
+			shortest = limit
+		}
+	}
+	return shortest
+}
+
+// InheritsInactiveThreshold reports whether a consumer sent with the
+// configuration consumer takes its inactivity threshold from limit, the
+// InactiveThreshold consumer limit of its stream: the stream sets one and
+// the consumer none of its own (the server treats a negative value as none).
+// The server then deletes the consumer, durable or not, once it has not been
+// pulled for that long.
+func InheritsInactiveThreshold(limit time.Duration, consumer types.ConsumerConfig) bool {
+	return limit > 0 && consumer.InactiveThreshold <= 0
+}
+
+// WarnInheritedInactiveThreshold logs InheritedInactiveThresholdWarning when
+// the durable consumer of a registration inherits an inactivity threshold
+// from its stream (see InheritsInactiveThreshold), be it from the
+// registration's own stream configuration or from another registration of a
+// shared stream (see InactiveThresholdLimit). owner names the registration.
+//
+// The framework's durables are meant to keep their position. With such a
+// limit the consumer is gone once a server ran for longer than the threshold
+// without the registration pulling it, and nothing else says so: Start
+// succeeds. A consumer whose configuration sets InactiveThreshold itself is
+// not warned about, since that is the caller's choice for that consumer. The
+// configuration is not rejected, because expiring consumers may be what the
+// application wants. The decision is made from the configuration alone,
+// without a request.
+func (lm *lifecycleManager) WarnInheritedInactiveThreshold(owner string, stream types.StreamConfig, consumer types.ConsumerConfig) {
+	limit := lm.streamPlan.InactiveThresholdLimit(stream.Name, stream.ConsumerLimits.InactiveThreshold)
+	if !InheritsInactiveThreshold(limit, consumer) {
+		return
+	}
+	lm.logger.Warn(InheritedInactiveThresholdWarning,
+		"registration", owner,
+		"stream", stream.Name,
+		"consumer", consumer.Name,
+		"inactive_threshold", limit.String())
 }
 
 // CheckStreamsDisjoint returns an error wrapping ErrStreamSubjectsOverlap

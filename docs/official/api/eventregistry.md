@@ -395,7 +395,7 @@ NATS cannot change a stream's `Storage`, or change its `Retention` to or from `W
 
 - A work-queue stream delivers each event to one consumer, so two modules cannot consume the same event on one. Since v0.2.16 `Start` fails with `ErrWorkQueueConsumerConflict` before anything is created; use `InterestPolicy` to let every module get every event. Renaming the consuming module on a work-queue stream fails with the same error until the old durable is removed. See [Work-Queue Streams: One Consumer per Subject](container.md#work-queue-streams-one-consumer-per-subject).
 - Changing `Stream.Name`, or giving two modules that consume one event different stream names, fails `Start` with `ErrStreamSubjectsOverlap`: the event's subject belongs to one stream. See [Renaming a Stream, or Switching a Service Between Stream Consumer and Cron](container.md#renaming-a-stream-or-switching-a-service-between-stream-consumer-and-cron).
-- `Stream.ConsumerLimits.MaxAckPending` can be lowered on an existing stream since v0.2.16. See [Lowering a Stream's Consumer Limits](container.md#lowering-a-streams-consumer-limits), which also explains why an `InactiveThreshold` limit makes durables disappear.
+- `Stream.ConsumerLimits.MaxAckPending` can be lowered on an existing stream since v0.2.16. See [Lowering a Stream's Consumer Limits](container.md#lowering-a-streams-consumer-limits), which also explains why an `InactiveThreshold` limit makes durables disappear (warned about at every start since v0.2.16).
 
 **Upgrading from v0.0.11 or earlier:** see [Upgrading Legacy Consumers](#upgrading-legacy-consumers) at the end of this page.
 

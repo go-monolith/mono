@@ -551,3 +551,163 @@ func TestWriteStream(t *testing.T) {
 		}
 	})
 }
+
+func TestInheritsInactiveThreshold(t *testing.T) {
+	tests := []struct {
+		name     string
+		limit    time.Duration
+		consumer time.Duration
+		want     bool
+	}{
+		{"limit on the stream, none on the consumer", time.Minute, 0, true},
+		{"a negative threshold is none", time.Minute, -time.Second, true},
+		{"the consumer sets its own", time.Minute, 30 * time.Second, false},
+		{"no limit on the stream", 0, 0, false},
+		{"no limit on the stream, the consumer sets its own", 0, time.Hour, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := InheritsInactiveThreshold(tt.limit, types.ConsumerConfig{InactiveThreshold: tt.consumer}); got != tt.want {
+				t.Errorf("InheritsInactiveThreshold = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestStreamPlan_InactiveThresholdLimit(t *testing.T) {
+	limited := func(name string, limit time.Duration) *types.ServiceEntry {
+		entry := planService("orders", name, "SHARED", "services.orders."+name)
+		entry.StreamConsumerConfig.Stream.ConsumerLimits.InactiveThreshold = limit
+		return entry
+	}
+	plan, err := NewStreamPlan(StreamRegistrations([]*types.ServiceEntry{
+		limited("none", 0), limited("hour", time.Hour), limited("minute", time.Minute),
+		planService("orders", "alone", "ALONE", "services.orders.alone"),
+	}, nil))
+	if err != nil {
+		t.Fatalf("NewStreamPlan: %v", err)
+	}
+	var none *StreamPlan
+	tests := []struct {
+		name   string
+		plan   *StreamPlan
+		stream string
+		own    time.Duration
+		want   time.Duration
+	}{
+		{"the registration's own limit", plan, "SHARED", time.Hour, time.Hour},
+		{"the shortest limit of another registration", plan, "SHARED", 0, time.Minute},
+		{"a stream without any limit", plan, "ALONE", 0, 0},
+		{"a stream the plan does not know", plan, "OTHER", 0, 0},
+		{"a stream the plan does not know, own limit", plan, "OTHER", time.Second, time.Second},
+		{"no plan", none, "SHARED", 0, 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.plan.InactiveThresholdLimit(tt.stream, tt.own); got != tt.want {
+				t.Errorf("InactiveThresholdLimit = %s, want %s", got, tt.want)
+			}
+		})
+	}
+}
+
+// Both setup paths warn about a durable that inherits an inactivity
+// threshold from its stream, and only about that.
+func TestSetupStreamConsumers_InheritedInactiveThreshold(t *testing.T) {
+	warnings := func(logger *mockLogger) []string {
+		var found []string
+		for _, entry := range logger.entries {
+			if strings.HasPrefix(entry, "WARN: "+InheritedInactiveThresholdWarning) {
+				found = append(found, entry)
+			}
+		}
+		return found
+	}
+	tests := []struct {
+		name     string
+		limit    time.Duration
+		consumer time.Duration
+		warned   bool
+	}{
+		{"inherited", time.Minute, 0, true},
+		{"the consumer sets its own", time.Minute, 30 * time.Second, false},
+		{"no limit", 0, 0, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			service := planService("orders", "ingest", "ORDERS", "services.orders.ingest")
+			service.StreamConsumerConfig.Stream.ConsumerLimits.InactiveThreshold = tt.limit
+			service.StreamConsumerConfig.Consumer.InactiveThreshold = tt.consumer
+			service.StreamConsumerConfig.Fetch = types.FetchConfig{BatchSize: 1, Timeout: 10 * time.Millisecond}
+			event := streamEntry("billing", "EVENTS", paymentProcessedV1)
+			event.Config.Stream.ConsumerLimits.InactiveThreshold = tt.limit
+			event.Config.Consumer.InactiveThreshold = tt.consumer
+
+			plan, err := NewStreamPlan(StreamRegistrations([]*types.ServiceEntry{service}, []types.EventStreamConsumerEntry{event}))
+			if err != nil {
+				t.Fatalf("NewStreamPlan: %v", err)
+			}
+			es := &recordingEventStream{}
+			lm, logger := newMigrationTestManager(es)
+			lm.streamPlan = plan
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			lm.runtimeCtx = ctx
+			if err := lm.setupStreamConsumer(ctx, service); err != nil {
+				t.Fatalf("setupStreamConsumer: %v", err)
+			}
+			if err := lm.setupEventStreamConsumer(ctx, event, eventStreamDurable{name: "billing-billing-PaymentProcessed-v1"}); err != nil {
+				t.Fatalf("setupEventStreamConsumer: %v", err)
+			}
+			for _, stop := range lm.streamConsumers {
+				stop()
+			}
+
+			got := warnings(logger)
+			if !tt.warned {
+				if len(got) != 0 {
+					t.Fatalf("warnings = %v, want none", got)
+				}
+				return
+			}
+			if len(got) != 2 {
+				t.Fatalf("warnings = %v, want one per registration", got)
+			}
+			for i, parts := range [][]string{
+				{"stream consumer service orders.ingest", "ORDERS", "orders-ingest", "1m0s"},
+				{"event stream consumer of module billing for event billing.PaymentProcessed", "EVENTS", "billing-billing-PaymentProcessed-v1", "1m0s"},
+			} {
+				for _, part := range parts {
+					if !strings.Contains(got[i], part) {
+						t.Errorf("warning %d does not mention %q: %s", i, part, got[i])
+					}
+				}
+			}
+		})
+	}
+}
+
+// On a shared stream a registration without the limit is warned about too:
+// the stream carries the limit of the other registration.
+func TestWarnInheritedInactiveThreshold_SharedStream(t *testing.T) {
+	limited := planService("orders", "limited", "SHARED", "services.orders.limited")
+	limited.StreamConsumerConfig.Stream.ConsumerLimits.InactiveThreshold = time.Minute
+	plain := planService("orders", "plain", "SHARED", "services.orders.plain")
+	plan, err := NewStreamPlan(StreamRegistrations([]*types.ServiceEntry{limited, plain}, nil))
+	if err != nil {
+		t.Fatalf("NewStreamPlan: %v", err)
+	}
+	lm, logger := newMigrationTestManager(&mockEventStream{})
+	lm.streamPlan = plan
+
+	lm.WarnInheritedInactiveThreshold("stream consumer service orders.plain", plain.StreamConsumerConfig.Stream,
+		types.ConsumerConfig{Name: "orders-plain"})
+	if len(logger.entries) != 1 || !strings.Contains(logger.entries[0], "orders-plain") || !strings.Contains(logger.entries[0], "1m0s") {
+		t.Fatalf("log = %v, want one warning naming the consumer and the other registration's limit", logger.entries)
+	}
+	lm.WarnInheritedInactiveThreshold("stream consumer service orders.plain", plain.StreamConsumerConfig.Stream,
+		types.ConsumerConfig{Name: "orders-plain", InactiveThreshold: time.Second})
+	if len(logger.entries) != 1 {
+		t.Errorf("a consumer with its own threshold was warned about: %v", logger.entries)
+	}
+}

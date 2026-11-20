@@ -121,8 +121,14 @@ func conflictEvent(def mono.BaseEventDefinition, config mono.StreamConsumerConfi
 // start is stopped already.
 func startConflict(t *testing.T, dir string, modules ...*conflictModule) (mono.MonoApplication, func(), error) {
 	t.Helper()
+	return startConflictLogged(t, dir, &noOpsLogger{}, modules...)
+}
+
+// startConflictLogged is startConflict with the application's logger.
+func startConflictLogged(t *testing.T, dir string, log mono.Logger, modules ...*conflictModule) (mono.MonoApplication, func(), error) {
+	t.Helper()
 	app, err := mono.NewMonoApplication(
-		mono.WithCustomLogger(&noOpsLogger{}),
+		mono.WithCustomLogger(log),
 		mono.WithJetStreamStorageDir(dir),
 		mono.WithNATSDontListen(),
 		mono.WithNATSInProcessConn(),
@@ -637,5 +643,131 @@ func TestIntegration_ConsumerLimits_InactiveThresholdNotLowered(t *testing.T) {
 	}
 	if got := conflictConsumer(t, stream, "orders-ingest").Config.InactiveThreshold; got != 30*time.Second {
 		t.Errorf("consumer InactiveThreshold = %s, want 30s", got)
+	}
+}
+
+// inheritedThresholdWarnings returns the recorded warnings about a durable
+// that inherits its stream's inactivity threshold.
+func inheritedThresholdWarnings(log *sharedLog) []string {
+	log.mu.Lock()
+	defer log.mu.Unlock()
+	var found []string
+	for _, w := range log.warns {
+		if strings.Contains(w, "inherits the InactiveThreshold of its stream's ConsumerLimits") {
+			found = append(found, w)
+		}
+	}
+	return found
+}
+
+// TestIntegration_ConsumerLimits_InheritedInactiveThresholdWarned: a stream
+// with an InactiveThreshold consumer limit hands it to the durable consumer
+// of its registration, which the server then deletes, with its position,
+// once nothing pulls it for that long while a server is running. The
+// framework warns about it at every start. The test also shows what the
+// warning says:
+//
+//   - the consumer survives while the application pulls it;
+//   - it survives a downtime of the whole application, however long, because
+//     the embedded server is down as well and nothing counts;
+//   - it is deleted when a server runs for longer than the threshold without
+//     the registration pulling it, and the next start delivers the stream
+//     again.
+func TestIntegration_ConsumerLimits_InheritedInactiveThresholdWarned(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	const threshold = 2 * time.Second
+	start := func(limit time.Duration, wantWarning bool) (mono.MonoApplication, *conflictReg, func()) {
+		t.Helper()
+		log := &sharedLog{}
+		module, reg := limitsService(mono.StreamConsumerLimits{InactiveThreshold: limit}, mono.ConsumerConfig{})
+		app, stop, err := startConflictLogged(t, dir, log, module)
+		if err != nil {
+			t.Fatalf("Start: %v", err)
+		}
+		warnings := inheritedThresholdWarnings(log)
+		if !wantWarning {
+			if len(warnings) != 0 {
+				t.Fatalf("warnings without a limit = %v, want none", warnings)
+			}
+			return app, reg, stop
+		}
+		if len(warnings) != 1 {
+			t.Fatalf("warnings about the inherited threshold = %v, want one", warnings)
+		}
+		for _, part := range []string{"stream consumer service orders.ingest", "ORDERS", "orders-ingest", "2s"} {
+			if !strings.Contains(warnings[0], part) {
+				t.Errorf("warning does not mention %q: %s", part, warnings[0])
+			}
+		}
+		return app, reg, stop
+	}
+
+	// A deployment without the limit creates the consumer and handles two
+	// messages.
+	app, reg, stop := start(0, false)
+	for range 2 {
+		if _, err := conflictEventStream(t, app).Publish(ctx, "services.orders.ingest", []byte("x")); err != nil {
+			t.Fatalf("publish: %v", err)
+		}
+	}
+	if got := reg.waitHandled(2); got != 2 {
+		t.Fatalf("handled %d messages, want 2", got)
+	}
+	stop()
+
+	// The limit is added: the existing consumer inherits it.
+	app, _, stop = start(threshold, true)
+	stream := conflictStream(t, app, "ORDERS")
+	created := conflictConsumer(t, stream, "orders-ingest")
+	if created.Config.InactiveThreshold != threshold {
+		t.Fatalf("consumer InactiveThreshold = %s, want the stream's limit %s", created.Config.InactiveThreshold, threshold)
+	}
+	// While the application runs, its fetch loop pulls the consumer.
+	time.Sleep(2 * threshold)
+	conflictConsumer(t, stream, "orders-ingest")
+	stop()
+
+	// A downtime of the whole application does not count: its server is
+	// down too.
+	time.Sleep(2 * threshold)
+	app, reg, stop = start(threshold, true)
+	survived := conflictConsumer(t, conflictStream(t, app, "ORDERS"), "orders-ingest")
+	if !survived.Created.Equal(created.Created) || survived.AckFloor.Stream != 2 {
+		t.Errorf("after a downtime the consumer was created at %s with ack floor %d, want %s and 2 (the same consumer)",
+			survived.Created, survived.AckFloor.Stream, created.Created)
+	}
+	time.Sleep(300 * time.Millisecond)
+	if got := reg.waitHandled(0); got != 0 {
+		t.Errorf("%d handled messages were delivered again after a downtime", got)
+	}
+	stop()
+
+	// A server that runs without the registration for longer than the
+	// threshold: nothing pulls the consumer, and it is deleted.
+	operator, stop := mustStartConflict(t, dir)
+	stream = conflictStream(t, operator, "ORDERS")
+	deadline := time.Now().Add(15 * time.Second)
+	for {
+		_, err := stream.Consumer(ctx, "orders-ingest")
+		if errors.Is(err, jetstream.ErrConsumerNotFound) {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the consumer still exists after %s without a pull (last error %v)", 15*time.Second, err)
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	stop()
+
+	// The next start creates it again from its deliver policy: the two
+	// handled messages are delivered again.
+	app, reg, _ = start(threshold, true)
+	recreated := conflictConsumer(t, conflictStream(t, app, "ORDERS"), "orders-ingest")
+	if !recreated.Created.After(created.Created) {
+		t.Errorf("the consumer was created at %s, want a new one after %s", recreated.Created, created.Created)
+	}
+	if got := reg.waitHandled(2); got != 2 {
+		t.Errorf("the new consumer handled %d of the 2 messages again, want 2", got)
 	}
 }

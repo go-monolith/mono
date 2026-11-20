@@ -342,9 +342,12 @@ type StreamConsumerLimits struct {
 	// A consumer whose own InactiveThreshold is zero inherits this value,
 	// durable consumers included: the durable of a stream consumer service
 	// or an event stream consumer is then deleted, with its position, once
-	// no instance of the application has pulled it for that long (every
-	// instance down), and created again from its deliver policy at the next
-	// start. Leave it unset unless that is intended.
+	// a server has run for that long without the consumer being pulled (a
+	// server running without the registration, a start-up or shutdown slower
+	// than the threshold), and created again from its deliver policy at the
+	// next start. A downtime of the whole application does not count. Leave
+	// it unset unless that is intended; the framework logs a warning at
+	// every start for a registration whose consumer inherits it.
 	InactiveThreshold time.Duration `json:"inactive_threshold,omitempty"`
 
 	// MaxAckPending is a maximum number of outstanding unacknowledged

@@ -577,8 +577,26 @@ Since v0.2.16:
 - **Registrations that share a stream should use the same limits.** Each registration writes the stream, and the one set up last wins. With different limits the stream is rejected, a consumer lowered and the stream written again at every start.
 
 {% hint style="warning" %}
-**`ConsumerLimits.InactiveThreshold` makes durable consumers disappear.** A consumer whose own `InactiveThreshold` is zero inherits the stream's limit, and the server deletes a consumer that is not pulled for that long, **with its position**. The framework pulls continuously while the application runs, so this happens when every instance is down for longer than the threshold. The next start then creates the consumer again from its deliver policy: with the default, the whole stream is delivered again, and on an interest stream the messages only this consumer still needed are gone. Leave the limit unset unless that is what you want.
+**`ConsumerLimits.InactiveThreshold` can make durable consumers disappear.** A consumer whose own `InactiveThreshold` is zero inherits the stream's limit, and the server deletes a consumer, **with its position**, once a server has run for that long without the consumer being pulled. The framework pulls continuously while the registration runs, and a downtime of the whole application does not count, because its embedded server is down as well. The consumer is deleted in these cases:
+
+- a server runs without the registration for longer than the threshold: another version of the application during a rolling deploy or in a cluster, or a deployment that drops the module for a while;
+- starting up or shutting down takes longer than the threshold (the server starts before the fetch loops and stops after them);
+- a handler holds its fetch loop for longer than the threshold.
+
+The next start then creates the consumer again from its deliver policy: with the default, the whole stream is delivered again, and on an interest stream the messages only this consumer still needed are gone. Leave the limit unset unless that is what you want.
 {% endhint %}
+
+Since v0.2.16 the framework logs a warning at every start for each registration whose consumer inherits the threshold this way:
+
+```text
+WARN Durable consumer inherits the InactiveThreshold of its stream's ConsumerLimits: the server deletes it, with its position, ...
+     registration="stream consumer service orders.ingest" stream=ORDERS consumer=orders-ingest inactive_threshold=1m0s
+```
+
+- **The configuration is not rejected.** Consumers that expire may be what you want.
+- **A consumer that sets `Consumer.InactiveThreshold` itself is not warned about.** It expires as well, but that was configured for that consumer.
+- **On a shared stream** a registration without the limit is warned about too when another registration of the stream sets it: the stream carries that limit.
+- **The only way to keep the durable** is to remove `ConsumerLimits.InactiveThreshold` from the stream: a consumer cannot ask for a longer threshold than the limit, and zero means "inherit".
 
 ### RegisterCronService
 

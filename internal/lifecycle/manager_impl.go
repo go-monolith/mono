@@ -2146,6 +2146,9 @@ func (lm *lifecycleManager) setupStreamConsumer(ctx context.Context, entry *type
 	if err != nil {
 		return err
 	}
+	// A durable that inherits an inactivity threshold from its stream's
+	// consumer limits is deleted when it is not pulled for that long.
+	lm.WarnInheritedInactiveThreshold(owner, streamCfg, consumerCfg)
 
 	// Start fetch loop goroutine. The loop context only controls fetching;
 	// handlers get the runtime context (see runStreamConsumerLoop).
@@ -2559,6 +2562,10 @@ func (lm *lifecycleManager) setupEventStreamConsumer(ctx context.Context, entry 
 		}
 	}
 	lm.warnLeftoverLegacyNames(cfg.Stream.Name, streamCfg.Retention, durable)
+	// A durable that inherits an inactivity threshold from its stream's
+	// consumer limits is deleted when it is not pulled for that long. Said
+	// after the last JetStream call, so a retried step says it once.
+	lm.WarnInheritedInactiveThreshold(owner, streamCfg, consumerCfg)
 
 	// Start fetch loop goroutine. The loop context only controls fetching;
 	// handlers get the runtime context (see runEventStreamConsumerLoop).
