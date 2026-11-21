@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -249,10 +250,30 @@ func ConfirmationError(msg *types.Msg) error {
 		return fmt.Errorf("failed to parse audit response: %w", err)
 	}
 	if !response.Success {
-		return fmt.Errorf("audit save failed: %s", response.Error)
+		failure := &SaveFailure{Text: response.Error}
+		// The confirmation carries the error as text. The one a caller can
+		// act on (change the entry) is given back its identity.
+		if strings.Contains(response.Error, ErrAmbiguousEntry.Error()) {
+			failure.Cause = ErrAmbiguousEntry
+		}
+		return failure
 	}
 	return nil
 }
+
+// SaveFailure is the error of an entry the audit-trail service did not save:
+// Text is what the service reported, Cause the error it stands for when that
+// is known (ErrAmbiguousEntry), so that errors.Is finds it.
+type SaveFailure struct {
+	Text  string
+	Cause error
+}
+
+// Error returns the service's report.
+func (f *SaveFailure) Error() string { return "audit save failed: " + f.Text }
+
+// Unwrap returns the cause, or nil when it is not known.
+func (f *SaveFailure) Unwrap() error { return f.Cause }
 
 // waitForResponses drains responses for already-sent entries to avoid leaving
 // stale responses in the channel.

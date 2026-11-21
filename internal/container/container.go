@@ -222,25 +222,28 @@ func (c *serviceContainer) checkDuplicate(name string) error {
 // registerService is a common helper for registering services.
 func (c *serviceContainer) registerService(name string, entry *types.ServiceEntry) error {
 	c.mu.Lock()
-	defer c.mu.Unlock()
 
 	// Validate container is bound
 	if c.boundModule == nil {
+		c.mu.Unlock()
 		return monoerrors.ErrContainerNotBound
 	}
 
 	// Validate EventBus is available for NATS-based services
 	if (entry.Type == types.ServiceTypeRequestReply || entry.Type == types.ServiceTypeQueueGroup || entry.Type == types.ServiceTypeCron) && c.eventBus == nil {
+		c.mu.Unlock()
 		return fmt.Errorf("EventBus must be set before registering %s services", types.FormatServiceType(entry.Type))
 	}
 
 	// Validate service name
 	if err := validateServiceName(name); err != nil {
+		c.mu.Unlock()
 		return err
 	}
 
 	// Check for duplicates
 	if err := c.checkDuplicate(name); err != nil {
+		c.mu.Unlock()
 		return err
 	}
 
@@ -248,17 +251,30 @@ func (c *serviceContainer) registerService(name string, entry *types.ServiceEntr
 	entry.Name = name
 	entry.ModuleName = c.boundModule.Name()
 	entry.Created = time.Now()
+	chain := c.middlewareChain
+	c.mu.Unlock()
 
-	// Run through middleware chain if available
-	if c.middlewareChain != nil {
+	// Run through middleware chain if available. Middleware is code the
+	// framework does not own, so it runs without the container's lock: a
+	// hook that asked the container anything (Has, Entries) waited for the
+	// lock its own caller held.
+	if chain != nil {
 		// Build ServiceRegistration from entry
 		reg := buildServiceRegistration(entry)
 
 		// Run through middleware chain (may wrap handlers, modify config)
-		reg = c.middlewareChain.RunServiceRegistration(context.Background(), reg)
+		reg = chain.RunServiceRegistration(context.Background(), reg)
 
 		// Apply modifications back to entry
 		applyServiceRegistration(entry, reg)
+	}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	// The name may have been registered while the middleware ran.
+	if err := c.checkDuplicate(name); err != nil {
+		return err
 	}
 
 	// Store service

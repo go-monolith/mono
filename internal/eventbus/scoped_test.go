@@ -239,3 +239,98 @@ func TestScopedKeepsConnAndPassthroughs(t *testing.T) {
 
 // noConnBus is a minimal EventBus without a NATS connection.
 type noConnBus struct{ types.EventBus }
+
+// TestScopedWildcardFirstTokenSubscriptions: a subscription whose first token
+// is a wildcard reaches the service tree as well (">" and "*.billing.charge"
+// receive another module's requests), so it is held to the same rule as one
+// under services.
+func TestScopedWildcardFirstTokenSubscriptions(t *testing.T) {
+	bus, _ := newScopedForTest(t, true)
+	nop := func(context.Context, *types.Msg) {}
+	for _, subject := range []string{">", "*.>", "*.inventory.check-stock", "*.inventory.>", "*.*.check-stock", "*.*.*", "*.payment.process.schedule"} {
+		if _, err := bus.Subscribe(subject, nop); !errors.Is(err, monoerrors.ErrModuleBoundaryViolation) {
+			t.Errorf("Subscribe(%q) = %v, want ErrModuleBoundaryViolation", subject, err)
+		}
+	}
+	// These cannot match a service subject of another module.
+	for _, subject := range []string{"*", "*.x", "events.>", "events.*.created", "*.order.place", "*.order.>", "orders.>", "_INBOX.>"} {
+		sub, err := bus.Subscribe(subject, nop)
+		if err != nil {
+			t.Errorf("Subscribe(%q) = %v, want it accepted", subject, err)
+			continue
+		}
+		_ = sub.Unsubscribe()
+	}
+
+	// Non-strict: recorded under the module the pattern names, or "*".
+	loose, rec := newScopedForTest(t, false)
+	for _, subject := range []string{">", "*.inventory.check-stock"} {
+		sub, err := loose.Subscribe(subject, nop)
+		if err != nil {
+			t.Fatalf("non-strict Subscribe(%q): %v", subject, err)
+		}
+		_ = sub.Unsubscribe()
+	}
+	rep := rec.Report()
+	if len(rep.Violations) != 2 {
+		t.Fatalf("Violations = %+v", rep.Violations)
+	}
+	got := map[string]string{}
+	for _, v := range rep.Violations {
+		if v.Kind != types.BoundaryViolationForeignServiceSubscription {
+			t.Errorf("violation = %+v", v)
+		}
+		got[v.Subject] = v.Dependency
+	}
+	if got[">"] != "*" || got["*.inventory.check-stock"] != "inventory" {
+		t.Errorf("violations by subject = %v", got)
+	}
+}
+
+// RuntimeContextKey is the key of the value the tests below mark a runtime
+// context with.
+type RuntimeContextKey struct{}
+
+// TestScopedSetRuntimeContextIsAViolation: the runtime context is what every
+// handler of every module receives, so a module must not replace it through
+// its bus. Without strict boundaries the call is recorded and goes through,
+// as before; with them it does nothing.
+func TestScopedSetRuntimeContextIsAViolation(t *testing.T) {
+	marked := context.WithValue(context.Background(), RuntimeContextKey{}, "module")
+	sharedContext := func(t *testing.T, bus types.EventBus) context.Context {
+		t.Helper()
+		scoped, ok := bus.(*scopedEventBusWithConn)
+		if !ok {
+			t.Fatalf("bus is %T", bus)
+		}
+		inner, ok := scoped.inner.(*natsEventBus)
+		if !ok {
+			t.Fatalf("inner bus is %T", scoped.inner)
+		}
+		return inner.getRuntimeCtx()
+	}
+
+	t.Run("recorded and passed on without strict boundaries", func(t *testing.T) {
+		bus, rec := newScopedForTest(t, false)
+		bus.SetRuntimeContext(marked)
+		bus.SetRuntimeContext(marked)
+		if sharedContext(t, bus).Value(RuntimeContextKey{}) != "module" {
+			t.Error("the call did not go through")
+		}
+		violations := rec.Report().Violations
+		if len(violations) != 1 || violations[0].Kind != types.BoundaryViolationRuntimeContextReplaced || violations[0].Count != 2 {
+			t.Fatalf("Violations = %+v", violations)
+		}
+	})
+
+	t.Run("ignored with strict boundaries", func(t *testing.T) {
+		bus, rec := newScopedForTest(t, true)
+		bus.SetRuntimeContext(marked)
+		if sharedContext(t, bus).Value(RuntimeContextKey{}) != nil {
+			t.Error("a module replaced the shared runtime context under strict boundaries")
+		}
+		if violations := rec.Report().Violations; len(violations) != 0 {
+			t.Fatalf("Violations = %+v", violations)
+		}
+	})
+}

@@ -195,10 +195,11 @@ Set the option only on buckets whose contents can be lost and are rebuilt by the
 
 **The backup.** Before deleting, `Start` copies the bucket into a new bucket named `<name>-backup-<UTC time>-<random>` (for example `locks-backup-20261119T101500Z-3f2a`):
 
-- **Storage:** file storage, with the bucket's per-key history and replicas.
+- **Storage:** file storage, with the bucket's per-key history and replicas. A stream that keeps more versions of a key than a KV bucket can be created with (more than 64, or all of them, when it was created or edited as a stream) gets a backup that keeps as many; a backup that keeps all of them cannot be opened as a KV bucket and is read as the stream `KV_<backup>`.
 - **Retention:** the keys expire after `RecreateBackupTTL` (default 7 days; negative keeps them).
 - **Completeness:** the delete happens only once the backup holds every message the bucket held when it was read (messages that expired before they were copied can't be). The backup is then detached, so it copies nothing the recreated bucket receives. Writes made to the old bucket after it was read, for example by instances of an older version still running during a rolling deploy, may or may not be in the backup.
 - **Failure:** if the backup can't be made or doesn't finish within 2 minutes (a fixed limit whatever the bucket's size, and within the `Start` context), the partial backup is removed, nothing is deleted, and `Start` fails with `ErrStorageMismatch`. A bucket too large to copy in that time keeps failing `Start`: remove its stream by hand, or set `SkipBackupOnRecreate`. Because the copy runs inside `Start`, a repair can delay startup by up to 2 minutes: allow for it in orchestrator startup deadlines (for example a Kubernetes `startupProbe`, whose `failureThreshold` × `periodSeconds` should exceed it).
+- **A message that was not copied:** before the delete the backup's message count is compared with the bucket's (since v0.2.19), when nothing was written to the bucket since it was read. A backup with fewer messages fails `Start` with `ErrStorageMismatch` and nothing is deleted. This catches a message the backup dropped as a duplicate: one that carries the `Nats-Msg-Id` of another message (the plugin's own writes carry none; another writer that sets and reuses one can cause it). Such a bucket cannot be backed up this way: remove its stream by hand or set `SkipBackupOnRecreate`. While other instances keep writing to the bucket the counts cannot be compared, and this check is skipped.
 - **When there's none:** an empty bucket is recreated without a backup, and `SkipBackupOnRecreate` turns it off.
 - **A backup left attached:** a recreate that was interrupted during the copy (the process was killed) leaves a backup bucket that still copies the bucket's stream. It would copy everything the recreated bucket receives. The next recreate of the bucket detaches such backups (since v0.2.18), once the bucket is recreated: each is logged at Warn with its name, and is kept, since it holds part of what the bucket held and may be incomplete. Only names of the form the plugin gives its backups, with this bucket's stream as their one source, are detached; a bucket of your own that copies this one is left alone. A leftover whose bucket is not recreated again keeps copying until you delete it.
 - **Logged:** the Warn line names the backup bucket (`backup_bucket`).
@@ -419,7 +420,12 @@ fmt.Printf("Value: %s, Revision: %d\n", string(entry.Value), entry.Revision)
 To remove a key, use one of:
 
 ```go
-// Delete (soft delete - leaves tombstone)
+// Delete (soft delete - leaves tombstone). In a bucket with one replica a
+// key that does not exist is left alone: no tombstone is written for it
+// (since v0.2.19). A replicated bucket is not asked first, since a replica
+// that is behind could report a key just written as missing. A bucket
+// that another stream mirrors can be answered by the mirror in the same
+// way, and the lookup is still made for it.
 err = bucket.Delete("user.123")
 
 // Or Purge (hard delete - removes all history)

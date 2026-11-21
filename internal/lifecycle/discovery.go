@@ -85,15 +85,21 @@ func (m *endpointMetrics) record(queueWait, processing time.Duration, err error)
 		}
 	}
 	if err != nil {
-		m.errors.Add(1)
-		text := err.Error()
-		if len(text) > maxLastErrorLen {
-			text = strings.ToValidUTF8(text[:maxLastErrorLen], "") // never cut mid-character
-		}
-		m.mu.Lock()
-		m.lastError = text
-		m.mu.Unlock()
+		m.recordError(err)
 	}
+}
+
+// recordError counts err as the error of a handler run that record has
+// already accounted (without one): the run whose response could not be sent.
+func (m *endpointMetrics) recordError(err error) {
+	m.errors.Add(1)
+	text := err.Error()
+	if len(text) > maxLastErrorLen {
+		text = strings.ToValidUTF8(text[:maxLastErrorLen], "") // never cut mid-character
+	}
+	m.mu.Lock()
+	m.lastError = text
+	m.mu.Unlock()
 }
 
 // snapshot returns the standard micro fields.

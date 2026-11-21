@@ -327,11 +327,23 @@ func TestClusterTLS_LiveRenewal(t *testing.T) {
 	// Renew a's certificate from the same CA, then make b reconnect.
 	ca.issue(t, dir, "node-a", 21)
 	restartB()
+	// The handshake that finds the files changed reads and checks them while
+	// the others go on with the current certificate, so the route may be up
+	// a moment before a says what it found.
 	al := a.logger.(*mockLogger)
-	al.mu.Lock()
-	reloaded := strings.Contains(strings.Join(al.infoCalls, "|"), "Reloaded the cluster TLS certificate")
-	al.mu.Unlock()
-	if !reloaded {
+	logged := func(calls *[]string, text string) bool {
+		deadline := time.Now().Add(2 * time.Second)
+		for {
+			al.mu.Lock()
+			found := strings.Contains(strings.Join(*calls, "|"), text)
+			al.mu.Unlock()
+			if found || time.Now().After(deadline) {
+				return found
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+	if !logged(&al.infoCalls, "Reloaded the cluster TLS certificate") {
 		t.Error("a did not reload its renewed certificate")
 	}
 
@@ -340,10 +352,7 @@ func TestClusterTLS_LiveRenewal(t *testing.T) {
 	other := newTestCA(t, "other-ca")
 	other.issue(t, dir, "node-a", 22)
 	restartB()
-	al.mu.Lock()
-	warned := strings.Contains(strings.Join(al.warnCalls, "|"), "Could not reload the cluster TLS certificate")
-	al.mu.Unlock()
-	if !warned {
+	if !logged(&al.warnCalls, "Could not reload the cluster TLS certificate") {
 		t.Error("a did not refuse the certificate from another CA")
 	}
 }

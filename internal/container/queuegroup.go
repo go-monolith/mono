@@ -192,6 +192,7 @@ func (c *queueGroupClient) sendInternal(ctx context.Context, data []byte) error 
 	// timeout when the caller's context has none; apply it before building the
 	// message so the deadline headers carry it. In optimistic publish mode no
 	// default is applied and the headers reflect only a caller-supplied deadline.
+	started := time.Now()
 	if !usePublish {
 		var cancel context.CancelFunc
 		var err error
@@ -235,7 +236,7 @@ func (c *queueGroupClient) sendInternal(ctx context.Context, data []byte) error 
 	if err != nil {
 		// Wrap context deadline exceeded errors with timeout error
 		if errors.Is(err, context.DeadlineExceeded) {
-			return monoerrors.WrapTimeout("queue-group", c.timeout, err)
+			return monoerrors.WrapTimeout("queue-group", WaitedSince(started), err)
 		}
 		// ErrServiceUnavailable is already wrapped by eventbus.RequestWithContext
 		// when nats.ErrNoResponders occurs
@@ -270,13 +271,12 @@ func (c *queueGroupClient) checkACK(ack *types.Msg) error {
 	if typeValues := ack.Header[types.HeaderErrorType]; len(typeValues) > 0 {
 		errorType = typeValues[0]
 	}
-	if err := frameworkErrorResponse(c.serviceName, c.moduleName, types.ServiceTypeQueueGroup, errorType); err != nil {
-		return err
-	}
-
 	message := "unknown error"
 	if msgValues := ack.Header[types.HeaderErrorMessage]; len(msgValues) > 0 {
 		message = msgValues[0]
+	}
+	if err := frameworkErrorResponse(c.serviceName, c.moduleName, types.ServiceTypeQueueGroup, errorType, message); err != nil {
+		return err
 	}
 	return monoerrors.WrapRemoteError(c.serviceName, c.moduleName, message, errorType)
 }
@@ -296,6 +296,7 @@ func (c *queueGroupClient) sendInternalMsg(ctx context.Context, msg *types.Msg) 
 	// timeout when the caller's context has none; apply it before building the
 	// message so the deadline headers carry it. In optimistic publish mode no
 	// default is applied and the headers reflect only a caller-supplied deadline.
+	started := time.Now()
 	if !usePublish {
 		var cancel context.CancelFunc
 		var err error
@@ -336,7 +337,7 @@ func (c *queueGroupClient) sendInternalMsg(ctx context.Context, msg *types.Msg) 
 	if err != nil {
 		// Wrap context deadline exceeded errors with timeout error
 		if errors.Is(err, context.DeadlineExceeded) {
-			return monoerrors.WrapTimeout("queue-group", c.timeout, err)
+			return monoerrors.WrapTimeout("queue-group", WaitedSince(started), err)
 		}
 		return err
 	}

@@ -297,3 +297,86 @@ func TestChannelServiceMixedRouting(t *testing.T) {
 		// Expected
 	}
 }
+
+// TestChannelRouter_NilMessage: a provider that sends nil on its out channel
+// used to panic the router goroutine, which nothing recovers, and with it
+// the process. The nil is dropped and the router goes on.
+func TestChannelRouter_NilMessage(t *testing.T) {
+	container := NewServiceContainer(&mockLogger{})
+	if err := container.BindModule(&mockModule{name: "provider"}); err != nil {
+		t.Fatalf("BindModule failed: %v", err)
+	}
+	in := make(chan *types.Msg, 10)
+	out := make(chan *types.Msg, 10)
+	if err := container.RegisterChannelService("jobs", in, out); err != nil {
+		t.Fatalf("RegisterChannelService failed: %v", err)
+	}
+	_, consumer, err := container.GetChannelService("jobs", "consumer")
+	if err != nil {
+		t.Fatalf("GetChannelService failed: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	container.StartChannelRouters(ctx)
+
+	out <- nil
+	out <- &types.Msg{Reply: "consumer", Data: []byte("after the nil")}
+	select {
+	case msg := <-consumer:
+		if string(msg.Data) != "after the nil" {
+			t.Fatalf("message = %q", msg.Data)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("the router did not go on after a nil message")
+	}
+}
+
+// ContainerAskingChain is a middleware chain whose service registration hook
+// asks the container it is called for.
+type ContainerAskingChain struct {
+	mockMiddlewareChainRunner
+	Container types.ServiceContainer
+	SawItself bool
+}
+
+// RunServiceRegistration asks the container whether the service exists.
+func (c *ContainerAskingChain) RunServiceRegistration(_ context.Context, reg types.ServiceRegistration) types.ServiceRegistration {
+	c.SawItself = c.Container.Has(reg.Name)
+	_ = c.Container.Entries()
+	return reg
+}
+
+// TestRegisterService_MiddlewareMayAskTheContainer: the middleware chain ran
+// with the container's lock held, so a hook that asked the container
+// anything waited for a lock its own caller held, for good.
+func TestRegisterService_MiddlewareMayAskTheContainer(t *testing.T) {
+	c := NewServiceContainer(&mockLogger{})
+	if err := c.BindModule(&mockModule{name: "provider"}); err != nil {
+		t.Fatal(err)
+	}
+	chain := &ContainerAskingChain{Container: c}
+	c.SetMiddlewareChain(chain)
+
+	done := make(chan error, 1)
+	go func() {
+		done <- c.RegisterChannelService("jobs", make(chan *types.Msg, 1), make(chan *types.Msg, 1))
+	}()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("registering a service deadlocked on a middleware that asked the container")
+	}
+	if chain.SawItself {
+		t.Error("the service was visible in the container before its registration finished")
+	}
+	if !c.Has("jobs") {
+		t.Error("the service is not registered")
+	}
+	// A second registration of the name is still refused.
+	if err := c.RegisterChannelService("jobs", make(chan *types.Msg, 1), make(chan *types.Msg, 1)); err == nil {
+		t.Error("a duplicate registration was accepted")
+	}
+}

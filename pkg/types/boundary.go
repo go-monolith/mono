@@ -47,6 +47,15 @@ const (
 	// and a module that does not implement ServiceConsumerModule is not
 	// checked.
 	BoundaryViolationUndeclaredServiceUse BoundaryViolationKind = "undeclared-service-use"
+
+	// BoundaryViolationRuntimeContextReplaced: the module called
+	// SetRuntimeContext on its event bus. The runtime context is the
+	// framework's: every handler of every module receives it, and its
+	// cancellation is how a shutdown reaches them, so a module that replaces
+	// it takes that away from all of them. Without
+	// WithStrictModuleBoundaries the call is recorded and goes through; with
+	// it the call does nothing (the method returns no error to reject with).
+	BoundaryViolationRuntimeContextReplaced BoundaryViolationKind = "runtime-context-replaced"
 )
 
 // ServiceUse is one dependency service a module used at runtime, with how
@@ -71,7 +80,9 @@ type ServiceUse struct {
 type BoundaryViolation struct {
 	// Kind classifies the violation.
 	Kind BoundaryViolationKind `json:"kind"`
-	// Dependency is the module whose boundary was crossed.
+	// Dependency is the module whose boundary was crossed. It is empty for
+	// a violation that concerns no single module
+	// (BoundaryViolationRuntimeContextReplaced).
 	Dependency string `json:"dependency"`
 	// Subject is the NATS subject involved when the violation was a bus
 	// operation, the subject of the service looked up for an undeclared

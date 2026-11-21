@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -658,5 +659,24 @@ func TestCloneStreamConsumerConfigCoversEveryReferenceField(t *testing.T) {
 	}
 	if shared := sharedReferences("config", reflect.ValueOf(clone), reflect.ValueOf(original)); len(shared) != 0 {
 		t.Errorf("the clone shares with the original (cloneStreamConsumerConfig must copy them): %q", shared)
+	}
+}
+
+// TestDependencyViewIgnoredCallsAreLogged: the mutating methods that return
+// no error do nothing in strict mode, and the module is told so, once.
+func TestDependencyViewIgnoredCallsAreLogged(t *testing.T) {
+	log := &mockLogger{}
+	rec := boundary.New("order", []string{"inventory"}, nil, true, log)
+	view := NewDependencyView(newProviderContainer(t), "inventory", rec)
+
+	view.StartChannelRouters(context.Background())
+	view.SetQueueGroupOptimisticWindow(time.Second)
+	view.SetEventBus(nil)
+	view.SetMiddlewareChain(nil)
+
+	log.mu.Lock()
+	defer log.mu.Unlock()
+	if len(log.warnings) != 1 || !strings.Contains(log.warnings[0], "the call was ignored") {
+		t.Fatalf("warnings = %v, want one saying the call was ignored", log.warnings)
 	}
 }

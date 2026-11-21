@@ -68,6 +68,12 @@ func (c *serviceContainer) routerLoop(ctx context.Context, entry *types.ServiceE
 				// Provider closed the out channel
 				return
 			}
+			if msg == nil {
+				// A provider that sends nil must not take down the router,
+				// which has nothing to recover it, and with it the process.
+				c.logger.Warn("nil message on the out channel of a channel service, dropped", "service", entry.Name)
+				continue
+			}
 
 			entry.ConsumerMu.RLock()
 

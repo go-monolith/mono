@@ -571,6 +571,9 @@ type overloadReporter struct {
 	lastExpiredLog atomic.Int64 // unix nanoseconds of the last expired-requests line
 	expired        atomic.Int64 // expired requests dropped since that line
 	lastSkewLog    atomic.Int64 // unix nanoseconds of the last clock-skew warning
+
+	lastReplylessLog atomic.Int64 // unix nanoseconds of the last line about messages without a reply subject
+	replylessCount   atomic.Int64 // such messages handled since that line
 	// Monotonic totals for SubscriptionStats (the counters above are reset
 	// at every log line).
 	rejectedTotal atomic.Int64
@@ -690,7 +693,12 @@ func frameworkErrorReply(reply, errorType, message string) *types.Msg {
 //
 // It returns true when the pool accepted the job.
 func submitToPool(pool *workerpool.Pool, eventBus types.EventBus, logger types.Logger, reporter *overloadReporter, msg *types.Msg, job workerpool.Job) bool {
-	wait := msg.Reply == ""
+	return SubmitToPoolWait(pool, eventBus, logger, reporter, msg, job, msg.Reply == "")
+}
+
+// SubmitToPoolWait is submitToPool with the choice whether the caller waits
+// for room in the pool.
+func SubmitToPoolWait(pool *workerpool.Pool, eventBus types.EventBus, logger types.Logger, reporter *overloadReporter, msg *types.Msg, job workerpool.Job, wait bool) bool {
 	err := pool.Submit(job, wait)
 	if err == nil {
 		return true
@@ -1057,11 +1065,22 @@ func (lm *lifecycleManager) startModule(ctx context.Context, module types.Module
 
 	// Step 1: Set dependency service containers, as read-only attributed views
 	if depMod, ok := module.(types.DependentModule); ok {
-		lm.mu.RLock()
+		// The module's own code (Dependencies, SetDependencyServiceContainer)
+		// runs without the lifecycle lock: the containers are looked up
+		// under it first. Called under the read lock, a module that asked
+		// the application anything from there could wait for good behind a
+		// writer that was waiting for this very read lock.
+		dependencies := depMod.Dependencies()
 		// A dependency listed twice is resolved once (see registry.ResolveDependencies),
 		// so its container is also provided only once.
+		type dependency struct {
+			name      string
+			container types.ServiceContainer
+		}
 		provided := make(map[string]struct{})
-		for _, depName := range depMod.Dependencies() {
+		var deps []dependency
+		lm.mu.RLock()
+		for _, depName := range dependencies {
 			if _, dup := provided[depName]; dup {
 				continue
 			}
@@ -1071,9 +1090,12 @@ func (lm *lifecycleManager) startModule(ctx context.Context, module types.Module
 				lm.mu.RUnlock()
 				return monoerrors.WrapModuleStartFailed(moduleName, fmt.Errorf("dependency %s container not found", depName))
 			}
-			depMod.SetDependencyServiceContainer(depName, container.NewDependencyView(depContainer, depName, rec))
+			deps = append(deps, dependency{name: depName, container: depContainer})
 		}
 		lm.mu.RUnlock()
+		for _, dep := range deps {
+			depMod.SetDependencyServiceContainer(dep.name, container.NewDependencyView(dep.container, dep.name, rec))
+		}
 	}
 
 	// Step 1.5: Validate declared service contracts (fail fast) and make them
@@ -1218,7 +1240,11 @@ func (lm *lifecycleManager) setupNATSSubscriptions(ctx context.Context) error {
 					// services protocol stats.
 					start := time.Now()
 					response, err := invokeRequestReplyHandler(ctx, handler, msg)
-					metrics.record(start.Sub(arrival), time.Since(start), err)
+					// The run is counted before the reply goes out: a caller that
+					// reads the statistics right after its reply finds it there.
+					// The statistics are readable by any client of the server:
+					// they get the public text of a panic, not its value.
+					metrics.record(start.Sub(arrival), time.Since(start), PublicError(err))
 					if err != nil {
 						logger.Error("RequestReply handler error",
 							append([]any{"service", serviceName, "module", modName, "subject", msg.Subject}, handlerErrorFields(err)...)...)
@@ -1229,17 +1255,16 @@ func (lm *lifecycleManager) setupNATSSubscriptions(ctx context.Context) error {
 								Subject: msg.Reply,
 								Header: types.Header{
 									types.HeaderError:        []string{"true"},
-									types.HeaderErrorMessage: []string{err.Error()},
+									types.HeaderErrorMessage: []string{PublicErrorText(err)},
 								},
 								Data: nil,
 							}
 
 							// Add error type classification (optional header). A recovered
 							// panic gets the framework's own type so clients can map it to
-							// ErrHandlerPanic; other errors use the reflected type name.
-							if _, isPanic := panicStack(err); isPanic {
-								errorMsg.Header[types.HeaderErrorType] = []string{types.ErrorTypeHandlerPanic}
-							} else if errorType := getErrorTypeName(err); errorType != "" {
+							// ErrHandlerPanic; other errors use the reflected type name,
+							// which is never one of the framework's (HandlerErrorType).
+							if errorType := HandlerErrorType(err); errorType != "" {
 								errorMsg.Header[types.HeaderErrorType] = []string{errorType}
 							}
 
@@ -1249,21 +1274,41 @@ func (lm *lifecycleManager) setupNATSSubscriptions(ctx context.Context) error {
 						}
 						return
 					}
-					// Manually publish response to the reply subject when sender specifies one
-					// automatic reply handling to maintain explicit control over error handling
-					if msg.Reply != "" && response != nil {
-						if pubErr := eventBus.Publish(msg.Reply, response); pubErr != nil {
-							logger.Error("Failed to publish response", "service", serviceName, "error", pubErr)
-						}
-					} else {
-						logger.Warn("No reply subject specified, response not sent", "service", serviceName)
+					// A message published to the subject without a reply subject:
+					// the response has nowhere to go.
+					if msg.Reply == "" {
+						reporter.replyless()
+						return
+					}
+					// The caller waits for a reply, so it gets one whatever the
+					// handler returned: a nil response is an empty reply, and a
+					// response that cannot be published (larger than the server's
+					// maximum payload) is answered with an error. Before, both
+					// left the caller waiting for its timeout.
+					if response == nil {
+						response = []byte{}
+					}
+					pubErr := eventBus.Publish(msg.Reply, response)
+					if pubErr == nil {
+						return
+					}
+					// The handler ran, but its caller got an error: the
+					// statistics count the run, already recorded, as one.
+					metrics.recordError(fmt.Errorf("the response could not be sent: %w", pubErr))
+					logger.Error("Failed to publish response", "service", serviceName, "module", modName,
+						"response_size", len(response), "error", pubErr)
+					// The message is the reason alone: the client's
+					// ErrReplyFailed already says what happened.
+					replyMsg := frameworkErrorReply(msg.Reply, types.ErrorTypeReplyFailed, pubErr.Error())
+					if errPubErr := eventBus.PublishMsg(replyMsg); errPubErr != nil {
+						logger.Error("Failed to publish error response", "service", serviceName, "module", modName, "error", errPubErr)
 					}
 				}
 
 				// Create NATS request-reply subscription with queue group for "at most one" delivery
 				sub, err := eventBus.QueueSubscribe(entry.Subject, queueGroup, func(reqCtx context.Context, msg *types.Msg) {
 					arrival := time.Now()
-					submitToPool(pool, eventBus, logger, reporter, msg, func() { handleRequest(reqCtx, msg, arrival) })
+					SubmitRequestToPool(pool, eventBus, logger, reporter, msg, func() { handleRequest(reqCtx, msg, arrival) })
 				})
 				if err != nil {
 					return fmt.Errorf("failed to subscribe to %s: %w", entry.Subject, err)

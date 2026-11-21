@@ -50,6 +50,9 @@ type Recorder struct {
 
 	mu         sync.RWMutex
 	violations map[violationKey]*violation
+
+	// ignoredWarned holds the kinds WarnIgnored has logged.
+	ignoredWarned sync.Map
 }
 
 // consumedContracts is a ConsumeServices() list with its indexes. It is not
@@ -432,6 +435,23 @@ func (r *Recorder) Violation(kind types.BoundaryViolationKind, dependency, subje
 		r.warnFirst(key)
 	}
 	return nil
+}
+
+// WarnIgnored logs, once per kind, that a call of the module was ignored for
+// the violation err, which Violation returned in strict mode. It is for the
+// calls that return no error (EventBus.SetRuntimeContext, and the Set* and
+// StartChannelRouters methods of a dependency's container): every other
+// rejected call hands err to the module, and these would do nothing without
+// a trace.
+func (r *Recorder) WarnIgnored(kind types.BoundaryViolationKind, err error) {
+	if r.logger == nil {
+		return
+	}
+	if _, logged := r.ignoredWarned.LoadOrStore(kind, struct{}{}); logged {
+		return
+	}
+	r.logger.Warn("Module boundary violation: the call was ignored (WithStrictModuleBoundaries)",
+		"module", r.module, "kind", string(kind), "error", err)
 }
 
 // maxViolations bounds the distinct violations (kind, dependency, subject) a

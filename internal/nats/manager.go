@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/url"
 	"runtime/debug"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -147,7 +148,7 @@ func (m *natsManager) Start(ctx context.Context) error {
 		var err error
 		opts, err = server.ProcessConfigFile(m.config.ConfigFile)
 		if err != nil {
-			return fmt.Errorf("failed to process NATS config file %q: %w", m.config.ConfigFile, err)
+			return fmt.Errorf("failed to process NATS config file %q: %w", m.config.ConfigFile, RedactConfigError(err))
 		}
 		m.logger.Info("NATS config file loaded", "path", m.config.ConfigFile)
 
@@ -157,6 +158,12 @@ func (m *natsManager) Start(ctx context.Context) error {
 		// compatible with AutoTLS.
 		if m.config.AutoTLS != nil && opts.TLSConfig != nil {
 			return fmt.Errorf("NATS config file %q defines a tls{} block, which conflicts with AutoTLS; remove one of the two", m.config.ConfigFile)
+		}
+		// AutoTLS makes TLS mandatory for every TCP client; allow_non_tls
+		// would let a client connect and publish in plaintext beside it.
+		if m.config.AutoTLS != nil && opts.AllowNonTLS {
+			return fmt.Errorf("NATS config file %q sets allow_non_tls, which cannot be combined with AutoTLS: "+
+				"it lets plaintext clients in beside the TLS ones", m.config.ConfigFile)
 		}
 
 		// Sync framework config from the config file values (for fields not programmatically set)
@@ -293,7 +300,18 @@ func (m *natsManager) Start(ctx context.Context) error {
 	if err := applyClusterTLS(opts, m.config.ClusterTLSCertFile, m.config.ClusterTLSKeyFile, m.config.ClusterTLSCAFile, m.logger); err != nil {
 		return err
 	}
-	if err := applyClientTLS(opts, m.config.ClientTLS, m.config.ClusterTLSCAFile, m.logger); err != nil {
+	// The client CA is checked against the route CA certificates. With
+	// WithNATSClusterTLS their file is known; a config file's
+	// cluster { tls {} } block leaves only a pool, which cannot be listed,
+	// so the file is read from the config again.
+	routeCAFile := m.config.ClusterTLSCAFile
+	if routeCAFile == "" && m.config.ConfigFile != "" && m.config.ClientTLS != nil && m.config.ClientTLS.ClientCAFile != "" {
+		var err error
+		if routeCAFile, err = ClusterCAFileOfConfig(m.config.ConfigFile); err != nil {
+			return err
+		}
+	}
+	if err := applyClientTLS(opts, m.config.ClientTLS, routeCAFile, m.logger); err != nil {
 		return err
 	}
 	if m.config.SystemAccountUsername != "" || m.config.SystemAccountPassword != "" {
@@ -334,27 +352,37 @@ func (m *natsManager) Start(ctx context.Context) error {
 		return fmt.Errorf("failed to create NATS server: %w", err)
 	}
 
-	// Configure NATS server logger if any logging flag is enabled
+	// The server reports why it cannot start (a port in use, a store it
+	// cannot open) through its logger only, as a fatal message, and then
+	// simply never becomes ready. A logger is therefore always installed:
+	// it keeps the fatal message for the error below and logs it. The
+	// server's other lines are forwarded only when a logging flag is on.
 	// SetLoggerV2 must be called before Start()
+	var forward server.Logger
 	if m.config.LogDebug || m.config.LogTrace || m.config.LogSysTrace {
-		natsLogger := NewNATSLoggerAdapter(m.logger)
-		ns.SetLoggerV2(natsLogger, m.config.LogDebug, m.config.LogTrace, m.config.LogSysTrace)
+		forward = NewNATSLoggerAdapter(m.logger)
 		m.logger.Debug("NATS server logging enabled",
 			"debug", m.config.LogDebug,
 			"trace", m.config.LogTrace,
 			"sysTrace", m.config.LogSysTrace)
 	}
+	fatal := NewFatalCapture(m.logger, forward)
+	ns.SetLoggerV2(fatal, m.config.LogDebug, m.config.LogTrace, m.config.LogSysTrace)
 
 	m.server = ns
 
 	// Start the server in a goroutine
-	go ns.Start()
+	started := make(chan struct{})
+	go func() {
+		ns.Start()
+		close(started)
+	}()
 
-	// Wait for server to be ready
-	if !ns.ReadyForConnections(m.config.StartupReadyTimeout) {
+	// Wait for the server to be ready, or to say that it will not be.
+	if err := AwaitServerReady(ns, fatal, started, m.config.StartupReadyTimeout); err != nil {
 		ns.Shutdown()
 		m.server = nil
-		return fmt.Errorf("NATS server not ready after %s timeout", m.config.StartupReadyTimeout)
+		return err
 	}
 
 	// The address the server is listening on, not the configured one: with
@@ -423,7 +451,8 @@ func (m *natsManager) Start(ctx context.Context) error {
 		m.logger.Info("NATS client connected via in-process connection")
 	} else {
 		// Use TCP connection
-		clientURL := fmt.Sprintf("nats://%s:%d", m.config.Host, m.config.Port)
+		// JoinHostPort puts an IPv6 host in brackets.
+		clientURL := "nats://" + net.JoinHostPort(m.config.Host, strconv.Itoa(m.config.Port))
 		conn, err = nats.Connect(clientURL, clientOpts...)
 		if err != nil {
 			ns.Shutdown()
@@ -702,12 +731,12 @@ func (m *natsManager) ServerInfo() ServerInfo {
 	info := ServerInfo{
 		Host:             m.config.Host,
 		Port:             m.config.Port,
-		ClientURL:        fmt.Sprintf("%s://%s:%d", scheme, clientHost, m.config.Port),
+		ClientURL:        scheme + "://" + net.JoinHostPort(clientHost, strconv.Itoa(m.config.Port)),
 		JetStreamEnabled: m.config.JetStreamEnabled,
 	}
 
 	if m.config.ClusterEnabled {
-		info.ClusterURL = fmt.Sprintf("nats://%s:%d", m.config.ClusterHost, m.config.ClusterPort)
+		info.ClusterURL = "nats://" + net.JoinHostPort(m.config.ClusterHost, strconv.Itoa(m.config.ClusterPort))
 	}
 
 	return info
@@ -760,4 +789,47 @@ func ListenAddress(addr net.Addr, fallbackHost string, fallbackPort int) (string
 		return fallbackHost, fallbackPort
 	}
 	return tcp.IP.String(), tcp.Port
+}
+
+// startedReadyGrace is how long a server whose Start has returned with a
+// fatal message is still given to become ready.
+const startedReadyGrace = time.Second
+
+// AwaitServerReady waits until ns accepts connections, for at most timeout.
+// started is closed when the server's Start has returned.
+//
+// A server that cannot start says so only as a fatal message, and its Start
+// then returns without it ever becoming ready: a port in use, a store it
+// cannot open, a pid file it cannot write. In that case (Start has returned,
+// a fatal message was reported, and the server is not ready
+// startedReadyGrace later) the message is returned, without waiting for the
+// rest of the timeout. A fatal message alone does not end the wait: not all
+// of them stop the server (a profiling port in use does not), and Start goes
+// on, recovering a store for as long as that takes, before it returns.
+func AwaitServerReady(ns *server.Server, fatal *FatalCapture, started <-chan struct{}, timeout time.Duration) error {
+	ready := make(chan bool, 1)
+	go func() { ready <- ns.ReadyForConnections(timeout) }()
+
+	var grace <-chan time.Time
+	for {
+		select {
+		case ok := <-ready:
+			if ok {
+				return nil
+			}
+			if reason := fatal.Last(); reason != "" {
+				return fmt.Errorf("NATS server not ready after %s timeout (the server reported: %s)", timeout, RedactURLText(reason))
+			}
+			return fmt.Errorf("NATS server not ready after %s timeout", timeout)
+		case <-started:
+			started = nil
+			if fatal.Last() != "" {
+				timer := time.NewTimer(startedReadyGrace)
+				defer timer.Stop()
+				grace = timer.C
+			}
+		case <-grace:
+			return fmt.Errorf("NATS server failed to start: %s", RedactURLText(fatal.Last()))
+		}
+	}
 }

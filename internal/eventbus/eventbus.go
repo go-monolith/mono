@@ -248,7 +248,20 @@ func (eb *natsEventBus) QueueSubscribeSync(subject, queue string) (types.Subscri
 	return wrapSubscription(natsSub), nil
 }
 
-// ChanSubscribe creates a channel-based subscription.
+// chanForwardGrace is how long the forwarder of a channel subscription that
+// has ended still waits for the caller to take a message that was already
+// delivered, before it gives the rest up.
+const chanForwardGrace = time.Second
+
+// ChanSubscribe creates a channel-based subscription. Messages are forwarded
+// to ch until the subscription ends (Unsubscribe, a completed Drain, or the
+// connection closing); what was delivered before that is still handed over,
+// for as long as the caller takes it. The channel is the caller's and is not
+// closed, as with nats.go.
+//
+// The goroutine that forwards the messages ends with the subscription.
+// Before, it read a channel that nats.go never closes, so every subscription
+// left one goroutine behind for the life of the process.
 func (eb *natsEventBus) ChanSubscribe(subject string, ch chan *types.Msg) (types.Subscription, error) {
 	natsCh := make(chan *nats.Msg, cap(ch))
 
@@ -257,20 +270,91 @@ func (eb *natsEventBus) ChanSubscribe(subject string, ch chan *types.Msg) (types
 		return nil, fmt.Errorf("failed to create channel subscription to subject %q: %w", subject, err)
 	}
 
-	// Forward messages from NATS channel to mono channel
-	go func() {
-		for natsMsg := range natsCh {
-			ch <- &types.Msg{
-				Subject: natsMsg.Subject,
-				Reply:   natsMsg.Reply,
-				Data:    natsMsg.Data,
-				Header:  types.Header(natsMsg.Header),
-			}
-		}
-		close(ch)
-	}()
+	// nats.go calls this when the subscription is removed for any reason.
+	// It only signals: it runs under the subscription's lock.
+	ended := make(chan struct{})
+	var once sync.Once
+	end := func() { once.Do(func() { close(ended) }) }
+	natsSub.SetClosedHandler(func(string) { end() })
+	// A subscription that ended before the handler was set (the connection
+	// closed in between) never calls it.
+	if !natsSub.IsValid() {
+		end()
+	}
+
+	go ForwardChanSubscription(natsCh, ch, ended, func(dropped int) {
+		// The ordinary way to stop is to unsubscribe and stop reading,
+		// which leaves what was delivered meanwhile untaken: not a warning.
+		eb.logger.Debug("Messages of a channel subscription that has ended were not taken and are dropped",
+			"subject", subject, "dropped", dropped, "waited", chanForwardGrace)
+	})
 
 	return wrapSubscription(natsSub), nil
+}
+
+// ForwardChanSubscription forwards the messages of a channel subscription
+// from in to out until ended is closed, then hands over what is still in in
+// and returns. A message the caller does not take within chanForwardGrace
+// once the subscription has ended is given up, with the rest; their number
+// is reported to dropped (nil: not reported).
+func ForwardChanSubscription(in <-chan *nats.Msg, out chan<- *types.Msg, ended <-chan struct{}, dropped func(n int)) {
+	convert := func(natsMsg *nats.Msg) *types.Msg {
+		return &types.Msg{
+			Subject: natsMsg.Subject,
+			Reply:   natsMsg.Reply,
+			Data:    natsMsg.Data,
+			Header:  types.Header(natsMsg.Header),
+		}
+	}
+	// handOver gives the caller a message of a subscription that has
+	// ended, and reports whether to go on.
+	handOver := func(natsMsg *nats.Msg) bool {
+		if ForwardWithin(out, convert(natsMsg)) {
+			return true
+		}
+		if dropped != nil {
+			dropped(1 + len(in))
+		}
+		return false
+	}
+	for {
+		select {
+		case natsMsg := <-in:
+			select {
+			case out <- convert(natsMsg):
+			case <-ended:
+				// The caller may still be reading: give it this message and
+				// the delivered ones behind it, but do not wait for good.
+				if !handOver(natsMsg) {
+					return
+				}
+			}
+		case <-ended:
+			for {
+				select {
+				case natsMsg := <-in:
+					if !handOver(natsMsg) {
+						return
+					}
+				default:
+					return
+				}
+			}
+		}
+	}
+}
+
+// ForwardWithin sends msg to out and reports whether the caller took it
+// within chanForwardGrace.
+func ForwardWithin(out chan<- *types.Msg, msg *types.Msg) bool {
+	timer := time.NewTimer(chanForwardGrace)
+	defer timer.Stop()
+	select {
+	case out <- msg:
+		return true
+	case <-timer.C:
+		return false
+	}
 }
 
 // EventStream returns a JetStream context that is compatible with EventStream

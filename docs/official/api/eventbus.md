@@ -44,7 +44,8 @@ The bus a module receives through `SetEventBus` is scoped to that module. On it,
 
 - a publish or request to `services.<module>.<service>` when that module is not the module itself, a declared dependency or a plugin (`undeclared-service-subject`);
 - a subscription to another module's service subject (`foreign-service-subscription`);
-- for a module that implements `ServiceConsumerModule`, a request to a dependency's service that is not in `ConsumeServices()`.
+- for a module that implements `ServiceConsumerModule`, a request to a dependency's service that is not in `ConsumeServices()`;
+- a call of `SetRuntimeContext` (`runtime-context-replaced`): the runtime context is set by the framework and shared by the handlers of every module. With `WithStrictModuleBoundaries()` the call does nothing, as the method returns no error.
 
 By default a violation is logged and the call goes through. With `WithStrictModuleBoundaries()` the call returns `ErrModuleBoundaryViolation`. `events.*` and other subjects are not checked, and neither is `EventStream()`.
 
@@ -256,7 +257,7 @@ Creates a synchronous queue group subscription.
 func (eb EventBus) ChanSubscribe(subject string, ch chan *Msg) (Subscription, error)
 ```
 
-Delivers messages to a Go channel.
+Delivers messages to a Go channel, until the subscription ends (`Unsubscribe`, a completed `Drain`, or the connection closing). Messages delivered before that are still handed over, for as long as the channel is read. The channel is yours and is never closed by the framework, so do not rely on a `range` over it ending: stop reading when you unsubscribe.
 
 **Example:**
 ```go
@@ -341,8 +342,8 @@ The framework uses a few `Mono-*` headers on the NATS wire. Clients in other lan
 | `Mono-Deadline` | request → handler | The caller's absolute deadline, Unix time in **milliseconds**. The handler runs with this deadline, and the request is dropped unanswered if it passed by more than the clock-skew allowance (250ms by default) when a worker picks it up. Values more than 24h from arrival (wrong unit) are ignored. |
 | `Mono-Timeout` | request → handler | The time the caller had left when it sent the request, in **milliseconds** (`0` = no time left). Applied relative to the message's arrival, so it does not depend on either clock. Used when `Mono-Deadline` is absent, invalid, or disagrees with it by more than the allowance (clock skew; logged). Clamped to 24h. |
 | `Mono-Error` | reply → caller | `"true"` when the reply is an error instead of a response payload. |
-| `Mono-Error-Message` | reply → caller | Human-readable error message. |
-| `Mono-Error-Type` | reply → caller | Error classification. Framework values: `overloaded` (pool and queue full, retry elsewhere), `handler-panic` (handler crashed on this request), `shutting-down` (instance stopping). Other values are the handler error's type name, lower-cased with the `Error` suffix removed. |
+| `Mono-Error-Message` | reply → caller | Human-readable error message. For a handler that panicked it is the fixed text `handler panicked`; the value it panicked with is in the server's log only. |
+| `Mono-Error-Type` | reply → caller | Error classification. Framework values: `overloaded` (pool and queue full, retry elsewhere), `handler-panic` (handler crashed on this request), `shutting-down` (instance stopping), `reply-failed` (the handler ran, but its response could not be sent, for example because it exceeds the maximum payload). Other values are the handler error's type name, lower-cased with the `Error` suffix removed; a name that would equal a framework value gets the suffix `-error` (`OverloadedError` is sent as `overloaded-error`). |
 
 - Header names are matched case-sensitively as NATS delivers them: send them exactly as spelled here.
 - A request without `Mono-Deadline`/`Mono-Timeout` is handled with no deadline, as older clients did.

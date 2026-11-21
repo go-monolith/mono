@@ -47,12 +47,40 @@ const (
 	// differences but not queue wait before arrival.
 	HeaderTimeout = "Mono-Timeout"
 
+	// ErrorTypeReplyFailed is the HeaderErrorType value of the error response
+	// the framework sends when a request-reply handler ran but its response
+	// could not be published (for example because it is larger than the
+	// server's maximum payload). The caller gets an error with this type
+	// and the reason instead of waiting for its timeout; the handler's work
+	// is done, so retrying repeats it. Clients map it to
+	// errors.ErrReplyFailed.
+	ErrorTypeReplyFailed = "reply-failed"
+
 	// ErrorTypeShuttingDown is the HeaderErrorType value of the error response
 	// the framework sends to a request that arrives while the instance is
 	// shutting down and no longer accepts work. Clients map it to
 	// errors.ErrServiceUnavailable.
 	ErrorTypeShuttingDown = "shutting-down"
+
+	// HandlerPanicMessage is the Mono-Error-Message of the error reply for a
+	// handler that panicked, and what the service statistics show for it.
+	// The value the handler panicked with stays in the log.
+	HandlerPanicMessage = "handler panicked"
 )
+
+// IsFrameworkErrorType reports whether errorType is one of the
+// Mono-Error-Type values the framework itself answers a request with
+// (ErrorTypeOverloaded, ErrorTypeShuttingDown, ErrorTypeHandlerPanic,
+// ErrorTypeReplyFailed). A handler error whose type name comes out as one of
+// them is sent with the suffix "-error", so that a client never takes it for
+// the framework's.
+func IsFrameworkErrorType(errorType string) bool {
+	switch errorType {
+	case ErrorTypeOverloaded, ErrorTypeShuttingDown, ErrorTypeHandlerPanic, ErrorTypeReplyFailed:
+		return true
+	}
+	return false
+}
 
 // EventBus provides event-driven communication wrapping NATS client.
 //
@@ -103,6 +131,11 @@ type EventBus interface {
 
 	// SetRuntimeContext sets the context that will be passed to all message handlers.
 	// When this context is cancelled, handlers can detect shutdown and terminate gracefully.
+	//
+	// The framework sets it; module code must not. On the bus a module is
+	// handed through SetEventBus the call is a boundary violation
+	// (BoundaryViolationRuntimeContextReplaced): recorded, and ignored under
+	// WithStrictModuleBoundaries.
 	SetRuntimeContext(ctx context.Context)
 }
 

@@ -210,6 +210,7 @@ type mockEventBus struct {
 	eventStreamErr       error             // Error to return from EventStream()
 	queueSubscribeErr    error             // Error to return from QueueSubscribe
 	queueSubscribeErrFor string            // Only fail QueueSubscribe for this subject (empty = all)
+	publishDataErr       error             // returned by Publish only (see setPublishDataError)
 }
 
 type publishedMessage struct {
@@ -230,6 +231,9 @@ func (m *mockEventBus) Publish(subject string, data []byte) error {
 	defer m.mu.Unlock()
 	if m.publishErr != nil {
 		return m.publishErr
+	}
+	if m.publishDataErr != nil {
+		return m.publishDataErr
 	}
 	m.publishedMessages = append(m.publishedMessages, publishedMessage{subject: subject, data: data})
 
@@ -259,6 +263,14 @@ func (m *mockEventBus) setPublishError(err error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.publishErr = err
+}
+
+// setPublishDataError makes Publish fail and leaves PublishMsg working: the
+// response of a handler cannot be sent, an error reply can.
+func (m *mockEventBus) setPublishDataError(err error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.publishDataErr = err
 }
 
 func (m *mockEventBus) getHandlers(subject string) []types.MsgHandler {
@@ -805,9 +817,9 @@ func TestRequestReplyResponsePublished(t *testing.T) {
 	}
 }
 
-// TestRequestReplyNoResponseWhenEmpty verifies that when a RequestReply handler
-// returns nil response, no message is published to prevent sending empty responses.
-func TestRequestReplyNoResponseWhenEmpty(t *testing.T) {
+// TestRequestReplyEmptyReplyForNilResponse verifies that when a RequestReply
+// handler returns a nil response, the caller is answered with an empty reply.
+func TestRequestReplyEmptyReplyForNilResponse(t *testing.T) {
 	reg := registry.NewModuleRegistry(&mockLogger{})
 	logger := &mockLogger{}
 	eventBus := newMockEventBus()
@@ -864,10 +876,12 @@ func TestRequestReplyNoResponseWhenEmpty(t *testing.T) {
 		t.Fatal("Handler didn't complete within timeout")
 	}
 
-	// Verify no response was published
-	publishedResponses := eventBus.getPublishedMessages(replySubject)
-	if len(publishedResponses) != 0 {
-		t.Fatalf("Expected no published response, got %d", len(publishedResponses))
+	// The caller asked for a reply, so it gets one: a nil response is an
+	// empty reply. (It used to get nothing and wait for its timeout.)
+	eventually(t, func() bool { return len(eventBus.getPublishedMessages(replySubject)) == 1 },
+		"a handler returning (nil, nil) left the caller without a reply")
+	if got := eventBus.getPublishedMessages(replySubject)[0]; len(got) != 0 {
+		t.Fatalf("reply = %q, want empty", got)
 	}
 }
 

@@ -234,6 +234,14 @@ func ImportViolations(ctx context.Context, opts ...ImportOption) ([]ImportViolat
 	if defaultPatterns {
 		cfg.patterns = []string{defaultImportPattern}
 	}
+	// The patterns are arguments of the go command. One that starts with
+	// "-" would be read as one of its flags ("-toolexec=..." makes it run a
+	// program), so it is refused, and the patterns follow a "--".
+	for _, pattern := range cfg.patterns {
+		if pattern == "" || strings.HasPrefix(pattern, "-") {
+			return nil, fmt.Errorf("monotest.WithImportPatterns: %q is not a package pattern (a pattern is not empty and does not start with \"-\")", pattern)
+		}
+	}
 	ctx, cancel := context.WithTimeout(ctx, importListTimeout)
 	defer cancel()
 
@@ -318,7 +326,7 @@ type listedModule struct {
 // packages together with all their dependencies (marked DepOnly), which is
 // what tells a standard library import from any other.
 func listPackages(ctx context.Context, dir string, patterns []string) ([]listedPackage, error) {
-	args := append([]string{"list", "-deps", "-json=ImportPath,Name,Standard,DepOnly,Imports,Module"}, patterns...)
+	args := append([]string{"list", "-deps", "-json=ImportPath,Name,Standard,DepOnly,Imports,Module", "--"}, patterns...)
 	return goList[listedPackage](ctx, dir, args...)
 }
 

@@ -4,10 +4,13 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 )
 
 // HashChain manages SHA-256 hash chaining for tamper-evident audit logging.
@@ -130,16 +133,100 @@ func CanonicalDetails(details map[string]any) ([]byte, error) {
 	return canonical, nil
 }
 
+// ErrAmbiguousEntry is returned for an entry whose event type, module name or
+// service name contains the separator of the hash input ("|"): by the audit
+// module when such an entry is to be written with hash chaining
+// (SaveAuditTrail returns it; an entry of the framework's own events, or one
+// sent with AsyncSaveAuditTrail, is reported on stderr), and by
+// VerifyChainFrom when a log holds one. See CheckHashable.
+var ErrAmbiguousEntry = errors.New("audit entry field contains the hash separator '|'")
+
+// HashSeparator separates the fields of the hash input (see HashEntry).
+const HashSeparator = "|"
+
+// CheckHashable returns an error wrapping ErrAmbiguousEntry when the event
+// type, module name or service name of entry contains HashSeparator.
+//
+// The hash input joins the fields with the separator and does not escape it,
+// so an entry with module "billing|refund" and service "x" has the hash of
+// one with module "billing" and service "refund|x": someone who can edit the
+// log could move text between fields and the chain would still verify. With
+// these three fields free of the separator the input has one reading only:
+// the timestamp before them is formatted without one, the details after them
+// are JSON, which ends where its braces close, the previous hash at the end
+// is fixed by the chain, and the user context is what is left between the
+// two. Refusing the separator in the three fields therefore closes the gap
+// without changing the hash of any other entry, so logs and verifiers of
+// earlier versions keep working. Details and the user context may contain it.
+func CheckHashable(entry Entry) error {
+	for _, field := range []struct{ name, value string }{
+		{"event_type", string(entry.EventType)},
+		{"module_name", entry.ModuleName},
+		{"service_name", entry.ServiceName},
+	} {
+		if strings.Contains(field.value, HashSeparator) {
+			return fmt.Errorf("%w: %s %q", ErrAmbiguousEntry, field.name, field.value)
+		}
+	}
+	return nil
+}
+
+// CheckDetailsReadBack returns an error for details that can be written as
+// JSON but not parsed back: a number outside the range of a float64
+// (json.Number("1e999"), a big integer). Such an entry would be written with
+// the hash of empty details, and no reader could parse its line, so neither
+// it nor the rest of its log would verify. Details that cannot be written at
+// all are not its concern: the write itself reports them.
+func CheckDetailsReadBack(details map[string]any) error {
+	if len(details) == 0 {
+		return nil
+	}
+	written, err := json.Marshal(details)
+	if err != nil {
+		return nil
+	}
+	var parsed map[string]any
+	if err := json.Unmarshal(written, &parsed); err != nil {
+		return fmt.Errorf("audit entry details cannot be read back from the log: %w", err)
+	}
+	return nil
+}
+
+// AsWritten returns text as a reader of the log gets it: written as JSON and
+// parsed back. That is text itself unless it is not valid UTF-8, when JSON
+// writes each invalid byte as the replacement character U+FFFD. Hashed as it
+// was, an entry with such text (a user context taken from a request header)
+// never verified once parsed, and with it the rest of its log.
+func AsWritten(text string) string {
+	if utf8.ValidString(text) {
+		return text
+	}
+	written, err := json.Marshal(text)
+	if err != nil {
+		return text // a string always marshals
+	}
+	var parsed string
+	if err := json.Unmarshal(written, &parsed); err != nil {
+		return text
+	}
+	return parsed
+}
+
 // HashEntry returns the SHA-256 hash of entry with detailsJSON as the
 // representation of its details. The EntryHash field is not part of it.
+//
+// The fields are joined with HashSeparator, unescaped; CheckHashable says
+// which entries that is unambiguous for.
+//
+// The text fields are hashed as a reader of the log gets them (AsWritten).
 func HashEntry(entry Entry, detailsJSON []byte) string {
 	data := fmt.Sprintf("%s|%s|%s|%s|%s|%s|%s",
 		entry.Timestamp.UTC().Format(time.RFC3339Nano),
-		entry.EventType,
-		entry.ModuleName,
-		entry.ServiceName,
+		AsWritten(string(entry.EventType)),
+		AsWritten(entry.ModuleName),
+		AsWritten(entry.ServiceName),
 		string(detailsJSON),
-		entry.UserContext,
+		AsWritten(entry.UserContext),
 		entry.PrevHash)
 
 	hash := sha256.Sum256([]byte(data))
@@ -164,6 +251,8 @@ func LegacyEmptyDetailsHash(entry Entry) string {
 // Returns an error if:
 //   - The chain is broken (prev_hash doesn't match previous entry_hash)
 //   - Any entry_hash is invalid (doesn't match computed hash)
+//   - The event type, module name or service name of an entry contains "|"
+//     (ErrAmbiguousEntry, see CheckHashable)
 //
 // Example:
 //
@@ -204,9 +293,23 @@ func VerifyChainFrom(entries []Entry, startHash string) error {
 				i, prevHash, entry.PrevHash)
 		}
 
+		// An entry whose hash input can be read in two ways proves nothing
+		// about its fields, whatever its hash is.
+		if err := CheckHashable(entry); err != nil {
+			return fmt.Errorf("entry %d cannot be verified: %w", i, err)
+		}
+
 		// Verify entry_hash is correct. An entry without details may carry
-		// the hash earlier versions gave empty details.
-		computed := ComputeEntryHash(entry)
+		// the hash earlier versions gave empty details. Details that cannot
+		// be hashed are not replaced by empty ones here, as they are for an
+		// entry to be written: an entry would then verify with the hash of
+		// the same entry without details. (Details parsed from a log can
+		// always be hashed.)
+		detailsJSON, err := CanonicalDetails(entry.Details)
+		if err != nil {
+			return fmt.Errorf("entry %d cannot be verified: %w", i, err)
+		}
+		computed := HashEntry(entry, detailsJSON)
 		legacy := len(entry.Details) == 0 && entry.EntryHash == LegacyEmptyDetailsHash(entry)
 		if entry.EntryHash != computed && !legacy {
 			return fmt.Errorf("entry %d has invalid hash: expected %s, got %s",

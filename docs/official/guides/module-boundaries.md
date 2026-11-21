@@ -199,8 +199,9 @@ What a module receives is wrapped:
 | `register-on-dependency` | Called `Register*`, `Unregister`, `BindModule`, `Set*`, `StartChannelRouters` or `RegisterContract` on a dependency's container |
 | `channel-consumer-mismatch` | Called `GetChannelService` with a `consumerModule` that is not its own name |
 | `undeclared-service-subject` | Published to or requested `services.<module>.<service>` of a module that is not itself, a declared dependency or a plugin (bypassing the port) |
-| `foreign-service-subscription` | Subscribed to another module's service subject |
+| `foreign-service-subscription` | Subscribed to another module's service subject, by name or through a wildcard: `>`, `*.>` and `*.billing.charge` receive service subjects as `services.>` does (checked since v0.2.19) |
 | `undeclared-service-use` | Implements `ConsumeServices()` and looked up a dependency service that is not in the list, or published to or requested its subject on the event bus |
+| `runtime-context-replaced` | Called `SetRuntimeContext` on its event bus, which replaces the context every handler of every module receives (since v0.2.19; in strict mode the call does nothing, as the method returns no error) |
 
 **Default mode:** the call goes through, is warned once, and is reported. The report keeps up to 1024 distinct violations per module; beyond that, new ones are counted together per kind in an entry with `*` as dependency and subject.
 
@@ -358,7 +359,7 @@ Every directory named `contract` counts. A package with that name that is not a 
 | `WithNonContractPackages(paths...)` | A package named `contract` that is not a module's contract, such as `legal/contract` or `order/internal/contract`. Its parent is then not a module because of it |
 | `WithAllowedContractImports(paths...)` | Extra imports for contract packages, such as a Protobuf runtime or a shared value type |
 | `WithImportDir(dir)` | Run in another directory (default: the test's directory) |
-| `WithImportPatterns(patterns...)` | Packages to check (default `./...`). The modules of the whole application are still known |
+| `WithImportPatterns(patterns...)` | Packages to check (default `./...`). The modules of the whole application are still known. A pattern that is empty or starts with `-` is refused: it would be read as a flag of the `go` command |
 
 Limits:
 

@@ -134,6 +134,13 @@ immediately and then logs the eventual outcome. The issuance cannot be
 cancelled, only abandoned, and silently dropping it would hide a repeating leak
 from a supervised restart loop whose attempts all race on the same cache.
 
+### Config file
+
+A config file may be combined with AutoTLS unless it defines a `tls{}` block
+(both would own `TLSConfig`) or sets `allow_non_tls`, which would let a client
+connect in plaintext beside the TLS ones. Both are rejected when the server
+starts.
+
 ### Shutdown
 
 `stop` is safe on a nil receiver and safe to call twice. It shuts the server

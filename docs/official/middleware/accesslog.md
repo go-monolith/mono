@@ -119,7 +119,7 @@ ts=2025-01-15T10:30:00Z request_id=550e8400-e29b-41d4-a716-446655440000 module=p
 | `module` | Name of the module providing the service |
 | `service` | Service name (event name for event consumers) |
 | `service_type` | `request_reply`, `queue_group`, `stream_consumer`, `event_consumer`, `event_stream_consumer` or `channel` |
-| `status` | success or error |
+| `status` | success or error. A handler that panics is logged with `error` (since v0.2.19; before, such a request left no line) |
 | `duration_ms` | Handler time in whole milliseconds (sub-millisecond calls log 0) |
 | `request_size` | Size of request in bytes (sum of the batch for stream consumers) |
 | `response_size` | Size of response in bytes (0 except for request-reply and channel responses) |

@@ -851,3 +851,29 @@ func TestResolveConsumed(t *testing.T) {
 		})
 	}
 }
+
+// TestRecorderWarnIgnored: a call that returns no error is ignored in strict
+// mode, and the module is told once per kind.
+func TestRecorderWarnIgnored(t *testing.T) {
+	log := &recLogger{}
+	r := boundary.New("order", nil, nil, true, log)
+	err := r.Violation(types.BoundaryViolationRuntimeContextReplaced, "", "")
+	if !errors.Is(err, monoerrors.ErrModuleBoundaryViolation) {
+		t.Fatalf("Violation = %v, want ErrModuleBoundaryViolation", err)
+	}
+	r.WarnIgnored(types.BoundaryViolationRuntimeContextReplaced, err)
+	r.WarnIgnored(types.BoundaryViolationRuntimeContextReplaced, err)
+	if log.count() != 1 {
+		t.Fatalf("warnings = %v, want one", log.warns)
+	}
+	if got := log.warns[0]; !strings.Contains(got, "the call was ignored") || !strings.Contains(got, "runtime-context-replaced") || !strings.Contains(got, "order") {
+		t.Errorf("warning = %q", got)
+	}
+	r.WarnIgnored(types.BoundaryViolationRegisterOnDependency, err)
+	if log.count() != 2 {
+		t.Errorf("another kind is warned about on its own: %v", log.warns)
+	}
+
+	// Without a logger there is nothing to do.
+	boundary.New("order", nil, nil, true, nil).WarnIgnored(types.BoundaryViolationRuntimeContextReplaced, err)
+}

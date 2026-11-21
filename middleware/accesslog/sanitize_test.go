@@ -50,3 +50,53 @@ func TestForeignRequestIDCannotForgeALine(t *testing.T) {
 		})
 	}
 }
+
+// TestPanickingHandlerLeavesALine: a request whose handler panics is the one
+// an operator looks for. Each wrapper writes its line with status error, and
+// the panic goes on to the framework unchanged.
+func TestPanickingHandlerLeavesALine(t *testing.T) {
+	msg := &types.Msg{Data: []byte("abc")}
+	wrappers := map[string]func(m *AccessLogModule){
+		"request_reply": func(m *AccessLogModule) {
+			_, _ = m.wrapRequestReplyHandler(func(context.Context, *types.Msg) ([]byte, error) { panic("boom") }, "orders", "place")(context.Background(), msg)
+		},
+		"queue_group": func(m *AccessLogModule) {
+			_ = m.wrapQueueGroupHandler(func(context.Context, *types.Msg) error { panic("boom") }, "orders", "place")(context.Background(), msg)
+		},
+		"event_consumer": func(m *AccessLogModule) {
+			_ = m.wrapEventConsumerHandler(func(context.Context, *types.Msg) error { panic("boom") }, "orders", "place")(context.Background(), msg)
+		},
+		"stream_consumer": func(m *AccessLogModule) {
+			_ = m.wrapStreamConsumerHandler(func(context.Context, []*types.Msg) error { panic("boom") }, "orders", "place")(context.Background(), []*types.Msg{msg})
+		},
+		"event_stream_consumer": func(m *AccessLogModule) {
+			_ = m.wrapEventStreamConsumerHandler(func(context.Context, []*types.Msg) error { panic("boom") }, "orders", "place")(context.Background(), []*types.Msg{msg})
+		},
+	}
+	for serviceType, call := range wrappers {
+		t.Run(serviceType, func(t *testing.T) {
+			buf := &syncWriter{}
+			m, err := New(WithOutput(buf))
+			if err != nil {
+				t.Fatal(err)
+			}
+			var recovered any
+			func() {
+				defer func() { recovered = recover() }()
+				call(m)
+			}()
+			if recovered != "boom" {
+				t.Fatalf("the panic did not reach the caller of the wrapper unchanged: %v", recovered)
+			}
+			lines := buf.Lines()
+			if len(lines) != 1 {
+				t.Fatalf("%d lines written for a handler that panicked, want 1", len(lines))
+			}
+			for _, want := range []string{"service_type=" + serviceType, "status=error", "request_size=3"} {
+				if !strings.Contains(lines[0], want) {
+					t.Errorf("line %q lacks %q", lines[0], want)
+				}
+			}
+		})
+	}
+}

@@ -505,14 +505,18 @@ func TestRecreate_Backup(t *testing.T) {
 		cfg := BucketConfig{Name: "locks", Storage: MemoryStorage, RecreateOnStorageMismatch: true}
 		m, js := newMismatchModule(t, cfg)
 		real := streamAPI{js: js}
-		// As read, the stream ended 10 messages later than what is left now.
+		// As first read, the stream held 10 more messages, which have
+		// expired since: its last sequence stays, its count went down.
+		reads := 0
 		info := func(ctx context.Context, name string) (*jetstream.StreamInfo, error) {
 			info, err := real.StreamInfo(ctx, name)
 			if err != nil {
 				return nil, err
 			}
 			info.State.LastSeq += 10
-			info.State.Msgs += 10
+			if reads++; reads == 1 {
+				info.State.Msgs += 10
+			}
 			return info, nil
 		}
 		if _, err := m.openBucket(context.Background(), fakeStreams{streamAPI: real, info: info}, cfg); err != nil {

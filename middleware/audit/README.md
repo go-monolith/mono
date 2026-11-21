@@ -63,6 +63,8 @@ Hash chaining creates a cryptographic chain where each entry contains:
 
 This allows detection of any tampering or deletion of log entries.
 
+The hash joins the fields of an entry with `|`. With hash chaining on, an entry whose event type, module name or service name contains `|` is not written (`ErrAmbiguousEntry`), and `VerifyChain` reports a log that holds one: such an entry would have the hash of another one. Details and the user context may contain it.
+
 ```go
 // Start a new hash chain
 audit.New(

@@ -87,22 +87,36 @@ func (m *PluginModule) openBucket(ctx context.Context, streams streamStore, cfg 
 
 // createBackupBucket creates the file-storage KV bucket backup, sourcing the
 // stream of bucket cfg.Name with its keys mapped to the backup's ($KV.<bucket>.>
-// to $KV.<backup>.>), with
-// the stream's per-key history (clamped to the KV limits), replicas,
-// placement and compression.
+// to $KV.<backup>.>), with the stream's per-key history, replicas, placement
+// and compression.
+//
+// A KV bucket keeps 1 to 64 versions of a key, and the stream of the bucket
+// may keep more, or all of them (created or edited as a stream). A backup
+// with fewer would drop the older versions, and the bucket is deleted once
+// the copy counts as complete. For such a stream the backup is created
+// without its source, so that it copies nothing yet, then given the stream's
+// own limit and the source in one update.
 func (m *PluginModule) createBackupBucket(ctx context.Context, cfg BucketConfig, backup string, info *jetstream.StreamInfo, ttl time.Duration) error {
 	history := info.Config.MaxMsgsPerSubject
-	if history < 1 {
+	asBucket := history >= 1 && history <= jetstream.KeyValueMaxHistory
+	if !asBucket {
 		history = 1
-	}
-	if history > jetstream.KeyValueMaxHistory {
-		history = jetstream.KeyValueMaxHistory
 	}
 	replicas := info.Config.Replicas
 	if replicas < 1 {
 		replicas = 1
 	}
-	_, err := m.js.CreateKeyValue(ctx, jetstream.KeyValueConfig{
+	// The full stream name with its own subject transform: given a bare
+	// bucket name, nats.go takes one that starts with "KV_" for a stream
+	// name, so bucket "KV_x" was backed up from the stream of bucket "x".
+	sources := []*jetstream.StreamSource{{
+		Name: kvStreamPrefix + cfg.Name,
+		SubjectTransforms: []jetstream.SubjectTransformConfig{{
+			Source:      "$KV." + cfg.Name + ".>",
+			Destination: "$KV." + backup + ".>",
+		}},
+	}}
+	kvConfig := jetstream.KeyValueConfig{
 		Bucket:      backup,
 		Description: fmt.Sprintf("Backup of bucket %s, taken before it was recreated with %s storage", cfg.Name, jetStreamStorage(cfg.Storage)),
 		History:     uint8(history), //nolint:gosec // G115: clamped to 1..KeyValueMaxHistory above
@@ -111,18 +125,27 @@ func (m *PluginModule) createBackupBucket(ctx context.Context, cfg BucketConfig,
 		Replicas:    replicas,
 		Placement:   info.Config.Placement,
 		Compression: info.Config.Compression != jetstream.NoCompression,
-		// The full stream name with its own subject transform: given a bare
-		// bucket name, nats.go takes one that starts with "KV_" for a stream
-		// name, so bucket "KV_x" was backed up from the stream of bucket "x".
-		Sources: []*jetstream.StreamSource{{
-			Name: kvStreamPrefix + cfg.Name,
-			SubjectTransforms: []jetstream.SubjectTransformConfig{{
-				Source:      "$KV." + cfg.Name + ".>",
-				Destination: "$KV." + backup + ".>",
-			}},
-		}},
-	})
-	return err
+	}
+	if asBucket {
+		kvConfig.Sources = sources
+		_, err := m.js.CreateKeyValue(ctx, kvConfig)
+		return err
+	}
+	if _, err := m.js.CreateKeyValue(ctx, kvConfig); err != nil {
+		return err
+	}
+	stream, err := m.js.Stream(ctx, kvStreamPrefix+backup)
+	if err != nil {
+		return fmt.Errorf("failed to read the stream of backup bucket %q: %w", backup, err)
+	}
+	streamConfig := stream.CachedInfo().Config
+	streamConfig.MaxMsgsPerSubject = info.Config.MaxMsgsPerSubject
+	streamConfig.Sources = sources
+	if _, err := m.js.UpdateStream(ctx, streamConfig); err != nil {
+		return fmt.Errorf("failed to give backup bucket %q the history of stream %s (%d per key) and its source: %w",
+			backup, kvStreamPrefix+cfg.Name, info.Config.MaxMsgsPerSubject, err)
+	}
+	return nil
 }
 
 // validateRecreate checks the recreate settings of a bucket.
