@@ -38,6 +38,11 @@ var (
 	// ErrUploadOutOfOrder is returned by an upload whose chunks were not
 	// stored in the order they were read.
 	ErrUploadOutOfOrder = errors.New("fs-jetstream: the chunks of the upload were stored out of order")
+
+	// ErrNoJetStream is returned by UploadObject and UploadChunks on a
+	// backend built without a JetStream context (NewJetStreamBackend), which
+	// stores objects through the object store client instead.
+	ErrNoJetStream = errors.New("fs-jetstream: backend has no JetStream context (built with NewJetStreamBackend; use NewJetStreamBackendWithJetStream)")
 )
 
 // UploadPublishOptions are the options every chunk of an upload is published
@@ -83,7 +88,12 @@ func MetaSubject(bucket, name string) string {
 // bounds the requests and must not be the caller's cancellable context (see
 // PutObject): a cancelled upload is ended through its reader, so that its
 // chunks can still be removed. A nil reader stores an empty object.
+//
+// It returns ErrNoJetStream on a backend built with NewJetStreamBackend.
 func (b *JetStreamBackend) UploadObject(ctx context.Context, meta jetstream.ObjectMeta, reader io.Reader) (*jetstream.ObjectInfo, error) {
+	if b.js == nil || b.uploads == nil {
+		return nil, ErrNoJetStream
+	}
 	if meta.Name == "" {
 		return nil, jetstream.ErrBadObjectMeta
 	}
@@ -108,11 +118,9 @@ func (b *JetStreamBackend) UploadObject(ctx context.Context, meta jetstream.Obje
 	id := nuid.Next()
 	info := &jetstream.ObjectInfo{Bucket: b.bucketName, NUID: id, ObjectMeta: meta}
 	chunkSubject := ChunkSubject(b.bucketName, id)
-	expectStream := jetstream.WithExpectStream(objStreamPrefix + b.bucketName)
-	chunkOpts := append([]jetstream.PublishOpt{expectStream}, UploadPublishOptions...)
 
 	if reader != nil {
-		size, chunks, digest, err := b.UploadChunks(reader, chunkSubject, int(opts.ChunkSize), chunkOpts...)
+		size, chunks, digest, err := b.UploadChunks(reader, chunkSubject, int(opts.ChunkSize), UploadPublishOptions...)
 		if err != nil {
 			b.RemoveChunks(ctx, chunkSubject, "the upload of "+meta.Name+" failed")
 			return nil, err
@@ -126,7 +134,7 @@ func (b *JetStreamBackend) UploadObject(ctx context.Context, meta jetstream.Obje
 		b.RemoveChunks(ctx, chunkSubject, "the metadata of "+meta.Name+" could not be encoded")
 		return nil, err
 	}
-	if _, err := b.js.PublishMsg(ctx, metaMsg, expectStream); err != nil {
+	if _, err := b.js.PublishMsg(ctx, metaMsg); err != nil {
 		if stored, keep := b.MetadataOutcome(ctx, meta.Name, id, err); !stored {
 			if !keep {
 				b.RemoveChunks(ctx, chunkSubject, "the metadata of "+meta.Name+" was rejected")
@@ -157,7 +165,17 @@ func (b *JetStreamBackend) UploadObject(ctx context.Context, meta jetstream.Obje
 // upload's publisher), so that removing them afterwards removes them. A chunk
 // that is stored later still, after its acknowledgement was given up on, stays
 // in the bucket referred to by nothing.
+//
+// It returns ErrNoJetStream on a backend built with NewJetStreamBackend, and
+// an error wrapping jetstream.ErrBadObjectMeta for a chunk size that is not
+// positive.
 func (b *JetStreamBackend) UploadChunks(reader io.Reader, subject string, chunkSize int, opts ...jetstream.PublishOpt) (uint64, uint32, string, error) {
+	if b.uploads == nil {
+		return 0, 0, "", ErrNoJetStream
+	}
+	if chunkSize <= 0 {
+		return 0, 0, "", fmt.Errorf("fs-jetstream: chunk size %d: %w", chunkSize, jetstream.ErrBadObjectMeta)
+	}
 	var (
 		pending []jetstream.PubAckFuture
 		size    uint64

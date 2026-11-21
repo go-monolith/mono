@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -124,7 +125,58 @@ func RawMetadata(t *testing.T, js jetstream.JetStream, bucket, name, id string) 
 	if err != nil {
 		t.Fatalf("metadata message of %s: %v", name, err)
 	}
-	return strings.ReplaceAll(string(msg.Data), id, "<id>"), msg.Header
+	return strings.ReplaceAll(string(msg.Data), id, "<id>"), StoredHeader(msg.Header)
+}
+
+// StoredHeader returns h without the headers the server adds to a message it
+// returns from the stream (stream, subject, sequence and time stamp), so that
+// what is left is what the publisher stored.
+func StoredHeader(h nats.Header) nats.Header {
+	out := nats.Header{}
+	for k, v := range h {
+		switch k {
+		case jetstream.StreamHeader, jetstream.SubjectHeader, jetstream.SequenceHeader, jetstream.TimeStampHeaer:
+			continue
+		}
+		out[k] = v
+	}
+	return out
+}
+
+// ChunkHeader returns the headers of the last chunk message of the object
+// version id, as the stream holds it.
+func ChunkHeader(t *testing.T, js jetstream.JetStream, bucket, id string) nats.Header {
+	t.Helper()
+	stream, err := js.Stream(context.Background(), objStreamPrefix+bucket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	msg, err := stream.GetLastMsgForSubject(context.Background(), ChunkSubject(bucket, id))
+	if err != nil {
+		t.Fatalf("chunk message of %s: %v", id, err)
+	}
+	return StoredHeader(msg.Header)
+}
+
+// A backend built without a JetStream context cannot upload by itself: its
+// upload functions return an error instead of panicking.
+func TestUploadObject_BackendWithoutJetStream(t *testing.T) {
+	b := &JetStreamBackend{}
+	if _, err := b.UploadObject(context.Background(), jetstream.ObjectMeta{Name: "x"}, nil); !errors.Is(err, ErrNoJetStream) {
+		t.Errorf("UploadObject error = %v, want ErrNoJetStream", err)
+	}
+	if _, _, _, err := b.UploadChunks(bytes.NewReader([]byte("x")), "$O.b.C.x", 1); !errors.Is(err, ErrNoJetStream) {
+		t.Errorf("UploadChunks error = %v, want ErrNoJetStream", err)
+	}
+}
+
+// A chunk size that is not positive is rejected rather than read with an
+// empty buffer, which would never reach the end of the reader.
+func TestUploadChunks_ChunkSizeNotPositive(t *testing.T) {
+	b, _ := NewPutTestBackend(t, BucketConfig{Name: "size"})
+	if _, _, _, err := b.UploadChunks(bytes.NewReader([]byte("x")), ChunkSubject("size", "x"), 0); !errors.Is(err, jetstream.ErrBadObjectMeta) {
+		t.Errorf("UploadChunks error = %v, want ErrBadObjectMeta", err)
+	}
 }
 
 // The metadata an upload writes is what the object store client writes for
@@ -162,6 +214,12 @@ func TestUploadObject_MetadataMatchesTheObjectStoreClient(t *testing.T) {
 				t.Fatalf("object store Put: %v", err)
 			}
 			wantData, wantHeader := RawMetadata(t, js, "format", tt.meta.Name, fromClient.NUID)
+			// Read now: the upload below replaces the client's version and
+			// removes its chunks.
+			var wantChunkHeader nats.Header
+			if fromClient.Chunks > 0 {
+				wantChunkHeader = ChunkHeader(t, js, "format", fromClient.NUID)
+			}
 
 			if seeker != nil {
 				if _, err := seeker.Seek(0, io.SeekStart); err != nil {
@@ -176,8 +234,13 @@ func TestUploadObject_MetadataMatchesTheObjectStoreClient(t *testing.T) {
 			if gotData != wantData {
 				t.Errorf("metadata message\n got %s\nwant %s", gotData, wantData)
 			}
-			if gotHeader.Get(jetstream.MsgRollup) != wantHeader.Get(jetstream.MsgRollup) {
-				t.Errorf("rollup header = %q, want %q", gotHeader.Get(jetstream.MsgRollup), wantHeader.Get(jetstream.MsgRollup))
+			if !reflect.DeepEqual(gotHeader, wantHeader) {
+				t.Errorf("metadata headers = %v, want %v", gotHeader, wantHeader)
+			}
+			if wantChunkHeader != nil {
+				if got := ChunkHeader(t, js, "format", uploaded.NUID); !reflect.DeepEqual(got, wantChunkHeader) {
+					t.Errorf("chunk headers = %v, want %v", got, wantChunkHeader)
+				}
 			}
 			if uploaded.Size != fromClient.Size || uploaded.Chunks != fromClient.Chunks || uploaded.Digest != fromClient.Digest {
 				t.Errorf("returned info = %d bytes, %d chunks, %s; the client's = %d, %d, %s",
