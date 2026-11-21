@@ -185,6 +185,8 @@ func verifyAuditLog(filename string) error {
 
 An entry is hashed in the form a reader of the log gets it in (`audit.CanonicalDetails`), so the log verifies after it was written and parsed again whatever Go values the details held: empty details are hashed like missing ones, and a struct like the map it is parsed as. Up to v0.2.16 an entry with empty details, which every clean `module.stopped` entry is, never verified, so `VerifyChain` rejected the untampered log of a normal run. Logs written by those versions verify now (the hash they gave such an entry is accepted), and the hashes of entries that verified before are unchanged.
 
+The hash joins its fields with `|` and does not escape it. An entry whose event type, module name or service name contains `|` could therefore be read in two ways (module `billing|refund` with service `x` has the hash of module `billing` with service `refund|x`), so since v0.2.19 the module does not write one when hash chaining is on (`audit.ErrAmbiguousEntry`, returned by `SaveAuditTrail`) and `VerifyChain` reports a log that holds one (`audit.CheckHashable`). Without `|` in these three fields the hash has one reading only; details and the user context may contain it. The hashes themselves did not change.
+
 For a quick look at the hashes: `jq '.entry_hash, .prev_hash' audit.log`.
 
 Other exported helpers: `audit.NewHashChain(lastSavedHash)` / `HashChain.AddEntry`, the `audit.Entry` type and the `audit.EventType` constants.

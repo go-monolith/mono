@@ -340,6 +340,10 @@ fsjetstream.WithHeaders(map[string]string{
 fsjetstream.WithPrefix("reports/2024/")
 ```
 
+### Large Objects
+
+`Get` returns the whole object as one `[]byte`, so it takes as much memory as the object is large, and nothing limits that. Use it for objects whose size you know to be small. For anything else, and for buckets other applications write to, read with `GetReader`, which streams the object, and check the size in the `ObjectInfo` it returns (or from `Stat`) before reading.
+
 ### Missing Objects
 
 `Get` returns `nil, nil` for a missing object; `Stat` and `GetReader` return an error wrapping `storage.ErrKeyNotFound` (check with `errors.Is`). `Delete` of a missing object is not an error.

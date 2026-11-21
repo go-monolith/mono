@@ -277,6 +277,9 @@ See [A Request Always Gets a Reply](error-handling.md#a-request-always-gets-a-re
 - **`RecreateOnStorageMismatch`:** a backup that holds fewer messages than the bucket fails `Start` instead of being accepted (see the [plugin page](../plugins/kv-jetstream.md#changing-a-buckets-storage-type)).
 - **`WithNATSClientTLS` with a route CA in a config file's `cluster { tls {} }` block:** a route CA that is signed by the client CA is now found and refused, as it is with `WithNATSClusterTLS`.
 - **`monotest.CheckImports`** refuses a pattern that is empty or starts with `-`.
+- **Audit log with hash chaining:** an entry whose event type, module name or service name contains `|` is not written (`audit.ErrAmbiguousEntry`; the caller of `SaveAuditTrail` gets the error), and `VerifyChain` reports a log that holds one. The hash joins its fields with `|`, so such an entry had the hash of another one (module `billing|refund` with service `x`, and module `billing` with service `refund|x`), and text could be moved between fields of a log without breaking the chain. No hash changes: other logs verify as before, with this version and earlier ones. The framework's own entries never contain it. Details and the user context may.
+- **`errors.ValidateSubject`** rejects a wildcard as the first token when wildcards are not allowed (`*.a.b` passed), a `>` that is not the last token also in first place, and an empty first token. A custom first token is still not held to kebab-case. The framework's own checks of service and event subjects are unchanged.
+- **`SetRuntimeContext` on a module's event bus** is the boundary violation `runtime-context-replaced`. The runtime context is the framework's: every handler of every module receives it. Without `WithStrictModuleBoundaries` the call is reported and still goes through; with it the call does nothing.
 
 ### Other fixes in v0.2.19
 
@@ -289,7 +292,8 @@ See [A Request Always Gets a Reply](error-handling.md#a-request-always-gets-a-re
 - **`pkg/certreload`:** the certificate files are read without holding the reloader's lock, so a file system that stalls no longer blocks every TLS handshake, and a certificate that expired without being renewed is warned about.
 - **Channel services:** a nil message on a provider's out channel is dropped with a warning; it crashed the process.
 - **Locks:** middleware hooks no longer run with the service container's lock held, and a module's `SetDependencyServiceContainer` no longer runs under the lifecycle lock; code in them that asked the framework something could deadlock.
-- **CI and dependencies:** the issue triage workflow reads a new issue as data and may only label and comment on that issue; actions are pinned by commit; `golang.org/x/net` is v0.62.0.
+- **`RecreateOnStorageMismatch` in a cluster:** whether a backup that ends short of the bucket's last sequence is complete is asked of the bucket's leader. It was read with a request any replica answers, and a replica that was behind could have said that nothing was left.
+- **CI and dependencies:** the issue triage workflow reads a new issue as data and may only label and comment on that issue; actions are pinned by commit; `golang.org/x/net` is v0.62.0 and `golang.org/x/crypto` v0.59.0.
 
 ## New Features
 
@@ -311,6 +315,8 @@ All optional.
 | `helper.DecodeBatch`, `helper.ErrUndecodableMessage` | v0.2.17 | Decode a batch leaving out the messages that fail to unmarshal; the error the typed batch handlers return for such a batch |
 | `audit.CanonicalDetails`, `audit.HashEntry`, `audit.LegacyEmptyDetailsHash` | v0.2.17 | The form an audit entry's details are hashed in, and the hash earlier versions gave an entry with empty details |
 | `types.ErrorTypeReplyFailed` (`reply-failed`) | v0.2.19 | The error type of the reply a request-reply caller gets when the handler ran but its response could not be sent |
+| `audit.ErrAmbiguousEntry`, `audit.CheckHashable` | v0.2.19 | The error for an audit entry whose event type, module name or service name contains `|`, and the check for it |
+| `types.BoundaryViolationRuntimeContextReplaced` (`runtime-context-replaced`) | v0.2.19 | The boundary violation of a module that calls `SetRuntimeContext` on its event bus |
 | `certreload.ExpiryWarnInterval` | v0.2.19 | The least time between two warnings that the certificate being served has expired |
 | `monoerrors.ErrStopAbandoned` | v0.2.18 | The error `Stop` returns for a module, middleware module or plugin whose `Stop` did not return after its context ended, and `Start` while such a `Stop` is still running |
 | [`types.RollbackAwareMiddleware`](../middleware/README.md#middleware-lifecycle) | v0.2.18 | Optional `RollbackStart(ctx)` of a middleware module, called instead of `Stop` when a failed `Start` is rolled back, so the middleware can be started again |

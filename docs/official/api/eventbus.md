@@ -44,7 +44,8 @@ The bus a module receives through `SetEventBus` is scoped to that module. On it,
 
 - a publish or request to `services.<module>.<service>` when that module is not the module itself, a declared dependency or a plugin (`undeclared-service-subject`);
 - a subscription to another module's service subject (`foreign-service-subscription`);
-- for a module that implements `ServiceConsumerModule`, a request to a dependency's service that is not in `ConsumeServices()`.
+- for a module that implements `ServiceConsumerModule`, a request to a dependency's service that is not in `ConsumeServices()`;
+- a call of `SetRuntimeContext` (`runtime-context-replaced`): the runtime context is set by the framework and shared by the handlers of every module. With `WithStrictModuleBoundaries()` the call does nothing, as the method returns no error.
 
 By default a violation is logged and the call goes through. With `WithStrictModuleBoundaries()` the call returns `ErrModuleBoundaryViolation`. `events.*` and other subjects are not checked, and neither is `EventStream()`.
 

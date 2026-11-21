@@ -201,6 +201,7 @@ What a module receives is wrapped:
 | `undeclared-service-subject` | Published to or requested `services.<module>.<service>` of a module that is not itself, a declared dependency or a plugin (bypassing the port) |
 | `foreign-service-subscription` | Subscribed to another module's service subject, by name or through a wildcard: `>`, `*.>` and `*.billing.charge` receive service subjects as `services.>` does (checked since v0.2.19) |
 | `undeclared-service-use` | Implements `ConsumeServices()` and looked up a dependency service that is not in the list, or published to or requested its subject on the event bus |
+| `runtime-context-replaced` | Called `SetRuntimeContext` on its event bus, which replaces the context every handler of every module receives (since v0.2.19; in strict mode the call does nothing, as the method returns no error) |
 
 **Default mode:** the call goes through, is warned once, and is reported. The report keeps up to 1024 distinct violations per module; beyond that, new ones are counted together per kind in an entry with `*` as dependency and subject.
 

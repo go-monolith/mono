@@ -245,7 +245,7 @@ Returns one report per started module, sorted by name. It returns nil unless the
 | `Observed` | The dependency services it looked up, or for a consumed contract reached on its event bus, with counts |
 | `UnusedDependencies` | Declared but never looked up |
 | `UnusedContracts` | Consumed contracts not used so far |
-| `Violations` | Boundary crossings (`register-on-dependency`, `channel-consumer-mismatch`, `undeclared-service-subject`, `foreign-service-subscription`, `undeclared-service-use`), each with a count and the time first seen |
+| `Violations` | Boundary crossings (`register-on-dependency`, `channel-consumer-mismatch`, `undeclared-service-subject`, `foreign-service-subscription`, `undeclared-service-use`, `runtime-context-replaced`), each with a count and the time first seen |
 
 `Observed`, `UnusedDependencies`, `UnusedContracts` and `Violations` are empty lists, never nil, when there is nothing to list, so their JSON keys (`observed`, `unused_dependencies`, `unused_contracts`, `violations`) are always present.
 

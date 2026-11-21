@@ -446,6 +446,7 @@ The `ServiceContainer` a module receives for a dependency is a read-only view th
 | `undeclared-service-subject` | Published to or requested `services.<module>.<service>` of a module that is not itself, a declared dependency or a plugin — bypassing the port |
 | `foreign-service-subscription` | Subscribed to another module's service subject |
 | `undeclared-service-use` | Implements `ConsumeServices()` and looked up a request-reply, queue group or stream consumer service of a dependency that is not in the list, or published to or requested its subject `services.<dependency>.<service>` on the event bus |
+| `runtime-context-replaced` | Called `SetRuntimeContext` on its event bus, replacing the context every handler of every module receives |
 
 By default a crossing is counted, warned once, and let through, so existing applications keep working. `MonoApplication.ModuleBoundaries()` returns, per module, the declared dependencies, the consumed contracts, the services actually looked up (with counts), the declared dependencies never used, the consumed contracts not used so far, and the crossings. The same summary is logged at `Stop`.
 
