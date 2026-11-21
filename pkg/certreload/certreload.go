@@ -182,24 +182,34 @@ func (r *Reloader) Certificate() *tls.Certificate {
 
 	cert, digest, changed, err := r.load(current)
 
+	// What the check has to say is said after the lock is released, as on
+	// the path above: the handshakes behind this one wait for the lock.
+	var say func()
 	r.mu.Lock()
-	defer r.mu.Unlock()
 	r.checking = false
 	// The read returned: a later one that hangs is said again.
 	r.stallWarned = time.Time{}
 	switch {
 	case err != nil:
-		r.warn(err)
+		say = func() { r.warn(err) }
 	case changed:
 		r.cert, r.digest = cert, digest
 		r.expiryWarned = time.Time{}
-		if r.cfg.Logger != nil {
-			r.cfg.Logger.Info("Reloaded the "+r.cfg.Name+" certificate", "cert_file", r.cfg.CertFile, "not_after", cert.Leaf.NotAfter)
+		if logger := r.cfg.Logger; logger != nil {
+			notAfter := cert.Leaf.NotAfter
+			say = func() {
+				logger.Info("Reloaded the "+r.cfg.Name+" certificate", "cert_file", r.cfg.CertFile, "not_after", notAfter)
+			}
 		}
 	default:
-		r.warnIfExpired(now)
+		say = r.expiredWarning(now)
 	}
-	return r.cert
+	served := r.cert
+	r.mu.Unlock()
+	if say != nil {
+		say()
+	}
+	return served
 }
 
 // load reads the files and, when their contents differ from current, parses
@@ -259,21 +269,24 @@ func (r *Reloader) stalledWarning(now time.Time) func() {
 	}
 }
 
-// warnIfExpired warns, at most every ExpiryWarnInterval, that the
-// certificate has expired and its files still hold it. A certificate is
-// checked when it is loaded; one that is never renewed went on being served
-// past its expiry without a word, and its peers refuse it. Called with the
-// lock held.
-func (r *Reloader) warnIfExpired(now time.Time) {
+// expiredWarning returns the warning, due at most every ExpiryWarnInterval,
+// that the certificate has expired and its files still hold it, or nil. A
+// certificate is checked when it is loaded; one that is never renewed went
+// on being served past its expiry without a word, and its peers refuse it.
+// Called with the lock held; the warning is written after it is released.
+func (r *Reloader) expiredWarning(now time.Time) func() {
 	if r.cfg.Logger == nil || r.cert == nil || r.cert.Leaf == nil || !now.After(r.cert.Leaf.NotAfter) {
-		return
+		return nil
 	}
 	if !r.expiryWarned.IsZero() && now.Sub(r.expiryWarned) < ExpiryWarnInterval {
-		return
+		return nil
 	}
 	r.expiryWarned = now
-	r.cfg.Logger.Warn("The "+r.cfg.Name+" certificate has expired and its files were not renewed; peers that check it refuse the connection",
-		"cert_file", r.cfg.CertFile, "not_after", r.cert.Leaf.NotAfter)
+	logger, name, certFile, notAfter := r.cfg.Logger, r.cfg.Name, r.cfg.CertFile, r.cert.Leaf.NotAfter
+	return func() {
+		logger.Warn("The "+name+" certificate has expired and its files were not renewed; peers that check it refuse the connection",
+			"cert_file", certFile, "not_after", notAfter)
+	}
 }
 
 // GetCertificate is Certificate in the shape of tls.Config.GetCertificate,

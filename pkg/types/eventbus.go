@@ -52,7 +52,8 @@ const (
 	// could not be published (for example because it is larger than the
 	// server's maximum payload). The caller gets an error with this type
 	// and the reason instead of waiting for its timeout; the handler's work
-	// is done, so retrying repeats it.
+	// is done, so retrying repeats it. Clients map it to
+	// errors.ErrReplyFailed.
 	ErrorTypeReplyFailed = "reply-failed"
 
 	// ErrorTypeShuttingDown is the HeaderErrorType value of the error response
@@ -60,7 +61,26 @@ const (
 	// shutting down and no longer accepts work. Clients map it to
 	// errors.ErrServiceUnavailable.
 	ErrorTypeShuttingDown = "shutting-down"
+
+	// HandlerPanicMessage is the Mono-Error-Message of the error reply for a
+	// handler that panicked, and what the service statistics show for it.
+	// The value the handler panicked with stays in the log.
+	HandlerPanicMessage = "handler panicked"
 )
+
+// IsFrameworkErrorType reports whether errorType is one of the
+// Mono-Error-Type values the framework itself answers a request with
+// (ErrorTypeOverloaded, ErrorTypeShuttingDown, ErrorTypeHandlerPanic,
+// ErrorTypeReplyFailed). A handler error whose type name comes out as one of
+// them is sent with the suffix "-error", so that a client never takes it for
+// the framework's.
+func IsFrameworkErrorType(errorType string) bool {
+	switch errorType {
+	case ErrorTypeOverloaded, ErrorTypeShuttingDown, ErrorTypeHandlerPanic, ErrorTypeReplyFailed:
+		return true
+	}
+	return false
+}
 
 // EventBus provides event-driven communication wrapping NATS client.
 //

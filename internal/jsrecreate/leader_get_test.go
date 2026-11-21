@@ -372,3 +372,58 @@ func TestOpen_BackupLastMessageNotFound(t *testing.T) {
 		}
 	})
 }
+
+func TestKeepsFewerPerSubject(t *testing.T) {
+	for _, tc := range []struct {
+		name           string
+		backup, source int64
+		want           bool
+		sourceLimit    string
+	}{
+		{"same limit", 3, 3, false, "3"},
+		{"backup keeps more", 64, 3, false, "3"},
+		{"backup keeps fewer", 64, 100, true, "100"},
+		{"source keeps everything", 1, -1, true, "all of them"},
+		{"source without a limit set", 1, 0, true, "all of them"},
+		{"both keep everything", -1, -1, false, "all of them"},
+		{"backup keeps everything", 0, 5, false, "5"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := KeepsFewerPerSubject(tc.backup, tc.source); got != tc.want {
+				t.Errorf("KeepsFewerPerSubject(%d, %d) = %v, want %v", tc.backup, tc.source, got, tc.want)
+			}
+			if got := PerSubjectLimit(tc.source); got != tc.sourceLimit {
+				t.Errorf("PerSubjectLimit(%d) = %q, want %q", tc.source, got, tc.sourceLimit)
+			}
+		})
+	}
+}
+
+// A backup that keeps fewer versions of a key than the bucket's stream holds
+// fewer messages for that reason, and the error says so.
+func TestOpen_BackupWithLessHistoryNamesIt(t *testing.T) {
+	js := startJetStream(t)
+	ctx := context.Background()
+	kv, err := js.CreateKeyValue(ctx, jetstream.KeyValueConfig{Bucket: "locks", Storage: jetstream.FileStorage, History: 5})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 5; i++ {
+		if _, err := kv.Put(ctx, "k", []byte("v")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	deletes := 0
+	// kvSpec creates its backup with the default history of 1.
+	spec := kvSpec(js, fakeStreams{StreamAPI: StreamAPI{JS: js}, deletes: &deletes}, "locks", Options{Recreate: true}, nil)
+	_, err = Open(ctx, spec)
+	if !errors.Is(err, errMismatch) || !strings.Contains(err.Error(), "it keeps 1 per subject and the stream 5") {
+		t.Fatalf("err = %v, want the history limits named", err)
+	}
+	if strings.Contains(err.Error(), "Nats-Msg-Id") {
+		t.Errorf("err = %v blames a duplicate message ID", err)
+	}
+	if deletes != 0 {
+		t.Fatalf("deletes = %d", deletes)
+	}
+}

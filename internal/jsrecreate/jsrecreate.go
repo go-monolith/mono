@@ -563,10 +563,34 @@ func CheckNothingSkipped[T any](ctx context.Context, s Spec[T], backupStream jet
 	if binfo.State.Msgs >= cur.State.Msgs {
 		return nil
 	}
+	if KeepsFewerPerSubject(binfo.Config.MaxMsgsPerSubject, cur.Config.MaxMsgsPerSubject) {
+		return fmt.Errorf("backup bucket %q holds fewer messages (%d) than stream %s (%d): it keeps %d per subject and the stream %s, "+
+			"so the older ones were not copied. The %s cannot be backed up this way: remove stream %s by hand, or set SkipBackupOnRecreate",
+			backup, binfo.State.Msgs, streamName, cur.State.Msgs, binfo.Config.MaxMsgsPerSubject,
+			PerSubjectLimit(cur.Config.MaxMsgsPerSubject), s.Kind, streamName)
+	}
 	return fmt.Errorf("backup bucket %q holds fewer messages (%d) than stream %s (%d): some were not copied. "+
 		"One possible cause is a message that reuses the Nats-Msg-Id of another one (the backup drops it as a duplicate). "+
 		"The %s cannot be backed up this way: remove stream %s by hand, or set SkipBackupOnRecreate",
 		backup, binfo.State.Msgs, streamName, cur.State.Msgs, s.Kind, streamName)
+}
+
+// KeepsFewerPerSubject reports whether a stream that keeps backup messages
+// per subject keeps fewer than one that keeps source (values below 1 mean no
+// limit).
+func KeepsFewerPerSubject(backup, source int64) bool {
+	if backup < 1 {
+		return false
+	}
+	return source < 1 || backup < source
+}
+
+// PerSubjectLimit describes a MaxMsgsPerSubject value.
+func PerSubjectLimit(limit int64) string {
+	if limit < 1 {
+		return "all of them"
+	}
+	return strconv.FormatInt(limit, 10)
 }
 
 // backupCopied reports whether the backup described by binfo has copied the

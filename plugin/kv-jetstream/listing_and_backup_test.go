@@ -167,3 +167,54 @@ func TestRecreate_DetachesLeftoverBackups(t *testing.T) {
 		t.Fatal("the leftover backup copied a key written after the recreate")
 	}
 }
+
+// A bucket's stream may keep more versions of a key than a KV bucket can (64),
+// or all of them, when it was created or edited as a stream. Its backup keeps
+// as many: with fewer, the older versions would be gone with the bucket.
+func TestRecreate_BackupKeepsHistoryBeyondTheBucketLimit(t *testing.T) {
+	for name, perKey := range map[string]int64{"100 versions per key": 100, "every version": -1} {
+		t.Run(name, func(t *testing.T) {
+			conn, js := setupTestNATSWithJetStream(t)
+			ctx := context.Background()
+			kv, err := js.CreateKeyValue(ctx, jetstream.KeyValueConfig{Bucket: "locks", Storage: jetstream.FileStorage})
+			if err != nil {
+				t.Fatal(err)
+			}
+			stream, err := js.Stream(ctx, kvStreamPrefix+"locks")
+			if err != nil {
+				t.Fatal(err)
+			}
+			config := stream.CachedInfo().Config
+			config.MaxMsgsPerSubject = perKey
+			if _, err := js.UpdateStream(ctx, config); err != nil {
+				t.Fatal(err)
+			}
+			const versions = 100
+			for i := 0; i < versions; i++ {
+				if _, err := kv.Put(ctx, "k", []byte(fmt.Sprintf("v%d", i))); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			if _, err := startPlugin(t, conn, BucketConfig{Name: "locks", Storage: MemoryStorage, RecreateOnStorageMismatch: true}); err != nil {
+				t.Fatalf("Start: %v", err)
+			}
+			if got, msgs := streamStorage(t, js, "locks"); got != jetstream.MemoryStorage || msgs != 0 {
+				t.Fatalf("stream storage=%v msgs=%d, want memory and empty", got, msgs)
+			}
+			backups := backupBuckets(t, js, "locks")
+			if len(backups) != 1 {
+				t.Fatalf("backup buckets = %v, want one", backups)
+			}
+			backup, err := js.Stream(ctx, kvStreamPrefix+backups[0])
+			if err != nil {
+				t.Fatal(err)
+			}
+			info := backup.CachedInfo()
+			if info.State.Msgs != versions || info.Config.MaxMsgsPerSubject != perKey || len(info.Config.Sources) != 0 {
+				t.Fatalf("backup holds %d messages, keeps %d per key, sources %v; want %d, %d and detached",
+					info.State.Msgs, info.Config.MaxMsgsPerSubject, info.Config.Sources, versions, perKey)
+			}
+		})
+	}
+}

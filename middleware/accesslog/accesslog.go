@@ -86,7 +86,10 @@ type AccessLogModule struct {
 	outputClosed bool
 
 	// Channel proxy management
-	channelProxies   map[string]*channelProxy
+	channelProxies map[string]*channelProxy
+	// replacedProxies are proxies a later wrap of the same module and
+	// service replaced: cancelled, and waited for at stop.
+	replacedProxies  []*channelProxy
 	channelProxiesMu sync.RWMutex
 }
 
@@ -219,6 +222,10 @@ func (m *AccessLogModule) stop(ctx context.Context, closeOutput bool) error {
 		proxy.cancel()
 		proxies = append(proxies, proxy)
 	}
+	// The replaced ones are cancelled already; their goroutines are
+	// waited for with the others.
+	proxies = append(proxies, m.replacedProxies...)
+	m.replacedProxies = nil
 	// Clear the map to allow GC and prevent reuse
 	m.channelProxies = make(map[string]*channelProxy)
 	m.channelProxiesMu.Unlock()
@@ -695,6 +702,8 @@ func (m *AccessLogModule) wrapChannelService(
 	m.channelProxiesMu.Lock()
 	if replaced, ok := m.channelProxies[key]; ok {
 		replaced.cancel()
+		// Kept until stop, which waits for its goroutines too.
+		m.replacedProxies = append(m.replacedProxies, replaced)
 	}
 	m.channelProxies[key] = proxy
 	m.channelProxiesMu.Unlock()

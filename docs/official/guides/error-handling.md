@@ -67,7 +67,7 @@ Consequences for handler code:
 A request-reply caller that reached a handler is answered, whatever the handler returns:
 
 - **A nil response** (`return nil, nil`) is sent as an empty reply.
-- **A response that cannot be sent**, for example one larger than the server's maximum payload, is answered with an error whose type is `reply-failed` and whose message gives the reason. The caller gets a `*monoerrors.RemoteError`. The handler's work is done, so a retry repeats it.
+- **A response that cannot be sent**, for example one larger than the server's maximum payload, is answered with an error whose type is `reply-failed` and whose message gives the reason. The caller gets a `*monoerrors.ServiceError` that wraps `monoerrors.ErrReplyFailed` (check with `errors.Is`) and carries the reason. The handler's work is done, so a retry repeats it. The service statistics count the call as an error.
 - Before v0.2.19 both left the caller waiting for its timeout.
 
 A timeout error reports the time the call actually waited (`operation 'request-reply' timed out after 2s`), not the client's default of 30 seconds.

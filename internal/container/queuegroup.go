@@ -271,13 +271,12 @@ func (c *queueGroupClient) checkACK(ack *types.Msg) error {
 	if typeValues := ack.Header[types.HeaderErrorType]; len(typeValues) > 0 {
 		errorType = typeValues[0]
 	}
-	if err := frameworkErrorResponse(c.serviceName, c.moduleName, types.ServiceTypeQueueGroup, errorType); err != nil {
-		return err
-	}
-
 	message := "unknown error"
 	if msgValues := ack.Header[types.HeaderErrorMessage]; len(msgValues) > 0 {
 		message = msgValues[0]
+	}
+	if err := frameworkErrorResponse(c.serviceName, c.moduleName, types.ServiceTypeQueueGroup, errorType, message); err != nil {
+		return err
 	}
 	return monoerrors.WrapRemoteError(c.serviceName, c.moduleName, message, errorType)
 }

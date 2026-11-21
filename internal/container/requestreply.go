@@ -325,7 +325,7 @@ func (c *requestReplyClient) checkForErrorResponse(response *types.Msg) error {
 		errorType = typeValues[0]
 	}
 
-	if err := frameworkErrorResponse(c.serviceName, c.moduleName, types.ServiceTypeRequestReply, errorType); err != nil {
+	if err := frameworkErrorResponse(c.serviceName, c.moduleName, types.ServiceTypeRequestReply, errorType, message); err != nil {
 		return err
 	}
 
@@ -333,10 +333,13 @@ func (c *requestReplyClient) checkForErrorResponse(response *types.Msg) error {
 }
 
 // frameworkErrorResponse maps the error types the framework itself puts in an
-// error response (overloaded, shutting down, a recovered handler panic) to
+// error response (overloaded, shutting down, a recovered handler panic, a
+// response that could not be sent) to
 // their sentinel errors. It returns nil for any other error type, which then
-// becomes a RemoteError carrying the handler's own message.
-func frameworkErrorResponse(serviceName, moduleName string, serviceType types.ServiceType, errorType string) error {
+// becomes a RemoteError carrying the handler's own message. message is the
+// Mono-Error-Message of the response; the reply-failed error keeps it, as it
+// says why the response could not be sent.
+func frameworkErrorResponse(serviceName, moduleName string, serviceType types.ServiceType, errorType, message string) error {
 	switch errorType {
 	case types.ErrorTypeOverloaded:
 		return monoerrors.WrapServiceOverloaded(serviceName, moduleName, serviceType)
@@ -345,6 +348,8 @@ func frameworkErrorResponse(serviceName, moduleName string, serviceType types.Se
 			fmt.Errorf("the handling instance is shutting down"))
 	case types.ErrorTypeHandlerPanic:
 		return monoerrors.WrapHandlerPanic(serviceName, moduleName, serviceType)
+	case types.ErrorTypeReplyFailed:
+		return monoerrors.WrapReplyFailed(serviceName, moduleName, serviceType, message)
 	default:
 		return nil
 	}

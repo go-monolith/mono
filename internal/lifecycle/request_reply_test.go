@@ -134,7 +134,7 @@ func TestRequestReply_AlwaysAnswers(t *testing.T) {
 	})
 
 	t.Run("a response that cannot be published is an error reply", func(t *testing.T) {
-		_, handler, bus, logger := requestReplyFixture(t, func(context.Context, *types.Msg) ([]byte, error) { return []byte("too large"), nil })
+		lm, handler, bus, logger := requestReplyFixture(t, func(context.Context, *types.Msg) ([]byte, error) { return []byte("too large"), nil })
 		bus.setPublishDataError(errors.New("nats: maximum payload exceeded"))
 		handler(context.Background(), request("reply-1", "x"))
 		eventually(t, func() bool { return len(bus.getPublishedMsgs("reply-1")) == 1 }, "a response that could not be published left the caller without a reply")
@@ -144,6 +144,11 @@ func TestRequestReply_AlwaysAnswers(t *testing.T) {
 		}
 		if !logger.hasErrorContaining("Failed to publish response") {
 			t.Error("the failed publish was not logged")
+		}
+		// The caller got an error, so the statistics count one.
+		lastErrors := lm.(*lifecycleManager).endpointLastErrors()
+		if len(lastErrors) != 1 || !strings.Contains(lastErrors[0], "could not be sent") {
+			t.Errorf("last errors of the endpoints = %q, want the failed response", lastErrors)
 		}
 	})
 }

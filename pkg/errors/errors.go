@@ -41,6 +41,12 @@ var (
 	// a timeout.
 	ErrHandlerPanic = errors.New("handler panic")
 
+	// ErrReplyFailed is returned by a request-reply client when the handler
+	// ran but its response could not be sent (larger than the server's
+	// maximum payload). Unlike ErrServiceOverloaded, the request was handled:
+	// a retry runs the handler again.
+	ErrReplyFailed = errors.New("the handler ran but its reply could not be sent")
+
 	// ErrServiceOverloaded is returned when the instance that received a request
 	// has every worker of the service busy and its pending queue full
 	// (see types.ServiceOptions). The request was not handled; the caller may
@@ -468,6 +474,23 @@ func WrapServiceOverloaded(serviceName, moduleName string, serviceType types.Ser
 		ModuleName:  moduleName,
 		ServiceType: serviceType,
 		Err:         ErrServiceOverloaded,
+	}
+}
+
+// WrapReplyFailed wraps ErrReplyFailed with service context and the reason
+// the handling instance gave (empty for none). It is returned by
+// request-reply clients when the handling instance reported that the handler
+// ran but its response could not be sent.
+func WrapReplyFailed(serviceName, moduleName string, serviceType types.ServiceType, reason string) error {
+	err := ErrReplyFailed
+	if reason != "" {
+		err = fmt.Errorf("%w: %s", ErrReplyFailed, reason)
+	}
+	return &ServiceError{
+		ServiceName: serviceName,
+		ModuleName:  moduleName,
+		ServiceType: serviceType,
+		Err:         err,
 	}
 }
 

@@ -11,7 +11,7 @@ import (
 // HandlerPanicText is what a caller, and the endpoint statistics, are told
 // about a handler that panicked. The value it panicked with is internal (it
 // can hold data of the request, or of another one) and goes to the log only.
-const HandlerPanicText = "handler panicked"
+const HandlerPanicText = types.HandlerPanicMessage
 
 // PublicErrorText returns the text of a handler error as it leaves the
 // process: in the error reply to the caller and in the last_error of the
@@ -58,11 +58,7 @@ func HandlerErrorType(err error) string {
 // IsFrameworkErrorType reports whether errorType is one of the types the
 // framework itself answers a request with.
 func IsFrameworkErrorType(errorType string) bool {
-	switch errorType {
-	case types.ErrorTypeOverloaded, types.ErrorTypeShuttingDown, types.ErrorTypeHandlerPanic, types.ErrorTypeReplyFailed:
-		return true
-	}
-	return false
+	return types.IsFrameworkErrorType(errorType)
 }
 
 // replyless records one message that arrived on a request-reply subject

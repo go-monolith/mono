@@ -3,6 +3,7 @@ package container
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -208,7 +209,7 @@ func TestRegisterQueueGroupService_PairOptions(t *testing.T) {
 
 func TestFrameworkErrorResponse(t *testing.T) {
 	t.Run("overloaded maps to ErrServiceOverloaded", func(t *testing.T) {
-		err := frameworkErrorResponse("svc", "mod", types.ServiceTypeRequestReply, types.ErrorTypeOverloaded)
+		err := frameworkErrorResponse("svc", "mod", types.ServiceTypeRequestReply, types.ErrorTypeOverloaded, "")
 		if !errors.Is(err, monoerrors.ErrServiceOverloaded) {
 			t.Fatalf("got %v, want ErrServiceOverloaded", err)
 		}
@@ -219,14 +220,27 @@ func TestFrameworkErrorResponse(t *testing.T) {
 	})
 
 	t.Run("shutting-down maps to ErrServiceUnavailable", func(t *testing.T) {
-		err := frameworkErrorResponse("svc", "mod", types.ServiceTypeQueueGroup, types.ErrorTypeShuttingDown)
+		err := frameworkErrorResponse("svc", "mod", types.ServiceTypeQueueGroup, types.ErrorTypeShuttingDown, "")
 		if !errors.Is(err, monoerrors.ErrServiceUnavailable) {
 			t.Fatalf("got %v, want ErrServiceUnavailable", err)
 		}
 	})
 
+	t.Run("a reply that could not be sent maps to ErrReplyFailed", func(t *testing.T) {
+		err := frameworkErrorResponse("svc", "mod", types.ServiceTypeRequestReply, types.ErrorTypeReplyFailed, "nats: maximum payload exceeded")
+		if !errors.Is(err, monoerrors.ErrReplyFailed) || errors.Is(err, monoerrors.ErrServiceOverloaded) {
+			t.Fatalf("err = %v, want ErrReplyFailed", err)
+		}
+		if !strings.Contains(err.Error(), "maximum payload exceeded") {
+			t.Errorf("err = %v, want the reason", err)
+		}
+		var serviceErr *monoerrors.ServiceError
+		if !errors.As(err, &serviceErr) || serviceErr.ServiceName != "svc" || serviceErr.ModuleName != "mod" {
+			t.Fatalf("err = %#v, want a ServiceError of the service", err)
+		}
+	})
 	t.Run("panic maps to ErrHandlerPanic", func(t *testing.T) {
-		err := frameworkErrorResponse("svc", "mod", types.ServiceTypeRequestReply, types.ErrorTypeHandlerPanic)
+		err := frameworkErrorResponse("svc", "mod", types.ServiceTypeRequestReply, types.ErrorTypeHandlerPanic, "")
 		if !errors.Is(err, monoerrors.ErrHandlerPanic) {
 			t.Fatalf("got %v, want ErrHandlerPanic", err)
 		}
@@ -237,7 +251,7 @@ func TestFrameworkErrorResponse(t *testing.T) {
 
 	t.Run("other types are not framework errors", func(t *testing.T) {
 		for _, errorType := range []string{"", "service", "timeout", "validation"} {
-			if err := frameworkErrorResponse("svc", "mod", types.ServiceTypeRequestReply, errorType); err != nil {
+			if err := frameworkErrorResponse("svc", "mod", types.ServiceTypeRequestReply, errorType, ""); err != nil {
 				t.Fatalf("errorType %q: got %v, want nil", errorType, err)
 			}
 		}

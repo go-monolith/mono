@@ -116,6 +116,13 @@ func TestChannelProxiesOfTwoModulesWithOneServiceName(t *testing.T) {
 	if first == nil || first.ctx.Err() == nil {
 		t.Fatal("the replaced proxy was not stopped")
 	}
+	// It is kept for Stop, which waits for its goroutines with the others.
+	m.channelProxiesMu.Lock()
+	replaced := len(m.replacedProxies)
+	m.channelProxiesMu.Unlock()
+	if replaced != 1 {
+		t.Fatalf("%d replaced proxies kept, want 1", replaced)
+	}
 
 	m.channelProxiesMu.Lock()
 	proxies := make([]*channelProxy, 0, len(m.channelProxies))
@@ -128,6 +135,22 @@ func TestChannelProxiesOfTwoModulesWithOneServiceName(t *testing.T) {
 	}
 	if err := m.Stop(context.Background()); err != nil {
 		t.Fatal(err)
+	}
+	stopped := make(chan struct{})
+	go func() {
+		first.wg.Wait()
+		close(stopped)
+	}()
+	select {
+	case <-stopped:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the goroutines of the replaced proxy were still running after Stop")
+	}
+	m.channelProxiesMu.Lock()
+	replaced = len(m.replacedProxies)
+	m.channelProxiesMu.Unlock()
+	if replaced != 0 {
+		t.Errorf("%d replaced proxies kept after Stop", replaced)
 	}
 	for _, p := range proxies {
 		if p.ctx.Err() == nil {

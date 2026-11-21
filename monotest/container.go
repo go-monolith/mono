@@ -255,7 +255,7 @@ func errorReply(reply string, err error) *types.Msg {
 	message := err.Error()
 	_, isPanic := err.(*handlerPanicError)
 	if isPanic {
-		message = "handler panicked"
+		message = types.HandlerPanicMessage
 	}
 	header := types.Header{
 		types.HeaderError:        []string{"true"},
@@ -264,8 +264,7 @@ func errorReply(reply string, err error) *types.Msg {
 	if isPanic {
 		header[types.HeaderErrorType] = []string{types.ErrorTypeHandlerPanic}
 	} else if name := errorTypeName(err); name != "" {
-		switch name {
-		case types.ErrorTypeOverloaded, types.ErrorTypeShuttingDown, types.ErrorTypeHandlerPanic, types.ErrorTypeReplyFailed:
+		if types.IsFrameworkErrorType(name) {
 			name += "-error"
 		}
 		header[types.HeaderErrorType] = []string{name}
