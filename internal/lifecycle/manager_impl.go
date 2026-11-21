@@ -685,8 +685,8 @@ func frameworkErrorReply(reply, errorType, message string) *types.Msg {
 // awaiting its ACK) is never made to wait: when the pool and its queue are
 // full it is answered at once with an overloaded error, and after shutdown
 // began with a shutting-down error, so the caller fails fast and can retry
-// elsewhere. A message without a reply subject (an event, or a queue group
-// send in optimistic publish mode) cannot be answered, so the subscription
+// elsewhere. A message without a reply subject (a queue group send in
+// optimistic publish mode) cannot be answered, so the subscription
 // waits for a queue slot instead of dropping it; only a message still
 // buffered when the pool closed at the end of shutdown is dropped, with a
 // rate-limited warning.
@@ -726,6 +726,33 @@ func SubmitToPoolWait(pool *workerpool.Pool, eventBus types.EventBus, logger typ
 		}
 	default:
 		logger.Error("Failed to submit message to worker pool", reporter.withFields("error", err)...)
+	}
+	return false
+}
+
+// SubmitEventToPool hands an event's handler run to the pool. An event is
+// never rejected and never answered: the subscription waits for room in the
+// pool (back-pressure), whether or not the message carries a reply subject.
+//
+// An event has no caller waiting for an answer, but it can carry a reply
+// subject all the same: one published through JetStream (EventStream) is a
+// request whose reply subject is the inbox of the publish acknowledgement.
+// Treated as a request, such an event was rejected by a full pool, lost for
+// this consumer, and answered with an overloaded error into that inbox, where
+// it could arrive before the server's acknowledgement and fail a publish the
+// stream had stored. An event still buffered when the pool closed at the end
+// of shutdown is dropped, counted and warned about, and not answered either.
+//
+// It returns true when the pool accepted the job.
+func SubmitEventToPool(pool *workerpool.Pool, logger types.Logger, reporter *overloadReporter, job workerpool.Job) bool {
+	err := pool.Submit(job, true)
+	switch {
+	case err == nil:
+		return true
+	case errors.Is(err, workerpool.ErrClosed):
+		reporter.drop(pool)
+	default:
+		logger.Error("Failed to submit event to worker pool", reporter.withFields("error", err)...)
 	}
 	return false
 }
@@ -1458,14 +1485,14 @@ func (lm *lifecycleManager) setupNATSSubscriptions(ctx context.Context) error {
 			queueGroup := consumer.QueueGroup
 
 			// One bounded worker pool per event consumer subscription, serial
-			// unless the registration opted in to concurrency. Events carry no
-			// reply subject, so a full pool applies back-pressure instead of
-			// dropping them.
+			// unless the registration opted in to concurrency. A full pool
+			// applies back-pressure instead of dropping an event, also one
+			// that carries a reply subject (see SubmitEventToPool).
 			pool := lm.newPool(consumer.Options, false, logger, consumerModule, "event_consumer", eventName, queueGroup)
 			reporter := newOverloadReporter(logger, "consumer_module", consumerModule, "event", eventName)
 
 			sub, err := eventBus.QueueSubscribe(consumer.EventDef.Subject, queueGroup, func(ctx context.Context, msg *types.Msg) {
-				submitToPool(pool, eventBus, logger, reporter, msg, func() {
+				SubmitEventToPool(pool, logger, reporter, func() {
 					if err := invokeMsgHandler(ctx, handler, msg); err != nil {
 						logger.Error("Event consumer handler error",
 							append([]any{"consumer_module", consumerModule, "event", eventName, "subject", msg.Subject}, handlerErrorFields(err)...)...)
