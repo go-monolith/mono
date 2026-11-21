@@ -159,6 +159,41 @@ func TestChannelProxiesOfTwoModulesWithOneServiceName(t *testing.T) {
 	}
 }
 
+// TestReplacedChannelProxiesDoNotAccumulate: a module that registers a
+// channel service again and again replaces its proxy each time. The replaced
+// ones are kept only until their goroutines have ended.
+func TestReplacedChannelProxiesDoNotAccumulate(t *testing.T) {
+	m, err := New(WithOutput(&syncWriter{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = m.Stop(context.Background()) }()
+	const wraps = 50
+	for i := 0; i < wraps; i++ {
+		m.wrapChannelService(make(chan *types.Msg, 1), make(chan *types.Msg, 1), "orders", "events")
+		// The proxy just replaced ends in a moment; let it.
+		m.channelProxiesMu.Lock()
+		var last *channelProxy
+		if n := len(m.replacedProxies); n > 0 {
+			last = m.replacedProxies[n-1]
+		}
+		m.channelProxiesMu.Unlock()
+		if last != nil {
+			select {
+			case <-last.ended:
+			case <-time.After(2 * time.Second):
+				t.Fatal("a replaced proxy did not end")
+			}
+		}
+	}
+	m.channelProxiesMu.Lock()
+	kept := len(m.replacedProxies)
+	m.channelProxiesMu.Unlock()
+	if kept > 1 {
+		t.Fatalf("%d replaced proxies kept after %d wraps, want at most the last one", kept, wraps)
+	}
+}
+
 // TestChannelProxyForwardsANilMessage: a nil message on a channel service
 // has nothing to log. The proxies used to dereference it in a goroutine
 // nothing recovers; they pass it on, and the channel router drops it.

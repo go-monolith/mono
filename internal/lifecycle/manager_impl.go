@@ -1240,12 +1240,12 @@ func (lm *lifecycleManager) setupNATSSubscriptions(ctx context.Context) error {
 					// services protocol stats.
 					start := time.Now()
 					response, err := invokeRequestReplyHandler(ctx, handler, msg)
-					waited, took := start.Sub(arrival), time.Since(start)
+					// The run is counted before the reply goes out: a caller that
+					// reads the statistics right after its reply finds it there.
+					// The statistics are readable by any client of the server:
+					// they get the public text of a panic, not its value.
+					metrics.record(start.Sub(arrival), time.Since(start), PublicError(err))
 					if err != nil {
-						// The statistics are readable by any client of the
-						// server: they get the public text of a panic, not
-						// its value.
-						metrics.record(waited, took, PublicError(err))
 						logger.Error("RequestReply handler error",
 							append([]any{"service", serviceName, "module", modName, "subject", msg.Subject}, handlerErrorFields(err)...)...)
 
@@ -1277,7 +1277,6 @@ func (lm *lifecycleManager) setupNATSSubscriptions(ctx context.Context) error {
 					// A message published to the subject without a reply subject:
 					// the response has nowhere to go.
 					if msg.Reply == "" {
-						metrics.record(waited, took, nil)
 						reporter.replyless()
 						return
 					}
@@ -1291,16 +1290,16 @@ func (lm *lifecycleManager) setupNATSSubscriptions(ctx context.Context) error {
 					}
 					pubErr := eventBus.Publish(msg.Reply, response)
 					if pubErr == nil {
-						metrics.record(waited, took, nil)
 						return
 					}
 					// The handler ran, but its caller got an error: the
-					// statistics count the call as one.
-					metrics.record(waited, took, fmt.Errorf("the response could not be sent: %w", pubErr))
+					// statistics count the run, already recorded, as one.
+					metrics.recordError(fmt.Errorf("the response could not be sent: %w", pubErr))
 					logger.Error("Failed to publish response", "service", serviceName, "module", modName,
 						"response_size", len(response), "error", pubErr)
-					replyMsg := frameworkErrorReply(msg.Reply, types.ErrorTypeReplyFailed,
-						"the handler ran, but its response could not be sent: "+pubErr.Error())
+					// The message is the reason alone: the client's
+					// ErrReplyFailed already says what happened.
+					replyMsg := frameworkErrorReply(msg.Reply, types.ErrorTypeReplyFailed, pubErr.Error())
 					if errPubErr := eventBus.PublishMsg(replyMsg); errPubErr != nil {
 						logger.Error("Failed to publish error response", "service", serviceName, "module", modName, "error", errPubErr)
 					}

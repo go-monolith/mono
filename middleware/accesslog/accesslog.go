@@ -52,6 +52,9 @@ type channelProxy struct {
 	wg           sync.WaitGroup
 	closeInOnce  sync.Once
 	closeOutOnce sync.Once
+	// ended is closed once the goroutines of a proxy that was replaced have
+	// returned.
+	ended chan struct{}
 }
 
 // AccessLogModule implements types.MiddlewareModule to provide access logging.
@@ -88,7 +91,8 @@ type AccessLogModule struct {
 	// Channel proxy management
 	channelProxies map[string]*channelProxy
 	// replacedProxies are proxies a later wrap of the same module and
-	// service replaced: cancelled, and waited for at stop.
+	// service replaced: cancelled, and waited for at stop. One whose
+	// goroutines have ended is dropped at the next replacement.
 	replacedProxies  []*channelProxy
 	channelProxiesMu sync.RWMutex
 }
@@ -692,6 +696,7 @@ func (m *AccessLogModule) wrapChannelService(
 		proxyOut:    proxyOut,
 		ctx:         ctx,
 		cancel:      cancel,
+		ended:       make(chan struct{}),
 	}
 
 	// Store proxy for cleanup, under the module and the service: two
@@ -702,14 +707,31 @@ func (m *AccessLogModule) wrapChannelService(
 	m.channelProxiesMu.Lock()
 	if replaced, ok := m.channelProxies[key]; ok {
 		replaced.cancel()
-		// Kept until stop, which waits for its goroutines too.
-		m.replacedProxies = append(m.replacedProxies, replaced)
+		go func() {
+			replaced.wg.Wait()
+			close(replaced.ended)
+		}()
+		// Kept until its goroutines have ended, so that stop waits for
+		// them too. A module that registers the service again and again
+		// must not make the list grow: what has ended is dropped.
+		running := m.replacedProxies[:0]
+		for _, earlier := range m.replacedProxies {
+			select {
+			case <-earlier.ended:
+			default:
+				running = append(running, earlier)
+			}
+		}
+		clear(m.replacedProxies[len(running):])
+		m.replacedProxies = append(running, replaced)
 	}
+	// Counted before the proxy can be found and replaced: the wait above
+	// must not return before its goroutines have started.
+	proxy.wg.Add(2)
 	m.channelProxies[key] = proxy
 	m.channelProxiesMu.Unlock()
 
 	// Start proxy goroutines
-	proxy.wg.Add(2)
 	go m.proxyInboundChannel(proxy)
 	go m.proxyOutboundChannel(proxy)
 
