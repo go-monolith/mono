@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1925,6 +1926,46 @@ func TestProxyInboundChannel_ContextDoneDuringForward(t *testing.T) {
 	err := m.Stop(context.Background())
 	if err != nil {
 		t.Errorf("Stop() failed: %v", err)
+	}
+}
+
+// TestProxyInboundChannel_ProviderClosesInChannel verifies that the accesslog proxy
+// stops cleanly before the provider closes originalIn on ModuleStoppingEvent,
+// avoiding data races under -race.
+func TestProxyInboundChannel_ProviderClosesInChannel(t *testing.T) {
+	buf := &syncWriter{}
+	m, _ := New(WithOutput(buf))
+
+	originalIn := make(chan *types.Msg, 1)
+	originalOut := make(chan *types.Msg, 1)
+
+	proxyIn, _ := m.wrapChannelService(originalIn, originalOut, "test-module", "test-channel")
+
+	// Send two messages: first fills originalIn (cap 1), second causes proxy to block waiting to forward
+	proxyIn <- &types.Msg{Data: []byte("msg1")}
+	proxyIn <- &types.Msg{Data: []byte("msg2")}
+
+	// Wait deterministically until msg1 is in originalIn and msg2 has been read from proxyIn (fail after ~1s)
+	deadline := time.Now().Add(time.Second)
+	for len(originalIn) != cap(originalIn) || len(proxyIn) != 0 {
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for proxy to read proxyIn and buffer originalIn")
+		}
+		runtime.Gosched()
+	}
+
+	// Module stopping event cleanly cancels and waits for proxy goroutines before provider Stop
+	m.OnModuleLifecycle(context.Background(), types.ModuleLifecycleEvent{
+		Type:       types.ModuleStoppingEvent,
+		ModuleName: "test-module",
+	})
+
+	// Provider closes originalIn during shutdown (now safe, no proxy goroutine is sending)
+	close(originalIn)
+
+	// Stop the accesslog module
+	if err := m.Stop(context.Background()); err != nil {
+		t.Fatalf("Stop() failed: %v", err)
 	}
 }
 

@@ -118,6 +118,9 @@ const (
 	// ModuleStartedEvent indicates a module was started successfully.
 	ModuleStartedEvent ModuleLifecycleEventType = "module.started"
 
+	// ModuleStoppingEvent indicates a module is about to be stopped.
+	ModuleStoppingEvent ModuleLifecycleEventType = "module.stopping"
+
 	// ModuleStoppedEvent indicates a module was stopped.
 	ModuleStoppedEvent ModuleLifecycleEventType = "module.stopped"
 
@@ -131,6 +134,7 @@ const (
 //
 // Different event types populate different fields:
 //   - ModuleStartedEvent: ModuleName, Duration
+//   - ModuleStoppingEvent: ModuleName
 //   - ModuleStoppedEvent: ModuleName, Error (nil if successful)
 //
 // The Metadata field is available for all event types and allows middleware

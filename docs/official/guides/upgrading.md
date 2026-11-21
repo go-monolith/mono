@@ -321,6 +321,10 @@ See [A Request Always Gets a Reply](error-handling.md#a-request-always-gets-a-re
 - **Objects damaged before** are not repaired: `Stat` returns them and `Get` times out. Upload them again or delete them; see [Objects damaged by a rejected upload](../plugins/fs-jetstream.md#objects-damaged-by-a-rejected-upload).
 - **Code that builds a backend itself:** `fsjetstream.NewJetStreamBackend` still uploads through the object store client. Use `fsjetstream.NewJetStreamBackendWithJetStream`, as the plugin does.
 
+### Other fixes in v0.2.20
+
+- **Access log channel proxy shutdown & `ModuleStoppingEvent`:** the lifecycle now emits `types.ModuleStoppingEvent` (`"module.stopping"`) before each module's `Stop()` executes (both during normal shutdown and during rollback). The access log middleware intercepts this event to cancel and wait for that module's channel proxies so background goroutines return before the module closes its channels. Third-party middleware switching over all lifecycle types will observe this new event type. Channel services of a `middleware` module registered after the access log, and providers that close their `in` channel on runtime-context cancellation (before modules stop), don't get `module.stopping`, so they are not covered.
+
 ## New Features
 
 All optional.
@@ -342,6 +346,7 @@ All optional.
 | `audit.CanonicalDetails`, `audit.HashEntry`, `audit.LegacyEmptyDetailsHash` | v0.2.17 | The form an audit entry's details are hashed in, and the hash earlier versions gave an entry with empty details |
 | `fsjetstream.NewJetStreamBackendWithJetStream`, `UploadObject`, `ErrUploadAckTimeout`, `ErrUploadOutOfOrder` | v0.2.20 | A backend whose uploads write the metadata only after every chunk is stored, the upload itself, and the errors of an upload whose chunk was not acknowledged within `UploadAckTimeout` (10s) or whose chunks were not stored in the order they were read |
 | `types.IsOneShotCronSchedule`, `types.CronOneShotSubject` | v0.2.20 | Whether a cron schedule fires once (`@at`), and the subject on which the framework records a one-shot schedule it has published |
+| `types.ModuleStoppingEvent` (`module.stopping`) | v0.2.20 | Lifecycle event emitted by the lifecycle manager before a module's `Stop()` executes (during shutdown and rollback) |
 | `monoerrors.ErrReplyFailed`, `types.ErrorTypeReplyFailed` (`reply-failed`) | v0.2.19 | The error a request-reply caller gets when the handler ran but its response could not be sent, and its type on the wire |
 | `types.IsFrameworkErrorType`, `types.HandlerPanicMessage` | v0.2.19 | Whether a `Mono-Error-Type` is one the framework itself answers with, and the message it sends for a handler that panicked |
 | `audit.ErrAmbiguousEntry`, `audit.CheckHashable`, `audit.SaveFailure` | v0.2.19 | The error for an audit entry whose event type, module name or service name contains `|`, the check for it, and the error type `SaveAuditTrail` returns for an entry that was not saved (`errors.Is` finds `ErrAmbiguousEntry` through it) |

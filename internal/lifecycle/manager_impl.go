@@ -1652,6 +1652,16 @@ func (lm *lifecycleManager) stopModule(ctx context.Context, module types.Module)
 
 	lm.logger.Info("Stopping module", "module", moduleName)
 
+	// Notify middleware before stopping module
+	if lm.middlewareChain != nil {
+		event := types.ModuleLifecycleEvent{
+			Type:       types.ModuleStoppingEvent,
+			ModuleName: moduleName,
+			Metadata:   make(map[string]any),
+		}
+		lm.middlewareChain.RunModuleLifecycle(ctx, event)
+	}
+
 	panicValue, err := lm.RunStop(ctx, "module", moduleName, module.Stop)
 	if panicValue != nil {
 		lm.logger.Error("Module panic during stop", "module", moduleName, "panic", panicValue)

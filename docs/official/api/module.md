@@ -494,7 +494,7 @@ After all modules have started, channel service routers are started and the NATS
 
 ### Shutdown Order
 
-1. Regular modules (in reverse dependency order)
+1. Regular modules (in reverse dependency order; for each module, `ModuleStoppingEvent` is emitted before `Stop()`, followed by `ModuleStoppedEvent`)
 2. Middleware (in reverse registration order)
 3. Plugins (in reverse registration order)
 
