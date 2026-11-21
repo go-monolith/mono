@@ -3,11 +3,14 @@ package audit
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/go-monolith/mono/pkg/types"
 )
 
 // The hash input joins its fields with "|" unescaped, so text can be moved
@@ -176,4 +179,87 @@ func TestWriteEntry_RefusesTheSeparatorWithHashChaining(t *testing.T) {
 			t.Fatalf("log = %q", log.String())
 		}
 	})
+}
+
+// Details that cannot be hashed are hashed as empty ones when an entry is
+// written; the verifier must not take them for an entry without details.
+func TestVerifyChain_RefusesDetailsThatCannotBeHashed(t *testing.T) {
+	at := time.Date(2026, 11, 21, 10, 0, 0, 0, time.UTC)
+	plain := Entry{Timestamp: at, EventType: EventCustomAuditTrail, ModuleName: "billing"}
+	plain.EntryHash = LegacyEmptyDetailsHash(plain)
+	if err := VerifyChain([]Entry{plain}); err != nil {
+		t.Fatalf("the entry without details does not verify: %v", err)
+	}
+	edited := plain
+	edited.Details = map[string]any{"approved": make(chan int)}
+	if ComputeEntryHash(edited) != plain.EntryHash {
+		t.Fatal("the edited entry has another hash: the test proves nothing")
+	}
+	if err := VerifyChain([]Entry{edited}); err == nil || !strings.Contains(err.Error(), "cannot be verified") {
+		t.Fatalf("VerifyChain = %v, want an error", err)
+	}
+}
+
+// Text that is not valid UTF-8 is written by JSON with replacement
+// characters; hashed as it was, the entry never verified once parsed.
+func TestWriteEntry_InvalidUTF8Verifies(t *testing.T) {
+	var log bytes.Buffer
+	m, err := New(WithOutput(&log), WithHashChaining(""),
+		WithUserContext(func(context.Context) string { return "user\xff\xfe|admin" }))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range []Entry{
+		{EventType: EventCustomAuditTrail, ModuleName: "orders"},
+		{EventType: EventCustomAuditTrail, ModuleName: "ord\xc3ers", ServiceName: "\x80", Details: map[string]any{"note": "a\xffb"}},
+	} {
+		if err := m.writeEntry(context.Background(), entry); err != nil {
+			t.Fatal(err)
+		}
+	}
+	entries := ParseLog(t, log.String())
+	if len(entries) != 2 {
+		t.Fatalf("entries = %d", len(entries))
+	}
+	if err := VerifyChain(entries); err != nil {
+		t.Fatalf("VerifyChain = %v", err)
+	}
+}
+
+func TestAsWritten(t *testing.T) {
+	for _, tc := range []struct{ in, want string }{
+		{"", ""},
+		{"plain|text", "plain|text"},
+		{"<html> &   \"quoted\"", "<html> &   \"quoted\""},
+		{"a\xffb", "a�b"},
+		{"\xff\xfe", "��"},
+	} {
+		if got := AsWritten(tc.in); got != tc.want {
+			t.Errorf("AsWritten(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
+// The confirmation of a refused entry carries its error as text; the adapter
+// gives it back its identity.
+func TestConfirmationError_KeepsErrAmbiguousEntry(t *testing.T) {
+	var log bytes.Buffer
+	m, err := New(WithOutput(&log), WithHashChaining(""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := json.Marshal(Entry{EventType: EventCustomAuditTrail, ModuleName: "orders|billing"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = ConfirmationError(m.processAuditTrailEntry(&types.Msg{Data: data, Reply: "orders"}))
+	if !errors.Is(err, ErrAmbiguousEntry) || !strings.HasPrefix(err.Error(), "audit save failed: ") {
+		t.Fatalf("ConfirmationError = %v, want ErrAmbiguousEntry", err)
+	}
+
+	other := ConfirmationError(&types.Msg{Data: []byte(`{"success":false,"error":"disk full"}`)})
+	var failure *SaveFailure
+	if !errors.As(other, &failure) || failure.Cause != nil || other.Error() != "audit save failed: disk full" {
+		t.Fatalf("ConfirmationError = %v", other)
+	}
 }

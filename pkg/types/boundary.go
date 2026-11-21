@@ -80,7 +80,9 @@ type ServiceUse struct {
 type BoundaryViolation struct {
 	// Kind classifies the violation.
 	Kind BoundaryViolationKind `json:"kind"`
-	// Dependency is the module whose boundary was crossed.
+	// Dependency is the module whose boundary was crossed. It is empty for
+	// a violation that concerns no single module
+	// (BoundaryViolationRuntimeContextReplaced).
 	Dependency string `json:"dependency"`
 	// Subject is the NATS subject involved when the violation was a bus
 	// operation, the subject of the service looked up for an undeclared

@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 )
 
 // HashChain manages SHA-256 hash chaining for tamper-evident audit logging.
@@ -134,7 +135,9 @@ func CanonicalDetails(details map[string]any) ([]byte, error) {
 
 // ErrAmbiguousEntry is returned for an entry whose event type, module name or
 // service name contains the separator of the hash input ("|"): by the audit
-// module when such an entry is to be written with hash chaining, and by
+// module when such an entry is to be written with hash chaining
+// (SaveAuditTrail returns it; an entry of the framework's own events, or one
+// sent with AsyncSaveAuditTrail, is reported on stderr), and by
 // VerifyChainFrom when a log holds one. See CheckHashable.
 var ErrAmbiguousEntry = errors.New("audit entry field contains the hash separator '|'")
 
@@ -168,19 +171,41 @@ func CheckHashable(entry Entry) error {
 	return nil
 }
 
+// AsWritten returns text as a reader of the log gets it: written as JSON and
+// parsed back. That is text itself unless it is not valid UTF-8, when JSON
+// writes each invalid byte as the replacement character U+FFFD. Hashed as it
+// was, an entry with such text (a user context taken from a request header)
+// never verified once parsed, and with it the rest of its log.
+func AsWritten(text string) string {
+	if utf8.ValidString(text) {
+		return text
+	}
+	written, err := json.Marshal(text)
+	if err != nil {
+		return text // a string always marshals
+	}
+	var parsed string
+	if err := json.Unmarshal(written, &parsed); err != nil {
+		return text
+	}
+	return parsed
+}
+
 // HashEntry returns the SHA-256 hash of entry with detailsJSON as the
 // representation of its details. The EntryHash field is not part of it.
 //
 // The fields are joined with HashSeparator, unescaped; CheckHashable says
 // which entries that is unambiguous for.
+//
+// The text fields are hashed as a reader of the log gets them (AsWritten).
 func HashEntry(entry Entry, detailsJSON []byte) string {
 	data := fmt.Sprintf("%s|%s|%s|%s|%s|%s|%s",
 		entry.Timestamp.UTC().Format(time.RFC3339Nano),
-		entry.EventType,
-		entry.ModuleName,
-		entry.ServiceName,
+		AsWritten(string(entry.EventType)),
+		AsWritten(entry.ModuleName),
+		AsWritten(entry.ServiceName),
 		string(detailsJSON),
-		entry.UserContext,
+		AsWritten(entry.UserContext),
 		entry.PrevHash)
 
 	hash := sha256.Sum256([]byte(data))
@@ -254,8 +279,16 @@ func VerifyChainFrom(entries []Entry, startHash string) error {
 		}
 
 		// Verify entry_hash is correct. An entry without details may carry
-		// the hash earlier versions gave empty details.
-		computed := ComputeEntryHash(entry)
+		// the hash earlier versions gave empty details. Details that cannot
+		// be hashed are not replaced by empty ones here, as they are for an
+		// entry to be written: an entry would then verify with the hash of
+		// the same entry without details. (Details parsed from a log can
+		// always be hashed.)
+		detailsJSON, err := CanonicalDetails(entry.Details)
+		if err != nil {
+			return fmt.Errorf("entry %d cannot be verified: %w", i, err)
+		}
+		computed := HashEntry(entry, detailsJSON)
 		legacy := len(entry.Details) == 0 && entry.EntryHash == LegacyEmptyDetailsHash(entry)
 		if entry.EntryHash != computed && !legacy {
 			return fmt.Errorf("entry %d has invalid hash: expected %s, got %s",

@@ -3,6 +3,7 @@ package jsrecreate
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -162,6 +163,85 @@ func TestAPIPrefix(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := APIPrefix(tc.opts); got != tc.want {
 				t.Fatalf("APIPrefix = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestLeaderNotAnswering(t *testing.T) {
+	live := context.Background()
+	ended, cancel := context.WithCancel(context.Background())
+	cancel()
+	for _, tc := range []struct {
+		name string
+		ctx  context.Context
+		err  error
+		want bool
+	}{
+		{"no responders", live, nats.ErrNoResponders, true},
+		{"the request timed out, the caller has time left", live, context.DeadlineExceeded, true},
+		{"a client timeout, the caller has time left", live, nats.ErrTimeout, true},
+		{"the caller's own context ended", ended, context.DeadlineExceeded, false},
+		{"JetStream temporarily unavailable", live, &jetstream.APIError{Code: 503, ErrorCode: ErrCodeClusterNotAvailable}, true},
+		{"wrapped", live, fmt.Errorf("read: %w", &jetstream.APIError{ErrorCode: ErrCodeClusterNotAvailable}), true},
+		{"stream not found", live, &jetstream.APIError{Code: 404, ErrorCode: jetstream.JSErrCodeStreamNotFound}, false},
+		{"another error", live, errors.New("boom"), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := LeaderNotAnswering(tc.ctx, tc.err); got != tc.want {
+				t.Fatalf("LeaderNotAnswering(%v) = %v, want %v", tc.err, got, tc.want)
+			}
+		})
+	}
+}
+
+// A request nobody answers ends after MsgGetTimeout, not with the caller's
+// much longer copy timeout: a stream without a leader stays silent.
+func TestHoldsMsgAfter_BoundsARequestNobodyAnswers(t *testing.T) {
+	_, nc := startJetStreamConn(t)
+	// A subscriber that never replies stands in for the servers of a stream
+	// without a leader.
+	sub, err := nc.SubscribeSync("silent.api.STREAM.MSG.GET.KV_locks")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := sub.Unsubscribe(); err != nil && !errors.Is(err, nats.ErrConnectionClosed) {
+			t.Errorf("unsubscribe: %v", err)
+		}
+	})
+	silent, err := jetstream.NewWithAPIPrefix(nc, "silent.api")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*MsgGetTimeout+time.Minute)
+	defer cancel()
+	started := time.Now()
+	_, err = HoldsMsgAfter(ctx, silent, "KV_locks", 0)
+	if !LeaderNotAnswering(ctx, err) {
+		t.Fatalf("err = %v, want one that is asked again", err)
+	}
+	if waited := time.Since(started); waited < MsgGetTimeout/2 || waited > MsgGetTimeout+3*time.Second {
+		t.Fatalf("waited %s, want about %s", waited, MsgGetTimeout)
+	}
+}
+
+func TestTailContradicted(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		state  jetstream.StreamState
+		copied uint64
+		want   bool
+	}{
+		{"empty stream", jetstream.StreamState{Msgs: 0, FirstSeq: 13, LastSeq: 12}, 2, false},
+		{"everything held was copied", jetstream.StreamState{Msgs: 2, FirstSeq: 1, LastSeq: 12}, 2, false},
+		{"first message is the last one copied", jetstream.StreamState{Msgs: 1, FirstSeq: 2, LastSeq: 12}, 2, false},
+		{"messages only after what was copied", jetstream.StreamState{Msgs: 3, FirstSeq: 10, LastSeq: 12}, 2, true},
+		{"nothing copied, messages held", jetstream.StreamState{Msgs: 1, FirstSeq: 1, LastSeq: 1}, 0, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := TailContradicted(tc.state, tc.copied); got != tc.want {
+				t.Fatalf("TailContradicted = %v, want %v", got, tc.want)
 			}
 		})
 	}

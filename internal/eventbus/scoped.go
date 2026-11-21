@@ -220,6 +220,9 @@ func (s *scopedEventBus) EventStream() (types.EventStream, error) { return s.inn
 // boundaries, ignored, as the method has no error to return.
 func (s *scopedEventBus) SetRuntimeContext(ctx context.Context) {
 	if err := s.rec.Violation(types.BoundaryViolationRuntimeContextReplaced, "", ""); err != nil {
+		// There is nobody to return the error to, and a module whose call
+		// does nothing needs to be told why.
+		s.rec.WarnIgnored(types.BoundaryViolationRuntimeContextReplaced, err)
 		return
 	}
 	s.inner.SetRuntimeContext(ctx)

@@ -568,6 +568,12 @@ func backupCopied(ctx context.Context, js jetstream.JetStream, backup jetstream.
 	var copied uint64
 	if binfo.State.Msgs > 0 {
 		msg, err := backup.GetMsg(ctx, binfo.State.LastSeq)
+		if errors.Is(err, jetstream.ErrMsgNotFound) {
+			// The backup allows direct gets, which any of its replicas
+			// answers: one that has not stored the leader's last message
+			// yet. Read again on the next round.
+			return false, 0, nil
+		}
 		if err != nil {
 			return false, 0, fmt.Errorf("failed to read the last message of backup stream %s: %w", binfo.Config.Name, err)
 		}
@@ -593,15 +599,60 @@ func backupCopied(ctx context.Context, js jetstream.JetStream, backup jetstream.
 	// nothing after what was copied (the rest expired before it was read).
 	holds, err := HoldsMsgAfter(ctx, js, streamName, copied)
 	if err != nil {
-		if errors.Is(err, nats.ErrNoResponders) {
+		if LeaderNotAnswering(ctx, err) {
 			// The stream has no leader at the moment: asked again on the
 			// next round, within the copy timeout.
 			return false, copied, nil
 		}
 		return false, copied, fmt.Errorf("failed to read stream %s after sequence %d: %w", streamName, copied, err)
 	}
-	return !holds, copied, nil
+	if holds {
+		return false, copied, nil
+	}
+	// The server answers "no message" for any error of its store, not only
+	// for the end of the stream, so the answer is held against the stream's
+	// state before the bucket is deleted on it.
+	original, err := js.Stream(ctx, streamName)
+	if err != nil {
+		return false, copied, fmt.Errorf("failed to read stream %s: %w", streamName, err)
+	}
+	if TailContradicted(original.CachedInfo().State, copied) {
+		return false, copied, nil
+	}
+	return true, copied, nil
 }
+
+// TailContradicted reports whether state says that the stream holds a
+// message after sequence copied: it holds messages, and its first one comes
+// after copied. (A first message at or before copied says nothing about what
+// follows it.)
+func TailContradicted(state jetstream.StreamState, copied uint64) bool {
+	return state.Msgs > 0 && state.FirstSeq > copied
+}
+
+// LeaderNotAnswering reports whether err, returned by HoldsMsgAfter under
+// ctx, means that the stream has no leader to answer at the moment, so that
+// asking again later can succeed:
+//   - no answer within MsgGetTimeout while ctx itself has not ended (a
+//     server that is not the leader stays silent, as during an election);
+//   - the API error "JetStream system temporarily unavailable" (once the
+//     servers know the stream is without a leader);
+//   - no responders (no JetStream server reachable under this API prefix).
+func LeaderNotAnswering(ctx context.Context, err error) bool {
+	if errors.Is(err, nats.ErrNoResponders) {
+		return true
+	}
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, nats.ErrTimeout) {
+		return ctx.Err() == nil
+	}
+	var apiErr *jetstream.APIError
+	return errors.As(err, &apiErr) && apiErr.ErrorCode == ErrCodeClusterNotAvailable
+}
+
+// ErrCodeClusterNotAvailable is the JetStream API error code of
+// JSClusterNotAvailErr ("JetStream system temporarily unavailable"), which
+// nats.go has no constant for.
+const ErrCodeClusterNotAvailable jetstream.ErrorCode = 10008
 
 // HoldsMsgAfter reports whether the stream holds a message after sequence
 // seq, as answered by the stream's leader.
@@ -613,7 +664,10 @@ func backupCopied(ctx context.Context, js jetstream.JetStream, backup jetstream.
 // without it, and the bucket would be deleted. The request is therefore sent
 // to the message get API itself, with the body Stream.GetMsg sends.
 //
-// It returns nats.ErrNoResponders while the stream has no leader.
+// The request is bounded by MsgGetTimeout as well as by ctx: only the
+// leader answers, and while there is none the request gets no answer (or,
+// once the servers know, the API error 10008). LeaderNotAnswering tells
+// these errors from the others.
 func HoldsMsgAfter(ctx context.Context, js jetstream.JetStream, streamName string, seq uint64) (bool, error) {
 	nc := js.Conn()
 	if nc == nil {
@@ -623,12 +677,9 @@ func HoldsMsgAfter(ctx context.Context, js jetstream.JetStream, streamName strin
 	if err != nil {
 		return false, err
 	}
-	if _, ok := ctx.Deadline(); !ok {
-		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, MsgGetTimeout)
-		defer cancel()
-	}
-	reply, err := nc.RequestWithContext(ctx, APIPrefix(js.Options())+"STREAM.MSG.GET."+streamName, req)
+	reqCtx, cancel := context.WithTimeout(ctx, MsgGetTimeout)
+	defer cancel()
+	reply, err := nc.RequestWithContext(reqCtx, APIPrefix(js.Options())+"STREAM.MSG.GET."+streamName, req)
 	if err != nil {
 		return false, err
 	}
@@ -647,8 +698,9 @@ func HoldsMsgAfter(ctx context.Context, js jetstream.JetStream, streamName strin
 	return true, nil
 }
 
-// MsgGetTimeout bounds the message get request of a caller whose context has
-// no deadline (nats.go requires one).
+// MsgGetTimeout bounds one message get request. A stream without a leader
+// does not answer it, and the copy timeout of the caller is much longer: the
+// caller asks again instead of spending that on one request.
 const MsgGetTimeout = 5 * time.Second
 
 // MsgGetRequest is the body of a JetStream message get request: the first
