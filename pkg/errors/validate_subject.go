@@ -45,6 +45,9 @@ var kebabCaseRegex = regexp.MustCompile(`^[a-z0-9]+(-[a-z0-9]+)*$`)
 //   - All tokens must be kebab-case (lowercase, numbers, hyphens)
 //   - Reserved prefix "_mono." is not allowed for user subjects
 //   - Wildcards (*,>) only allowed in event subjects for subscriptions
+//   - A first token other than "services" and "events" (a custom prefix)
+//     is not held to kebab-case; the wildcard rules apply to it, and it
+//     must not be empty
 //
 // Returns the subject type and an error if validation fails.
 func ValidateSubject(subject string, allowWildcard bool) (SubjectType, error) {
@@ -84,12 +87,9 @@ func ValidateSubject(subject string, allowWildcard bool) (SubjectType, error) {
 
 	// Validate each token is kebab-case (excluding wildcards for event subjects)
 	for i, token := range tokens {
-		// Skip first token (services/events) as it's already validated
-		if i == 0 {
-			continue
-		}
-
-		// Detect wildcards and handle accordingly
+		// Detect wildcards and handle accordingly. The first token is held
+		// to the wildcard rules like the others: "*.a.b" passed with
+		// wildcards not allowed, and ">.a.b" passed at all.
 		if !allowWildcard && (token == "*" || token == ">") {
 			return subjectType, fmt.Errorf("subject '%s' is not allowed to contain wildcards", subject)
 		}
@@ -97,6 +97,16 @@ func ValidateSubject(subject string, allowWildcard bool) (SubjectType, error) {
 		// '>' wildcard must be the last token
 		if token == ">" && i != len(tokens)-1 {
 			return SubjectTypeUnknown, fmt.Errorf("subject '%s' wildcard '>' must be the last token", subject)
+		}
+
+		// The first token is "services", "events" or a custom prefix. A
+		// custom prefix need not be kebab-case ("$KV", "Orders"), but an
+		// empty one is no subject to NATS.
+		if i == 0 {
+			if token == "" {
+				return SubjectTypeUnknown, fmt.Errorf("subject '%s' must not start with an empty token", subject)
+			}
+			continue
 		}
 
 		// Validate kebab-case for non-wildcard tokens
