@@ -36,6 +36,12 @@ type JetStreamBackend struct {
 	// js publishes the messages of an upload (see UploadObject). It is nil
 	// for a backend built with NewJetStreamBackend.
 	js jetstream.JetStream
+	// uploads publishes the chunks of an upload. It is a JetStream context
+	// of its own on the connection of js, with an acknowledgement timeout:
+	// without one, a chunk that is never acknowledged stays with the
+	// publisher, and counts towards its limit of pending messages, until the
+	// connection reconnects.
+	uploads jetstream.JetStream
 	// stream is the bucket's stream, looked up by the first upload that
 	// removes chunks (see BucketStream).
 	streamMu sync.Mutex
@@ -72,6 +78,16 @@ func NewJetStreamBackend(bucketName string, store jetstream.ObjectStore, bucketT
 func NewJetStreamBackendWithJetStream(js jetstream.JetStream, bucketName string, store jetstream.ObjectStore, bucketTTL time.Duration, logger *slog.Logger) *JetStreamBackend {
 	backend := NewJetStreamBackend(bucketName, store, bucketTTL, logger)
 	backend.js = js
+	backend.uploads = js
+	// Chunks are published to their subject, which no API prefix or domain
+	// changes, so the publisher needs nothing of js but its connection.
+	uploads, err := jetstream.New(js.Conn(), jetstream.WithPublishAsyncTimeout(UploadAckTimeout))
+	if err == nil {
+		backend.uploads = uploads
+	} else if logger != nil {
+		logger.Warn("uploads use the shared JetStream context: a chunk that is never acknowledged stays pending until the connection reconnects",
+			"bucket", bucketName, "error", err)
+	}
 	return backend
 }
 

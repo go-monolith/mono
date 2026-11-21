@@ -645,7 +645,7 @@ Acknowledgement is owned by the framework: return `nil` to Ack the occurrence, o
 | `Replicas` | `int` | Replicas of the service's stream (schedule and occurrences) and consumer in a cluster. `0` = the framework default (`WithJetStreamDefaultReplicas`, otherwise 1); at most 5. With one replica the schedule lives on one server and stops firing while that server is down; use 3 in a cluster of at least three servers |
 | `Deprecated` | `bool` | When true, purge the schedule on deploy and don't start the consumer (keep the code) |
 
-**Returns:** `error`, nil on success; non-nil if validation fails (e.g. empty `Schedule`, both `Payload` and `SourceSubject` set, invalid `TimeZone`, `Replicas` outside 0..5, nil handler, `TTL` set below 1s, `SourceSubject` with a wildcard, or equal to `services.<module>.<name>` or to its reserved `.schedule` or `.control` sub-subject).
+**Returns:** `error`, nil on success; non-nil if validation fails (e.g. empty `Schedule`, both `Payload` and `SourceSubject` set, invalid `TimeZone`, `Replicas` outside 0..5, nil handler, `TTL` set below 1s, `SourceSubject` with a wildcard, or equal to `services.<module>.<name>` or to its reserved `.schedule`, `.control` or `.one-shot` sub-subject).
 
 **Example:**
 ```go
@@ -678,7 +678,7 @@ func (m *ReportModule) handleRollup(ctx context.Context, msg *mono.Msg) error {
 - An unchanged schedule is left alone at startup (since v0.2.20): the stored schedule is read first and published only when it is missing or differs. The server counts an interval from the time the schedule was published, so before, every start of any instance began an `@every` interval anew, and an interval longer than the time between two starts (`@every 24h` with a daily deploy, or any interval in a cluster whose instances restart more often) never fired. A changed schedule still starts its interval from the deploy. The fix holds once every instance runs v0.2.20.
 - A one-shot schedule (`@at 2026-07-01T09:00:00Z`) fires once (since v0.2.20). Before, a schedule whose time had passed fired again at every start. Changing the time schedules the job once more.
 - Removing `TTL` again works since v0.2.14. The service's stream keeps per-message TTLs enabled, because the server cannot switch them off; a schedule without `TTL` simply sends none. Before, removing `TTL` failed every `Start` (`message TTL status can not be disabled`).
-- `SourceSubject` may be a subject under the service's own subjects (`services.<module>.<name>.<anything>`) since v0.2.14; before, the server rejected the stream. The `.schedule` and `.control` sub-subjects are reserved.
+- `SourceSubject` may be a subject under the service's own subjects (`services.<module>.<name>.<anything>`) since v0.2.14; before, the server rejected the stream. The `.schedule`, `.control` and (since v0.2.20) `.one-shot` sub-subjects are reserved.
 - `SourceSubject` must be a single subject. One with a wildcard (`*` or `>`) is rejected at registration since v0.2.14; before, `Start` failed after the stream was written (`message schedules source is invalid`).
 - To retire a service, set `Deprecated: true` and deploy (purges the schedule, keeps the code), then remove the `RegisterCronService` call in a later release.
 

@@ -2,6 +2,7 @@ package lifecycle
 
 import (
 	"context"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -20,6 +21,10 @@ func TestSubmitEventToPool_FullPoolHoldsTheEventBack(t *testing.T) {
 	reporter := newOverloadReporter(logger, "event", "e")
 
 	release := make(chan struct{})
+	// Registered after the pool's cleanup, so it runs first: a test that
+	// fails before it released the handler must not leave Close waiting.
+	releaseOnce := sync.OnceFunc(func() { close(release) })
+	t.Cleanup(releaseOnce)
 	var handled atomic.Int32
 	job := func() {
 		<-release
@@ -44,7 +49,7 @@ func TestSubmitEventToPool_FullPoolHoldsTheEventBack(t *testing.T) {
 	if n := reporter.rejectedTotal.Load(); n != 0 {
 		t.Fatalf("%d events rejected, want none", n)
 	}
-	close(release)
+	releaseOnce()
 	select {
 	case <-done:
 	case <-time.After(5 * time.Second):

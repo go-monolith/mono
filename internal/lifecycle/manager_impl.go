@@ -2498,6 +2498,13 @@ func (lm *lifecycleManager) setupCronService(ctx context.Context, entry *types.S
 		if err := lm.purgeCronSchedule(ctx, es, controlSubject, scheduleSubject); err != nil {
 			return fmt.Errorf("failed to purge deprecated cron schedule %q: %w", entry.Name, err)
 		}
+		// The purged schedule of a one-shot service must be published again
+		// when the registration is enabled once more.
+		if types.IsOneShotCronSchedule(cfg.Schedule) {
+			if err := WriteOneShotCronRecord(ctx, es, entry, ""); err != nil {
+				return fmt.Errorf("failed to clear the one-shot record of deprecated cron service %q: %w", entry.Name, err)
+			}
+		}
 		lm.logger.Info("Cron service deprecated; schedule purged",
 			"service", entry.Name,
 			"schedule_subject", scheduleSubject)
@@ -2529,7 +2536,7 @@ func (lm *lifecycleManager) setupCronService(ctx context.Context, entry *types.S
 	// interval.
 	published, err := EnsureCronSchedule(ctx, es, streamName, entry)
 	if err != nil {
-		return fmt.Errorf("failed to publish cron schedule %q: %w", entry.Name, err)
+		return fmt.Errorf("failed to set up cron schedule %q: %w", entry.Name, err)
 	}
 	if published {
 		lm.logger.Info("Cron schedule published",

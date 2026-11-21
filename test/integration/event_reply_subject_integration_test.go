@@ -70,7 +70,7 @@ func TestEventConsumer_EventWithReplySubjectIsHeldBack(t *testing.T) {
 func TestEventConsumer_JetStreamPublishedEventsAreAllHandled(t *testing.T) {
 	fw := newWorkerPoolApp(t, mono.WithJetStreamStorageDir(t.TempDir()))
 	emitter := &poolEmitterModule{}
-	consumer := &poolConsumerModule{name: "pool-consumer", delay: time.Millisecond}
+	consumer := &poolConsumerModule{name: "pool-consumer", delay: 5 * time.Millisecond}
 	for _, m := range []mono.Module{emitter, consumer} {
 		if err := fw.Register(m); err != nil {
 			t.Fatalf("Failed to register %s: %v", m.Name(), err)
@@ -89,8 +89,9 @@ func TestEventConsumer_JetStreamPublishedEventsAreAllHandled(t *testing.T) {
 		t.Fatalf("create stream: %v", err)
 	}
 
-	// More than the default pending queue (256) plus the one running.
-	const events = 600
+	// More than the default pending queue (256) plus the one running, and
+	// published far faster than the handler takes them.
+	const events = 400
 	for i := range events {
 		data, _ := json.Marshal(poolTickEvent{ID: i})
 		if _, err := es.Publish(ctx, subject, data); err != nil {

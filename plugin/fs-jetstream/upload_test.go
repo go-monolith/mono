@@ -222,6 +222,7 @@ type MetaPublishJS struct {
 	Deliver bool
 }
 
+// PublishMsg fails for a metadata message.
 func (m *MetaPublishJS) PublishMsg(ctx context.Context, msg *nats.Msg, opts ...jetstream.PublishOpt) (*jetstream.PubAck, error) {
 	if !strings.Contains(msg.Subject, ".M.") {
 		return m.JetStream.PublishMsg(ctx, msg, opts...)
@@ -247,6 +248,7 @@ func TestUploadObject_MetadataPublishThatFails(t *testing.T) {
 		{name: "rejected by the stream: the chunks are removed", err: rejected},
 		{name: "outcome unknown, the message was stored: the upload succeeded", err: nats.ErrTimeout, deliver: true, wantStored: true, wantChunks: 1},
 		{name: "outcome unknown, the message is not there: the chunks are kept", err: nats.ErrTimeout, wantChunks: 1, wantWarn: "outcome of an object's metadata message is unknown"},
+		{name: "no stream answered: the chunks are removed", err: jetstream.ErrNoStreamResponse},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -296,24 +298,99 @@ func NewTestFuture() *TestFuture {
 	return &TestFuture{OkCh: make(chan *jetstream.PubAck, 1), ErrCh: make(chan error, 1)}
 }
 
+// Ok delivers the acknowledgement.
 func (f *TestFuture) Ok() <-chan *jetstream.PubAck { return f.OkCh }
-func (f *TestFuture) Err() <-chan error            { return f.ErrCh }
-func (f *TestFuture) Msg() *nats.Msg               { return nil }
+
+// Err delivers the rejection.
+func (f *TestFuture) Err() <-chan error { return f.ErrCh }
+
+// Msg returns no message.
+func (f *TestFuture) Msg() *nats.Msg { return nil }
 
 func TestAwaitAck(t *testing.T) {
 	acked := NewTestFuture()
-	acked.OkCh <- &jetstream.PubAck{}
-	if err := AwaitAck(acked, time.Second); err != nil {
-		t.Errorf("acknowledged: %v", err)
+	acked.OkCh <- &jetstream.PubAck{Sequence: 7}
+	if ack, err := AwaitAck(acked, time.Second); err != nil || ack.Sequence != 7 {
+		t.Errorf("acknowledged: %+v, %v", ack, err)
 	}
 	rejectedErr := errors.New("maximum bytes exceeded")
 	rejected := NewTestFuture()
 	rejected.ErrCh <- rejectedErr
-	if err := AwaitAck(rejected, time.Second); !errors.Is(err, rejectedErr) {
+	if _, err := AwaitAck(rejected, time.Second); !errors.Is(err, rejectedErr) {
 		t.Errorf("rejected: err = %v", err)
 	}
-	if err := AwaitAck(NewTestFuture(), 20*time.Millisecond); !errors.Is(err, ErrUploadAckTimeout) {
+	if _, err := AwaitAck(NewTestFuture(), 20*time.Millisecond); !errors.Is(err, ErrUploadAckTimeout) {
 		t.Errorf("silent: err = %v, want ErrUploadAckTimeout", err)
+	}
+	// The publisher's own acknowledgement timeout is the same error.
+	timedOut := NewTestFuture()
+	timedOut.ErrCh <- jetstream.ErrAsyncPublishTimeout
+	if _, err := AwaitAck(timedOut, time.Second); !errors.Is(err, ErrUploadAckTimeout) {
+		t.Errorf("publisher timeout: err = %v, want ErrUploadAckTimeout", err)
+	}
+}
+
+// AsyncPublishJS answers every asynchronous publish with the next of Futures
+// and records the options each was published with.
+type AsyncPublishJS struct {
+	jetstream.JetStream
+	Futures []jetstream.PubAckFuture
+	Calls   int
+	Opts    [][]jetstream.PublishOpt
+}
+
+// PublishMsgAsync hands out the next future.
+func (a *AsyncPublishJS) PublishMsgAsync(_ *nats.Msg, opts ...jetstream.PublishOpt) (jetstream.PubAckFuture, error) {
+	future := a.Futures[a.Calls]
+	a.Calls++
+	a.Opts = append(a.Opts, opts)
+	return future, nil
+}
+
+// AckedFuture returns a future acknowledged with sequence.
+func AckedFuture(sequence uint64) *TestFuture {
+	future := NewTestFuture()
+	future.OkCh <- &jetstream.PubAck{Sequence: sequence}
+	return future
+}
+
+// A chunk stored behind a later one (a publish that was retried) would be
+// read back in the wrong place.
+func TestUploadChunks_OutOfOrderAcknowledgementFailsTheUpload(t *testing.T) {
+	publisher := &AsyncPublishJS{Futures: []jetstream.PubAckFuture{AckedFuture(11), AckedFuture(13), AckedFuture(12)}}
+	b := &JetStreamBackend{bucketName: "order", uploads: publisher}
+	_, _, _, err := b.UploadChunks(bytes.NewReader(make([]byte, 3<<10)), "$O.order.C.x", 1<<10, UploadPublishOptions...)
+	if !errors.Is(err, ErrUploadOutOfOrder) {
+		t.Fatalf("err = %v, want ErrUploadOutOfOrder", err)
+	}
+
+	inOrder := &AsyncPublishJS{Futures: []jetstream.PubAckFuture{AckedFuture(11), AckedFuture(12), AckedFuture(13)}}
+	b = &JetStreamBackend{bucketName: "order", uploads: inOrder}
+	if _, chunks, _, err := b.UploadChunks(bytes.NewReader(make([]byte, 3<<10)), "$O.order.C.x", 1<<10, UploadPublishOptions...); err != nil || chunks != 3 {
+		t.Fatalf("in order: %d chunks, %v", chunks, err)
+	}
+	for i, opts := range inOrder.Opts {
+		if len(opts) != len(UploadPublishOptions) {
+			t.Errorf("chunk %d published with %d options, want the upload's", i, len(opts))
+		}
+	}
+}
+
+// An upload of more chunks than may be pending at a time is read back whole.
+func TestUploadObject_MoreChunksThanTheWindow(t *testing.T) {
+	b, js := NewPutTestBackend(t, BucketConfig{Name: "large"})
+	content := make([]byte, 3*UploadAckWindow*DefaultChunkSize+17)
+	for i := range content {
+		content[i] = byte(i * 31)
+	}
+	if err := b.Set("large", content, 0); err != nil {
+		t.Fatal(err)
+	}
+	if chunks := ChunkMessages(t, js, "large"); chunks != 3*UploadAckWindow+1 {
+		t.Errorf("bucket holds %d chunk messages, want %d", chunks, 3*UploadAckWindow+1)
+	}
+	if data, err := b.Get("large"); err != nil || !bytes.Equal(data, content) {
+		t.Fatalf("Get = %d bytes, %v; want the %d uploaded", len(data), err, len(content))
 	}
 }
 

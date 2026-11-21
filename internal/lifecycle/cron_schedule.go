@@ -40,9 +40,6 @@ func CronScheduleMessage(entry *types.ServiceEntry) *types.Msg {
 	if cfg.SourceSubject != "" {
 		hdr[types.HeaderNatsScheduleSource] = []string{cfg.SourceSubject}
 	}
-	if types.IsOneShotCronSchedule(cfg.Schedule) {
-		hdr[types.HeaderCronOneShot] = []string{cfg.Schedule}
-	}
 	return &types.Msg{
 		Subject: entry.ScheduleSubject,
 		Data:    cfg.Payload,
@@ -77,76 +74,113 @@ func SameCronSchedule(stored *jetstream.RawStreamMsg, want *types.Msg) bool {
 // time between two starts never fired, and nothing said so. Cron expressions
 // and aliases are computed from the wall clock, so they were not affected.
 //
-// The last message on the schedule subject is therefore read first (one
-// request to the stream's leader per cron service and start):
+// The last message on the schedule subject is therefore read first (a stream
+// lookup and a message lookup per cron service and start, answered by the
+// stream's leader):
 //
 //   - the same schedule: nothing is published, and the interval runs on;
 //   - another schedule (a changed Schedule, Payload, TimeZone, TTL or
 //     SourceSubject): published, which replaces it, and an interval starts
 //     from now;
 //   - none (a first start, a schedule an earlier Deprecated registration or an
-//     operator purged): published;
-//   - none, for a one-shot schedule ("@at <time>") whose occurrence the stream
-//     holds (see OneShotCronScheduleFired): nothing is published. The server
-//     removes a one-shot schedule when it has fired, and one whose time has
-//     passed fires at once, so published at every Start the job ran once per
-//     start of every instance.
+//     operator purged): published.
 //
-// Any other error of the lookup is returned and nothing is published: a
-// publish "to be safe" while the stream has no leader would restart the
-// interval in exactly the situations the lookup is for. The cron setup step is
-// retried while the error clears by itself.
+// A one-shot schedule ("@at <time>") needs more: the server removes it when
+// it has fired, and one whose time has passed fires at once, so "none" is also
+// what a one-shot schedule that has done its work looks like, and published at
+// every Start the job ran once per start of every instance. The framework
+// therefore records each one-shot schedule it publishes on the service's
+// one-shot subject (types.CronOneShotSubject), and a Start that finds no
+// schedule but finds the record of this one publishes nothing. Another time is
+// another schedule and fires once more. A one-shot schedule that is stored
+// without a record (published by a version before the record existed) gets its
+// record, so that it is not published a second time after it fired.
+//
+// The record is written after the schedule: a process that dies between the
+// two publishes the schedule again at its next Start, which runs the job twice
+// if it had fired meanwhile. The other order would lose the job. Two instances
+// that start at the same moment can both publish a one-shot schedule whose
+// time has passed, for the same reason.
+//
+// Any error of a lookup is returned and nothing is published: a publish "to
+// be safe" while the stream has no leader would restart the interval in
+// exactly the situations the lookup is for. The cron setup step is retried
+// while the error clears by itself.
 //
 // Instances of a version that publishes at every Start still restart the
 // interval, until every instance is upgraded.
 func EnsureCronSchedule(ctx context.Context, es types.EventStream, streamName string, entry *types.ServiceEntry) (bool, error) {
 	want := CronScheduleMessage(entry)
+	oneShot := types.IsOneShotCronSchedule(entry.CronConfig.Schedule)
 	stream, err := es.Stream(ctx, streamName)
 	if err != nil {
 		return false, fmt.Errorf("look up stream %q for its schedule: %w", streamName, err)
 	}
 	stored, err := stream.GetLastMsgForSubject(ctx, entry.ScheduleSubject)
-	switch {
-	case err == nil:
-		if SameCronSchedule(stored, want) {
-			return false, nil
-		}
-	case errors.Is(err, jetstream.ErrMsgNotFound):
-		fired, err := OneShotCronScheduleFired(ctx, stream, entry)
-		if err != nil || fired {
-			return false, err
-		}
-	default:
+	if err != nil && !errors.Is(err, jetstream.ErrMsgNotFound) {
 		return false, fmt.Errorf("read the schedule stored on %q: %w", entry.ScheduleSubject, err)
 	}
+	found := err == nil
+	if found && SameCronSchedule(stored, want) {
+		if oneShot {
+			return false, RecordOneShotCronSchedule(ctx, es, stream, entry)
+		}
+		return false, nil
+	}
+	if !found && oneShot {
+		recorded, err := OneShotCronScheduleRecorded(ctx, stream, entry)
+		if err != nil || recorded {
+			return false, err
+		}
+	}
 	if _, err := es.PublishMsg(ctx, want); err != nil {
-		return false, err
+		return false, fmt.Errorf("publish the schedule to %q: %w", entry.ScheduleSubject, err)
+	}
+	if oneShot {
+		return true, RecordOneShotCronSchedule(ctx, es, stream, entry)
 	}
 	return true, nil
 }
 
-// OneShotCronScheduleFired reports whether the one-shot schedule of a cron
-// service has fired: the last message on the service subject is an occurrence
-// of a one-shot schedule (the server marks it to purge its schedule) and
-// carries this schedule in HeaderCronOneShot. It is false for a schedule that
-// repeats, and for another time than the one that fired, so changing the time
-// of the registration schedules the job once more.
-//
-// The occurrence is found for as long as the stream keeps it: a one-shot
-// service whose occurrences expire (CronServiceConfig.TTL) fires again at the
-// first Start after that.
-func OneShotCronScheduleFired(ctx context.Context, stream jetstream.Stream, entry *types.ServiceEntry) (bool, error) {
-	schedule := entry.CronConfig.Schedule
-	if !types.IsOneShotCronSchedule(schedule) {
-		return false, nil
-	}
-	last, err := stream.GetLastMsgForSubject(ctx, entry.Subject)
+// OneShotCronScheduleRecorded reports whether the one-shot record of a cron
+// service names its current schedule: the framework has published this
+// schedule before.
+func OneShotCronScheduleRecorded(ctx context.Context, stream jetstream.Stream, entry *types.ServiceEntry) (bool, error) {
+	subject := types.CronOneShotSubject(entry.Subject)
+	record, err := stream.GetLastMsgForSubject(ctx, subject)
 	if errors.Is(err, jetstream.ErrMsgNotFound) {
 		return false, nil
 	}
 	if err != nil {
-		return false, fmt.Errorf("read the last occurrence on %q: %w", entry.Subject, err)
+		return false, fmt.Errorf("read the one-shot record on %q: %w", subject, err)
 	}
-	return last.Header.Get(types.HeaderNatsScheduleNext) == types.HeaderNatsScheduleNextPurge &&
-		last.Header.Get(types.HeaderCronOneShot) == schedule, nil
+	return string(record.Data) == entry.CronConfig.Schedule, nil
+}
+
+// RecordOneShotCronSchedule writes the one-shot record of a cron service,
+// unless it already names the current schedule. The record replaces the one
+// before it (rollup by subject), so the subject holds one message.
+func RecordOneShotCronSchedule(ctx context.Context, es types.EventStream, stream jetstream.Stream, entry *types.ServiceEntry) error {
+	recorded, err := OneShotCronScheduleRecorded(ctx, stream, entry)
+	if err != nil || recorded {
+		return err
+	}
+	return WriteOneShotCronRecord(ctx, es, entry, entry.CronConfig.Schedule)
+}
+
+// WriteOneShotCronRecord writes schedule as the one-shot record of a cron
+// service. An empty schedule clears the record: a Deprecated registration
+// purges its schedule, and the schedule must be published again when the
+// registration is enabled once more.
+func WriteOneShotCronRecord(ctx context.Context, es types.EventStream, entry *types.ServiceEntry, schedule string) error {
+	subject := types.CronOneShotSubject(entry.Subject)
+	_, err := es.PublishMsg(ctx, &types.Msg{
+		Subject: subject,
+		Data:    []byte(schedule),
+		Header:  types.Header{jetstream.MsgRollup: []string{jetstream.MsgRollupSubject}},
+	})
+	if err != nil {
+		return fmt.Errorf("write the one-shot record on %q: %w", subject, err)
+	}
+	return nil
 }

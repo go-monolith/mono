@@ -30,9 +30,19 @@ const (
 	UploadAckTimeout = 10 * time.Second
 )
 
-// ErrUploadAckTimeout is returned by an upload whose chunk was not
-// acknowledged within UploadAckTimeout.
-var ErrUploadAckTimeout = errors.New("fs-jetstream: a chunk of the upload was not acknowledged in time")
+var (
+	// ErrUploadAckTimeout is returned by an upload whose chunk was not
+	// acknowledged within UploadAckTimeout.
+	ErrUploadAckTimeout = errors.New("fs-jetstream: a chunk of the upload was not acknowledged in time")
+
+	// ErrUploadOutOfOrder is returned by an upload whose chunks were not
+	// stored in the order they were read.
+	ErrUploadOutOfOrder = errors.New("fs-jetstream: the chunks of the upload were stored out of order")
+)
+
+// UploadPublishOptions are the options every chunk of an upload is published
+// with: no retry (see UploadChunks).
+var UploadPublishOptions = []jetstream.PublishOpt{jetstream.WithRetryAttempts(0)}
 
 // ChunkSubject returns the subject of the chunk messages of the object
 // version id in bucket.
@@ -99,9 +109,10 @@ func (b *JetStreamBackend) UploadObject(ctx context.Context, meta jetstream.Obje
 	info := &jetstream.ObjectInfo{Bucket: b.bucketName, NUID: id, ObjectMeta: meta}
 	chunkSubject := ChunkSubject(b.bucketName, id)
 	expectStream := jetstream.WithExpectStream(objStreamPrefix + b.bucketName)
+	chunkOpts := append([]jetstream.PublishOpt{expectStream}, UploadPublishOptions...)
 
 	if reader != nil {
-		size, chunks, digest, err := b.UploadChunks(reader, chunkSubject, int(opts.ChunkSize), expectStream)
+		size, chunks, digest, err := b.UploadChunks(reader, chunkSubject, int(opts.ChunkSize), chunkOpts...)
 		if err != nil {
 			b.RemoveChunks(ctx, chunkSubject, "the upload of "+meta.Name+" failed")
 			return nil, err
@@ -133,9 +144,19 @@ func (b *JetStreamBackend) UploadObject(ctx context.Context, meta jetstream.Obje
 
 // UploadChunks publishes what reader yields as chunk messages on subject, one
 // message per Read, and returns once the stream has acknowledged all of them,
-// with the size, the number of chunks and the digest of the content. On an
-// error it has waited for the chunks already published to be acknowledged or
-// rejected, so that removing them afterwards removes all of them.
+// with the size, the number of chunks and the digest of the content.
+//
+// A chunk is published once, without the retry a publish makes by default
+// when no stream answers: a retried chunk is stored behind the chunks sent
+// after it, and an object is read back in the order of the stream, so its
+// content would not match its digest. For the same reason an acknowledgement
+// whose sequence is not after the one before it fails the upload.
+//
+// On an error it waits for the chunks already published to be acknowledged or
+// rejected (each within UploadAckTimeout, the acknowledgement timeout of the
+// upload's publisher), so that removing them afterwards removes them. A chunk
+// that is stored later still, after its acknowledgement was given up on, stays
+// in the bucket referred to by nothing.
 func (b *JetStreamBackend) UploadChunks(reader io.Reader, subject string, chunkSize int, opts ...jetstream.PublishOpt) (uint64, uint32, string, error) {
 	var (
 		pending []jetstream.PubAckFuture
@@ -145,8 +166,27 @@ func (b *JetStreamBackend) UploadChunks(reader io.Reader, subject string, chunkS
 		buf     = make([]byte, chunkSize)
 	)
 	fail := func(err error) (uint64, uint32, string, error) {
-		SettleAcks(pending, UploadAckTimeout)
+		SettleAcks(pending, 2*UploadAckTimeout)
 		return 0, 0, "", err
+	}
+	// awaitOldest takes the oldest pending chunk off before its outcome is
+	// looked at: an outcome is delivered once, so fail must not wait for it a
+	// second time.
+	var lastSequence uint64
+	awaitOldest := func() error {
+		oldest := pending[0]
+		pending = pending[1:]
+		ack, err := AwaitAck(oldest, 2*UploadAckTimeout)
+		if err != nil {
+			return err
+		}
+		if ack != nil {
+			if ack.Sequence <= lastSequence {
+				return fmt.Errorf("%w: sequence %d after %d", ErrUploadOutOfOrder, ack.Sequence, lastSequence)
+			}
+			lastSequence = ack.Sequence
+		}
+		return nil
 	}
 	for {
 		n, readErr := reader.Read(buf)
@@ -159,7 +199,7 @@ func (b *JetStreamBackend) UploadChunks(reader io.Reader, subject string, chunkS
 			msg := nats.NewMsg(subject)
 			msg.Data = bytes.Clone(buf[:n])
 			hash.Write(msg.Data)
-			future, err := b.js.PublishMsgAsync(msg, opts...)
+			future, err := b.uploads.PublishMsgAsync(msg, opts...)
 			if err != nil {
 				return fail(err)
 			}
@@ -167,12 +207,7 @@ func (b *JetStreamBackend) UploadChunks(reader io.Reader, subject string, chunkS
 			chunks++
 			size += uint64(n)
 			if len(pending) >= UploadAckWindow {
-				// The oldest is taken off before its outcome is looked at:
-				// an outcome is delivered once, so fail must not wait for it
-				// a second time.
-				oldest := pending[0]
-				pending = pending[1:]
-				if err := AwaitAck(oldest, UploadAckTimeout); err != nil {
+				if err := awaitOldest(); err != nil {
 					return fail(err)
 				}
 			}
@@ -182,9 +217,7 @@ func (b *JetStreamBackend) UploadChunks(reader io.Reader, subject string, chunkS
 		}
 	}
 	for len(pending) > 0 {
-		oldest := pending[0]
-		pending = pending[1:]
-		if err := AwaitAck(oldest, UploadAckTimeout); err != nil {
+		if err := awaitOldest(); err != nil {
 			return fail(err)
 		}
 	}
@@ -192,17 +225,20 @@ func (b *JetStreamBackend) UploadChunks(reader io.Reader, subject string, chunkS
 }
 
 // AwaitAck waits until the stream acknowledged or rejected a published
-// message, for at most timeout.
-func AwaitAck(future jetstream.PubAckFuture, timeout time.Duration) error {
+// message, for at most timeout, and returns the acknowledgement.
+func AwaitAck(future jetstream.PubAckFuture, timeout time.Duration) (*jetstream.PubAck, error) {
 	timer := time.NewTimer(timeout)
 	defer timer.Stop()
 	select {
-	case <-future.Ok():
-		return nil
+	case ack := <-future.Ok():
+		return ack, nil
 	case err := <-future.Err():
-		return err
+		if errors.Is(err, jetstream.ErrAsyncPublishTimeout) {
+			return nil, fmt.Errorf("%w: %w", ErrUploadAckTimeout, err)
+		}
+		return nil, err
 	case <-timer.C:
-		return ErrUploadAckTimeout
+		return nil, ErrUploadAckTimeout
 	}
 }
 
@@ -228,15 +264,17 @@ func SettleAcks(futures []jetstream.PubAckFuture, timeout time.Duration) {
 // and otherwise whether the chunks of the upload must be kept.
 //
 // A rejection by the stream (an API error, such as a bucket without room for
-// the message) is final: the message is not stored and the chunks can go. Any
-// other error (a timeout, a connection that closed) leaves the outcome open,
+// the message) is final, as is a publish no stream answered
+// (jetstream.ErrNoStreamResponse, returned after every attempt found nothing
+// listening): the message is not stored and the chunks can go. Any other
+// error (a timeout, a connection that closed) leaves the outcome open,
 // so the object is read back: when it is the upload id, the message was
 // stored. When it is not, or cannot be read, the message may still arrive, and
 // removing the chunks would leave it describing an object without content;
 // they are kept, which is logged.
 func (b *JetStreamBackend) MetadataOutcome(ctx context.Context, name, id string, publishErr error) (stored, keepChunks bool) {
 	var apiErr *jetstream.APIError
-	if errors.As(publishErr, &apiErr) {
+	if errors.As(publishErr, &apiErr) || errors.Is(publishErr, jetstream.ErrNoStreamResponse) {
 		return false, false
 	}
 	current, err := b.store.GetInfo(ctx, name, jetstream.GetObjectInfoShowDeleted())

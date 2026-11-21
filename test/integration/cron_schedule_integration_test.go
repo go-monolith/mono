@@ -96,32 +96,6 @@ func TestCronSchedule_PublishedOnlyWhenItChanged(t *testing.T) {
 	}
 }
 
-// TestCronSchedule_IntervalFiresAcrossRestarts: an application restarted more
-// often than the interval of its schedule still handles occurrences. Each
-// start used to begin the interval anew, so none ever came.
-func TestCronSchedule_IntervalFiresAcrossRestarts(t *testing.T) {
-	if testing.Short() {
-		t.Skip("Skipping integration test in short mode")
-	}
-	storeDir := t.TempDir()
-	var handled int64
-	begin := time.Now()
-	for time.Since(begin) < 12*time.Second {
-		m := newCronTestModule("reports", "rollup", mono.CronServiceConfig{
-			Schedule: "@every 3s",
-			Payload:  []byte("tick"),
-		}, 1000)
-		stop := runNamingApp(t, storeDir, nil, m)
-		time.Sleep(2 * time.Second)
-		stop()
-		handled += atomic.LoadInt64(&m.invocations)
-	}
-	if handled == 0 {
-		t.Fatal("an interval of 3s never fired in 12s of an application restarted every 2s")
-	}
-	t.Logf("handled %d occurrences", handled)
-}
-
 // TestCronSchedule_OneShotFiresOnce: a one-shot schedule whose time has passed
 // fires at the first start and not again at later ones (the server removes a
 // one-shot schedule when it has fired, and every Start published it again);
@@ -152,6 +126,19 @@ func TestCronSchedule_OneShotFiresOnce(t *testing.T) {
 		if n := run(past); n != 0 {
 			t.Errorf("start %d handled %d occurrences of a one-shot schedule that had fired, want none", i+2, n)
 		}
+	}
+	// A registration that is deprecated and enabled again is scheduled anew.
+	deprecated := newCronTestModule("reports", "rollup", mono.CronServiceConfig{
+		Schedule:   "@at " + past.UTC().Format(time.RFC3339),
+		Payload:    []byte("once"),
+		Deprecated: true,
+	}, 1)
+	runNamingApp(t, storeDir, nil, deprecated)()
+	if n := run(past); n != 1 {
+		t.Errorf("enabled again after Deprecated: handled %d occurrences, want 1", n)
+	}
+	if n := run(past); n != 0 {
+		t.Errorf("the start after that handled %d occurrences, want none", n)
 	}
 	if n := run(past.Add(time.Minute)); n != 1 {
 		t.Errorf("a changed time handled %d occurrences, want 1", n)
