@@ -321,9 +321,16 @@ See [A Request Always Gets a Reply](error-handling.md#a-request-always-gets-a-re
 - **Objects damaged before** are not repaired: `Stat` returns them and `Get` times out. Upload them again or delete them; see [Objects damaged by a rejected upload](../plugins/fs-jetstream.md#objects-damaged-by-a-rejected-upload).
 - **Code that builds a backend itself:** `fsjetstream.NewJetStreamBackend` still uploads through the object store client. Use `fsjetstream.NewJetStreamBackendWithJetStream`, as the plugin does.
 
-### Other fixes in v0.2.20
+### Other fixes in v0.2.21
 
 - **Access log channel proxy shutdown & `ModuleStoppingEvent`:** the lifecycle now emits `types.ModuleStoppingEvent` (`"module.stopping"`) before each module's `Stop()` executes (both during normal shutdown and during rollback). The access log middleware intercepts this event to cancel and wait for that module's channel proxies so background goroutines return before the module closes its channels. Third-party middleware switching over all lifecycle types will observe this new event type. Channel services of a `middleware` module registered after the access log, and providers that close their `in` channel on runtime-context cancellation (before modules stop), don't get `module.stopping`, so they are not covered.
+
+### A NATS configuration reload is refused (v0.2.22)
+
+*v0.2.22.* With `WithNATSConfigFile`, the embedded server accepted a configuration reload (`nats server config reload`, a request from the system account user). It parsed the file again and applied it on its own, so one reload switched off what the options had added: JetStream (requests timed out), client TLS or AutoTLS (plaintext clients were let in), route authorization and route TLS, and the system account user. Nothing was logged.
+
+- **Now:** the server is not given the file's path and answers a reload with "can only reload config when a file is provided using -c or --config". The configuration takes effect at start only; restart the application to change it.
+- **nats-server's own start-up line** `Using configuration file: <path>` (shown only with server logging on) is no longer written; the framework logs the path at start (`NATS config file loaded`).
 
 ## New Features
 
@@ -344,9 +351,9 @@ All optional.
 | [`monoerrors.ErrWorkQueueConsumerConflict`](../api/container.md#work-queue-streams-one-consumer-per-subject), [`monoerrors.ErrStreamSubjectsOverlap`](../api/container.md#renaming-a-stream-or-switching-a-service-between-stream-consumer-and-cron) | v0.2.16 | `Start` errors for a second consumer on the same subjects of a work-queue stream, and for a stream that asks for subjects another stream holds. Both failed before as well, with the server's error; nothing is deleted |
 | `helper.DecodeBatch`, `helper.ErrUndecodableMessage` | v0.2.17 | Decode a batch leaving out the messages that fail to unmarshal; the error the typed batch handlers return for such a batch |
 | `audit.CanonicalDetails`, `audit.HashEntry`, `audit.LegacyEmptyDetailsHash` | v0.2.17 | The form an audit entry's details are hashed in, and the hash earlier versions gave an entry with empty details |
+| `types.ModuleStoppingEvent` (`module.stopping`) | v0.2.21 | Lifecycle event emitted by the lifecycle manager before a module's `Stop()` executes (during shutdown and rollback) |
 | `fsjetstream.NewJetStreamBackendWithJetStream`, `UploadObject`, `ErrUploadAckTimeout`, `ErrUploadOutOfOrder` | v0.2.20 | A backend whose uploads write the metadata only after every chunk is stored, the upload itself, and the errors of an upload whose chunk was not acknowledged within `UploadAckTimeout` (10s) or whose chunks were not stored in the order they were read |
 | `types.IsOneShotCronSchedule`, `types.CronOneShotSubject` | v0.2.20 | Whether a cron schedule fires once (`@at`), and the subject on which the framework records a one-shot schedule it has published |
-| `types.ModuleStoppingEvent` (`module.stopping`) | v0.2.20 | Lifecycle event emitted by the lifecycle manager before a module's `Stop()` executes (during shutdown and rollback) |
 | `monoerrors.ErrReplyFailed`, `types.ErrorTypeReplyFailed` (`reply-failed`) | v0.2.19 | The error a request-reply caller gets when the handler ran but its response could not be sent, and its type on the wire |
 | `types.IsFrameworkErrorType`, `types.HandlerPanicMessage` | v0.2.19 | Whether a `Mono-Error-Type` is one the framework itself answers with, and the message it sends for a handler that panicked |
 | `audit.ErrAmbiguousEntry`, `audit.CheckHashable`, `audit.SaveFailure` | v0.2.19 | The error for an audit entry whose event type, module name or service name contains `|`, the check for it, and the error type `SaveAuditTrail` returns for an entry that was not saved (`errors.Is` finds `ErrAmbiguousEntry` through it) |
