@@ -84,13 +84,19 @@ func (k *KeyedMutex) Lock(ctx context.Context, key string) (func(), error) {
 // upload failed, the removal fails too and the chunks stay for good. A bucket
 // with MaxBytes then fills up with them until every Put is rejected.
 //
-// The store is therefore called with a context the caller's cancellation does
+// The upload therefore runs with a context the caller's cancellation does
 // not reach, and learns of it through the reader instead (ContextReader): a
 // failed read is cleaned up with a context that still works. Each request of
-// the store is then bounded by the JetStream default timeout instead of the
+// the upload is then bounded by the JetStream default timeout instead of the
 // caller's deadline, so a Put can return a few seconds after its deadline. An
 // upload whose data was read completely is finished even when ctx ends
 // meanwhile.
+//
+// The messages are published by UploadObject, which writes the metadata only
+// after every chunk is stored, so an upload the bucket has no room for leaves
+// the object stored under that name as it was. A backend without a JetStream
+// context (NewJetStreamBackend) uploads through the object store client,
+// which does not wait.
 //
 // Uploads of one name are serialised within this backend, with each other
 // and with deletes of that name (DeleteObject). The store removes the chunks
@@ -118,10 +124,15 @@ func (b *JetStreamBackend) PutObject(ctx context.Context, meta jetstream.ObjectM
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	if reader == nil {
-		return b.store.Put(context.WithoutCancel(ctx), meta, nil)
+	storeCtx := context.WithoutCancel(ctx)
+	var content io.Reader
+	if reader != nil {
+		content = &ContextReader{Ctx: ctx, Reader: reader}
 	}
-	return b.store.Put(context.WithoutCancel(ctx), meta, &ContextReader{Ctx: ctx, Reader: reader})
+	if b.js == nil {
+		return b.store.Put(storeCtx, meta, content)
+	}
+	return b.UploadObject(storeCtx, meta, content)
 }
 
 // DeleteObject deletes the object name. It returns
