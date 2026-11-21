@@ -252,7 +252,10 @@ func SettleAcks(futures []jetstream.PubAckFuture, timeout time.Duration) {
 	for _, future := range futures {
 		select {
 		case <-future.Ok():
-		case <-future.Err():
+		case err := <-future.Err():
+			// The upload has already failed; this chunk's own outcome
+			// changes nothing, only that it has settled.
+			_ = err
 		case <-timer.C:
 			return
 		}
