@@ -196,7 +196,7 @@ func TestLeaderNotAnswering(t *testing.T) {
 	}
 }
 
-// A request nobody answers ends after MsgGetTimeout, not with the caller's
+// A request nobody answers ends after LeaderRequestTimeout, not with the caller's
 // much longer copy timeout: a stream without a leader stays silent.
 func TestHoldsMsgAfter_BoundsARequestNobodyAnswers(t *testing.T) {
 	_, nc := startJetStreamConn(t)
@@ -215,15 +215,15 @@ func TestHoldsMsgAfter_BoundsARequestNobodyAnswers(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 2*MsgGetTimeout+time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*LeaderRequestTimeout+time.Minute)
 	defer cancel()
 	started := time.Now()
 	_, err = HoldsMsgAfter(ctx, silent, "KV_locks", 0)
 	if !LeaderNotAnswering(ctx, err) {
 		t.Fatalf("err = %v, want one that is asked again", err)
 	}
-	if waited := time.Since(started); waited < MsgGetTimeout/2 || waited > MsgGetTimeout+3*time.Second {
-		t.Fatalf("waited %s, want about %s", waited, MsgGetTimeout)
+	if waited := time.Since(started); waited < LeaderRequestTimeout/2 || waited > LeaderRequestTimeout+3*time.Second {
+		t.Fatalf("waited %s, want about %s", waited, LeaderRequestTimeout)
 	}
 }
 
@@ -239,6 +239,8 @@ func TestTailContradicted(t *testing.T) {
 		{"first message is the last one copied", jetstream.StreamState{Msgs: 1, FirstSeq: 2, LastSeq: 12}, 2, false},
 		{"messages only after what was copied", jetstream.StreamState{Msgs: 3, FirstSeq: 10, LastSeq: 12}, 2, true},
 		{"nothing copied, messages held", jetstream.StreamState{Msgs: 1, FirstSeq: 1, LastSeq: 1}, 0, true},
+		{"more messages than sequences through what was copied", jetstream.StreamState{Msgs: 10, FirstSeq: 1, LastSeq: 12}, 2, true},
+		{"as many messages as sequences through what was copied", jetstream.StreamState{Msgs: 3, FirstSeq: 3, LastSeq: 12}, 5, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := TailContradicted(tc.state, tc.copied); got != tc.want {
@@ -295,4 +297,78 @@ func TestOpen_TailCheckWithoutALeaderDeletesNothing(t *testing.T) {
 	if b := backups(t, js, "locks"); len(b) != 0 {
 		t.Fatalf("incomplete backup left: %v", b)
 	}
+}
+
+// MissingLastMsgJS is a JetStream client whose backup streams answer the read
+// of a message with "not found" for the first Misses reads, as a replica
+// that is behind does.
+type MissingLastMsgJS struct {
+	jetstream.JetStream
+	Misses *atomic.Int64
+}
+
+// Stream returns the stream, wrapped when it is a backup.
+func (m MissingLastMsgJS) Stream(ctx context.Context, name string) (jetstream.Stream, error) {
+	stream, err := m.JetStream.Stream(ctx, name)
+	if err != nil || !strings.Contains(name, "-backup-") {
+		return stream, err
+	}
+	return MissingLastMsgStream{Stream: stream, Misses: m.Misses}, nil
+}
+
+// MissingLastMsgStream is the stream MissingLastMsgJS hands out.
+type MissingLastMsgStream struct {
+	jetstream.Stream
+	Misses *atomic.Int64
+}
+
+// GetMsg answers "not found" while misses are left.
+func (m MissingLastMsgStream) GetMsg(ctx context.Context, seq uint64, opts ...jetstream.GetMsgOpt) (*jetstream.RawStreamMsg, error) {
+	if m.Misses.Add(-1) >= 0 {
+		return nil, jetstream.ErrMsgNotFound
+	}
+	return m.Stream.GetMsg(ctx, seq, opts...)
+}
+
+// The backup's last message is read with a direct get, which a replica that
+// is behind answers with "not found": the read is repeated, and a message
+// that stays missing fails the backup with nothing deleted.
+func TestOpen_BackupLastMessageNotFound(t *testing.T) {
+	t.Run("found on a later round", func(t *testing.T) {
+		js := startJetStream(t)
+		fileBucket(t, js, "locks", 2)
+		var misses atomic.Int64
+		misses.Store(3)
+		spec := kvSpec(MissingLastMsgJS{JetStream: js, Misses: &misses}, StreamAPI{JS: js}, "locks", Options{Recreate: true}, nil)
+		if _, err := Open(context.Background(), spec); err != nil {
+			t.Fatalf("Open: %v", err)
+		}
+		if misses.Load() >= 0 {
+			t.Fatalf("misses left = %d: the read was not repeated", misses.Load())
+		}
+		if b := backups(t, js, "locks"); len(b) != 1 {
+			t.Fatalf("backups = %v", b)
+		}
+	})
+	t.Run("missing for good", func(t *testing.T) {
+		js := startJetStream(t)
+		fileBucket(t, js, "locks", 2)
+		var misses atomic.Int64
+		misses.Store(1 << 40)
+		deletes := 0
+		spec := kvSpec(MissingLastMsgJS{JetStream: js, Misses: &misses}, fakeStreams{StreamAPI: StreamAPI{JS: js}, deletes: &deletes}, "locks", Options{Recreate: true}, nil)
+		_, err := Open(context.Background(), spec)
+		if !errors.Is(err, errMismatch) || !errors.Is(err, ErrBackupLastMsgNotFound) {
+			t.Fatalf("err = %v, want the last message reported missing", err)
+		}
+		if read := int64(1<<40) - misses.Load(); read != LastMsgMissRounds {
+			t.Fatalf("read %d times, want %d", read, LastMsgMissRounds)
+		}
+		if deletes != 0 {
+			t.Fatalf("deletes = %d", deletes)
+		}
+		if b := backups(t, js, "locks"); len(b) != 0 {
+			t.Fatalf("incomplete backup left: %v", b)
+		}
+	})
 }

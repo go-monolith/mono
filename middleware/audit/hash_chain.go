@@ -171,6 +171,27 @@ func CheckHashable(entry Entry) error {
 	return nil
 }
 
+// CheckDetailsReadBack returns an error for details that can be written as
+// JSON but not parsed back: a number outside the range of a float64
+// (json.Number("1e999"), a big integer). Such an entry would be written with
+// the hash of empty details, and no reader could parse its line, so neither
+// it nor the rest of its log would verify. Details that cannot be written at
+// all are not its concern: the write itself reports them.
+func CheckDetailsReadBack(details map[string]any) error {
+	if len(details) == 0 {
+		return nil
+	}
+	written, err := json.Marshal(details)
+	if err != nil {
+		return nil
+	}
+	var parsed map[string]any
+	if err := json.Unmarshal(written, &parsed); err != nil {
+		return fmt.Errorf("audit entry details cannot be read back from the log: %w", err)
+	}
+	return nil
+}
+
 // AsWritten returns text as a reader of the log gets it: written as JSON and
 // parsed back. That is text itself unless it is not valid UTF-8, when JSON
 // writes each invalid byte as the replacement character U+FFFD. Hashed as it

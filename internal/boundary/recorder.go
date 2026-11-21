@@ -439,9 +439,10 @@ func (r *Recorder) Violation(kind types.BoundaryViolationKind, dependency, subje
 
 // WarnIgnored logs, once per kind, that a call of the module was ignored for
 // the violation err, which Violation returned in strict mode. It is for the
-// calls that return no error (EventBus.SetRuntimeContext): every other
-// rejected call hands err to the module, and this one would do nothing
-// without a trace.
+// calls that return no error (EventBus.SetRuntimeContext, and the Set* and
+// StartChannelRouters methods of a dependency's container): every other
+// rejected call hands err to the module, and these would do nothing without
+// a trace.
 func (r *Recorder) WarnIgnored(kind types.BoundaryViolationKind, err error) {
 	if r.logger == nil {
 		return

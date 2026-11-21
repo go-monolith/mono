@@ -498,6 +498,9 @@ func (m *AuditModule) writeEntry(ctx context.Context, entry Entry) error {
 		if err := CheckHashable(entry); err != nil {
 			return fmt.Errorf("audit entry not written: %w", err)
 		}
+		if err := CheckDetailsReadBack(entry.Details); err != nil {
+			return fmt.Errorf("audit entry not written: %w", err)
+		}
 		entry = m.hashChain.Next(entry)
 	}
 

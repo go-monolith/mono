@@ -263,3 +263,36 @@ func TestConfirmationError_KeepsErrAmbiguousEntry(t *testing.T) {
 		t.Fatalf("ConfirmationError = %v", other)
 	}
 }
+
+// Details that are written as JSON no reader can parse are refused with hash
+// chaining: the entry would carry the hash of empty details.
+func TestWriteEntry_RefusesDetailsThatCannotBeReadBack(t *testing.T) {
+	var log bytes.Buffer
+	m, err := New(WithOutput(&log), WithHashChaining(""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	err = m.writeEntry(ctx, Entry{EventType: EventCustomAuditTrail, Details: map[string]any{"n": json.Number("1e999")}})
+	if err == nil || !strings.Contains(err.Error(), "cannot be read back") {
+		t.Fatalf("writeEntry = %v, want an error", err)
+	}
+	if err := m.writeEntry(ctx, Entry{EventType: EventCustomAuditTrail, Details: map[string]any{"n": json.Number("12")}}); err != nil {
+		t.Fatal(err)
+	}
+	entries := ParseLog(t, log.String())
+	if len(entries) != 1 {
+		t.Fatalf("entries = %d, want 1", len(entries))
+	}
+	if err := VerifyChain(entries); err != nil {
+		t.Fatalf("VerifyChain = %v", err)
+	}
+
+	if err := CheckDetailsReadBack(nil); err != nil {
+		t.Errorf("no details: %v", err)
+	}
+	// Details that cannot be written at all are reported by the write.
+	if err := CheckDetailsReadBack(map[string]any{"c": make(chan int)}); err != nil {
+		t.Errorf("unwritable details: %v", err)
+	}
+}

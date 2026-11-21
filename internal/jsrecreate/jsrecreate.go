@@ -454,7 +454,7 @@ func completeBackup[T any](ctx context.Context, s Spec[T], backup string, info *
 	}
 	ticker := time.NewTicker(pollInterval)
 	defer ticker.Stop()
-	sourceErrors := 0
+	sourceErrors, lastMsgMisses := 0, 0
 	for {
 		if bucketRepaired(ctx, s.Streams, streamName, info, s.Want) {
 			return true, nil
@@ -485,6 +485,14 @@ func completeBackup[T any](ctx context.Context, s Spec[T], backup string, info *
 			sourceErrors = 0
 		}
 		done, copied, err := backupCopied(ctx, s.JS, backupStream, binfo, streamName, info.State.LastSeq)
+		switch {
+		case errors.Is(err, ErrBackupLastMsgNotFound) && lastMsgMisses+1 < LastMsgMissRounds:
+			// Most likely a replica that is behind: read again.
+			lastMsgMisses++
+			err = nil
+		case err == nil:
+			lastMsgMisses = 0
+		}
 		if err != nil {
 			// The stream it reads may have been deleted and recreated by
 			// another instance since the round began.
@@ -571,8 +579,8 @@ func backupCopied(ctx context.Context, js jetstream.JetStream, backup jetstream.
 		if errors.Is(err, jetstream.ErrMsgNotFound) {
 			// The backup allows direct gets, which any of its replicas
 			// answers: one that has not stored the leader's last message
-			// yet. Read again on the next round.
-			return false, 0, nil
+			// yet. The caller reads again on the next round.
+			return false, 0, fmt.Errorf("%w: sequence %d of backup stream %s", ErrBackupLastMsgNotFound, binfo.State.LastSeq, binfo.Config.Name)
 		}
 		if err != nil {
 			return false, 0, fmt.Errorf("failed to read the last message of backup stream %s: %w", binfo.Config.Name, err)
@@ -612,8 +620,13 @@ func backupCopied(ctx context.Context, js jetstream.JetStream, backup jetstream.
 	// The server answers "no message" for any error of its store, not only
 	// for the end of the stream, so the answer is held against the stream's
 	// state before the bucket is deleted on it.
-	original, err := js.Stream(ctx, streamName)
+	infoCtx, cancel := context.WithTimeout(ctx, LeaderRequestTimeout)
+	defer cancel()
+	original, err := js.Stream(infoCtx, streamName)
 	if err != nil {
+		if LeaderNotAnswering(ctx, err) {
+			return false, copied, nil
+		}
 		return false, copied, fmt.Errorf("failed to read stream %s: %w", streamName, err)
 	}
 	if TailContradicted(original.CachedInfo().State, copied) {
@@ -622,18 +635,32 @@ func backupCopied(ctx context.Context, js jetstream.JetStream, backup jetstream.
 	return true, copied, nil
 }
 
-// TailContradicted reports whether state says that the stream holds a
-// message after sequence copied: it holds messages, and its first one comes
-// after copied. (A first message at or before copied says nothing about what
-// follows it.)
+// ErrBackupLastMsgNotFound is returned by backupCopied when the last message
+// of the backup, as its leader counts it, is not found. The read is a direct
+// get, which a replica that is behind answers so; completeBackup reads again
+// for LastMsgMissRounds rounds before it gives up with this error.
+var ErrBackupLastMsgNotFound = errors.New("the last message of the backup was not found")
+
+// LastMsgMissRounds is how many polls in a row the backup's last message may
+// be missing before the backup fails (about 5s): a replica catches up in
+// less, and a message that is gone for good does not come back.
+const LastMsgMissRounds = 100
+
+// TailContradicted reports whether state proves that the stream holds a
+// message after sequence copied: its first message comes after copied, or it
+// holds more messages than there are sequences from its first one through
+// copied.
 func TailContradicted(state jetstream.StreamState, copied uint64) bool {
-	return state.Msgs > 0 && state.FirstSeq > copied
+	if state.Msgs == 0 {
+		return false
+	}
+	return state.FirstSeq > copied || state.Msgs > copied-state.FirstSeq+1
 }
 
-// LeaderNotAnswering reports whether err, returned by HoldsMsgAfter under
-// ctx, means that the stream has no leader to answer at the moment, so that
+// LeaderNotAnswering reports whether err, returned by a request of at most
+// LeaderRequestTimeout under ctx (HoldsMsgAfter, a stream lookup), means that the stream has no leader to answer at the moment, so that
 // asking again later can succeed:
-//   - no answer within MsgGetTimeout while ctx itself has not ended (a
+//   - no answer within the request's timeout while ctx itself has not ended (a
 //     server that is not the leader stays silent, as during an election);
 //   - the API error "JetStream system temporarily unavailable" (once the
 //     servers know the stream is without a leader);
@@ -664,7 +691,7 @@ const ErrCodeClusterNotAvailable jetstream.ErrorCode = 10008
 // without it, and the bucket would be deleted. The request is therefore sent
 // to the message get API itself, with the body Stream.GetMsg sends.
 //
-// The request is bounded by MsgGetTimeout as well as by ctx: only the
+// The request is bounded by LeaderRequestTimeout as well as by ctx: only the
 // leader answers, and while there is none the request gets no answer (or,
 // once the servers know, the API error 10008). LeaderNotAnswering tells
 // these errors from the others.
@@ -677,7 +704,7 @@ func HoldsMsgAfter(ctx context.Context, js jetstream.JetStream, streamName strin
 	if err != nil {
 		return false, err
 	}
-	reqCtx, cancel := context.WithTimeout(ctx, MsgGetTimeout)
+	reqCtx, cancel := context.WithTimeout(ctx, LeaderRequestTimeout)
 	defer cancel()
 	reply, err := nc.RequestWithContext(reqCtx, APIPrefix(js.Options())+"STREAM.MSG.GET."+streamName, req)
 	if err != nil {
@@ -698,10 +725,11 @@ func HoldsMsgAfter(ctx context.Context, js jetstream.JetStream, streamName strin
 	return true, nil
 }
 
-// MsgGetTimeout bounds one message get request. A stream without a leader
-// does not answer it, and the copy timeout of the caller is much longer: the
-// caller asks again instead of spending that on one request.
-const MsgGetTimeout = 5 * time.Second
+// LeaderRequestTimeout bounds one request of a copy round to the bucket's
+// stream (the message get and the stream lookups). A stream without a leader
+// does not answer them, and the copy timeout is much longer: the round asks
+// again instead of spending that on one request.
+const LeaderRequestTimeout = 5 * time.Second
 
 // MsgGetRequest is the body of a JetStream message get request: the first
 // message at or after Seq whose subject matches NextFor.
@@ -768,7 +796,12 @@ func SourceNames(sources []*jetstream.StreamSourceInfo) string {
 // was replaced since info was read, or already has storage want: another
 // instance starting at the same time has repaired it. A failed read is not a
 // repair.
+//
+// The read is bounded by LeaderRequestTimeout: a stream whose leader is gone
+// does not answer it, and the copy round it belongs to must go on.
 func bucketRepaired(ctx context.Context, streams StreamStore, streamName string, info *jetstream.StreamInfo, want jetstream.StorageType) bool {
+	ctx, cancel := context.WithTimeout(ctx, LeaderRequestTimeout)
+	defer cancel()
 	cur, err := streams.StreamInfo(ctx, streamName)
 	if errors.Is(err, jetstream.ErrStreamNotFound) {
 		return true

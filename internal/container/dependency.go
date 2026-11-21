@@ -69,6 +69,17 @@ func (v *dependencyView) violation() error {
 	return v.rec.Violation(types.BoundaryViolationRegisterOnDependency, v.dependency, "")
 }
 
+// ignored is violation for the mutating methods that return no error: in
+// strict mode the call does nothing, and since the module is not handed the
+// error, that is logged (once per kind).
+func (v *dependencyView) ignored() bool {
+	err := v.violation()
+	if err != nil {
+		v.rec.WarnIgnored(types.BoundaryViolationRegisterOnDependency, err)
+	}
+	return err != nil
+}
+
 // --- mutating methods: boundary violations -------------------------------
 
 func (v *dependencyView) BindModule(module types.Module) error {
@@ -79,28 +90,28 @@ func (v *dependencyView) BindModule(module types.Module) error {
 }
 
 func (v *dependencyView) SetEventBus(bus types.EventBus) {
-	if v.violation() != nil {
+	if v.ignored() {
 		return
 	}
 	v.inner.SetEventBus(bus)
 }
 
 func (v *dependencyView) SetQueueGroupOptimisticWindow(window time.Duration) {
-	if v.violation() != nil {
+	if v.ignored() {
 		return
 	}
 	v.inner.SetQueueGroupOptimisticWindow(window)
 }
 
 func (v *dependencyView) SetMiddlewareChain(chain types.MiddlewareChainRunner) {
-	if v.violation() != nil {
+	if v.ignored() {
 		return
 	}
 	v.inner.SetMiddlewareChain(chain)
 }
 
 func (v *dependencyView) StartChannelRouters(ctx context.Context) {
-	if v.violation() != nil {
+	if v.ignored() {
 		return
 	}
 	v.inner.StartChannelRouters(ctx)
