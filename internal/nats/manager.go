@@ -346,6 +346,14 @@ func (m *natsManager) Start(ctx context.Context) error {
 		}()
 	}
 
+	// The server is not told about the config file, so it refuses a reload.
+	// A reload (`nats server config reload`, a system account request)
+	// parses the file again and applies it alone: everything the options
+	// added to it (JetStream, client TLS and AutoTLS, route auth and route
+	// TLS, the system account user) was switched off, without a word in the
+	// framework's log. See DetachConfigFile.
+	DetachConfigFile(opts)
+
 	// Create and start the server
 	ns, err := server.NewServer(opts)
 	if err != nil {
