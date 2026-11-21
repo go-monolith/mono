@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"reflect"
 	"sync"
@@ -322,7 +323,9 @@ func (m *AccessLogModule) stopModuleProxies(ctx context.Context, moduleName stri
 		close(done)
 	}()
 
-	_ = WaitWithGrace(ctx, done)
+	if !WaitWithGrace(ctx, done) {
+		slog.Warn("channel proxies did not stop within grace period", "module", moduleName)
+	}
 }
 
 // OnServiceRegistration wraps NATS-based service handlers for access logging.
@@ -802,6 +805,9 @@ func (m *AccessLogModule) proxyInboundChannel(proxy *channelProxy) {
 			// sends; one a consumer sends reaches the provider).
 			if m.shutdown.Load() || msg == nil {
 				// Forward without logging during shutdown
+				if proxy.ctx.Err() != nil {
+					return
+				}
 				select {
 				case proxy.originalIn <- msg:
 				case <-proxy.ctx.Done():
@@ -825,6 +831,9 @@ func (m *AccessLogModule) proxyInboundChannel(proxy *channelProxy) {
 			m.writeEntry(entry)
 
 			// Forward to original channel
+			if proxy.ctx.Err() != nil {
+				return
+			}
 			select {
 			case proxy.originalIn <- msg:
 			case <-proxy.ctx.Done():
@@ -855,6 +864,9 @@ func (m *AccessLogModule) proxyOutboundChannel(proxy *channelProxy) {
 			// forwarded as it is: the channel router drops it.
 			if m.shutdown.Load() || msg == nil {
 				// Forward without logging during shutdown
+				if proxy.ctx.Err() != nil {
+					return
+				}
 				select {
 				case proxy.proxyOut <- msg:
 				case <-proxy.ctx.Done():
@@ -878,6 +890,9 @@ func (m *AccessLogModule) proxyOutboundChannel(proxy *channelProxy) {
 			m.writeEntry(entry)
 
 			// Forward to proxy channel
+			if proxy.ctx.Err() != nil {
+				return
+			}
 			select {
 			case proxy.proxyOut <- msg:
 			case <-proxy.ctx.Done():
