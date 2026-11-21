@@ -277,10 +277,52 @@ func (m *AccessLogModule) stop(ctx context.Context, closeOutput bool) error {
 	return output.FlushAndClose(m.writer, "access log")
 }
 
-// OnModuleLifecycle passes through lifecycle events without modification.
-// Access log does not intercept lifecycle events.
-func (m *AccessLogModule) OnModuleLifecycle(_ context.Context, event types.ModuleLifecycleEvent) types.ModuleLifecycleEvent {
-	return event // Pass through unchanged
+// OnModuleLifecycle handles module lifecycle events.
+// Before a module stops, its channel proxies are stopped and waited for
+// so that the proxy goroutines do not race with the module closing its channels.
+func (m *AccessLogModule) OnModuleLifecycle(ctx context.Context, event types.ModuleLifecycleEvent) types.ModuleLifecycleEvent {
+	if event.Type == types.ModuleStoppingEvent {
+		m.stopModuleProxies(ctx, event.ModuleName)
+	}
+	return event
+}
+
+// stopModuleProxies stops and waits for all channel proxies belonging to moduleName.
+func (m *AccessLogModule) stopModuleProxies(ctx context.Context, moduleName string) {
+	m.channelProxiesMu.Lock()
+	var proxies []*channelProxy
+	for key, proxy := range m.channelProxies {
+		if proxy.moduleName == moduleName {
+			proxy.cancel()
+			proxies = append(proxies, proxy)
+			delete(m.channelProxies, key)
+		}
+	}
+	var remainingReplaced []*channelProxy
+	for _, proxy := range m.replacedProxies {
+		if proxy.moduleName == moduleName {
+			proxy.cancel()
+			proxies = append(proxies, proxy)
+		} else {
+			remainingReplaced = append(remainingReplaced, proxy)
+		}
+	}
+	m.replacedProxies = remainingReplaced
+	m.channelProxiesMu.Unlock()
+
+	if len(proxies) == 0 {
+		return
+	}
+
+	done := make(chan struct{})
+	go func() {
+		for _, proxy := range proxies {
+			proxy.wg.Wait()
+		}
+		close(done)
+	}()
+
+	_ = WaitWithGrace(ctx, done)
 }
 
 // OnServiceRegistration wraps NATS-based service handlers for access logging.
@@ -738,30 +780,6 @@ func (m *AccessLogModule) wrapChannelService(
 	return proxyIn, proxyOut
 }
 
-// forwardInbound forwards msg to originalIn. It returns false if originalIn was
-// closed (recovering from the panic on send) or if proxy.ctx was cancelled,
-// indicating that the proxy should terminate.
-func (m *AccessLogModule) forwardInbound(proxy *channelProxy, msg *types.Msg) bool {
-	var closed bool
-	var cancelled bool
-
-	func() {
-		defer func() {
-			if r := recover(); r != nil {
-				closed = true
-			}
-		}()
-
-		select {
-		case proxy.originalIn <- msg:
-		case <-proxy.ctx.Done():
-			cancelled = true
-		}
-	}()
-
-	return !closed && !cancelled
-}
-
 // proxyInboundChannel reads from proxyIn, logs request, forwards to originalIn.
 func (m *AccessLogModule) proxyInboundChannel(proxy *channelProxy) {
 	defer proxy.wg.Done()
@@ -774,9 +792,6 @@ func (m *AccessLogModule) proxyInboundChannel(proxy *channelProxy) {
 			if !ok {
 				// Channel closed, also close the original (using Once to prevent double-close)
 				proxy.closeInOnce.Do(func() {
-					defer func() {
-						_ = recover()
-					}()
 					close(proxy.originalIn)
 				})
 				return
@@ -787,7 +802,9 @@ func (m *AccessLogModule) proxyInboundChannel(proxy *channelProxy) {
 			// sends; one a consumer sends reaches the provider).
 			if m.shutdown.Load() || msg == nil {
 				// Forward without logging during shutdown
-				if !m.forwardInbound(proxy, msg) {
+				select {
+				case proxy.originalIn <- msg:
+				case <-proxy.ctx.Done():
 					return
 				}
 				continue
@@ -808,7 +825,9 @@ func (m *AccessLogModule) proxyInboundChannel(proxy *channelProxy) {
 			m.writeEntry(entry)
 
 			// Forward to original channel
-			if !m.forwardInbound(proxy, msg) {
+			select {
+			case proxy.originalIn <- msg:
+			case <-proxy.ctx.Done():
 				return
 			}
 		}

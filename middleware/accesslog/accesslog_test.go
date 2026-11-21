@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1929,7 +1930,8 @@ func TestProxyInboundChannel_ContextDoneDuringForward(t *testing.T) {
 }
 
 // TestProxyInboundChannel_ProviderClosesInChannel verifies that the accesslog proxy
-// does not panic when the service provider closes originalIn (e.g. during module Stop).
+// stops cleanly before the provider closes originalIn on ModuleStoppingEvent,
+// avoiding data races under -race.
 func TestProxyInboundChannel_ProviderClosesInChannel(t *testing.T) {
 	buf := &syncWriter{}
 	m, _ := New(WithOutput(buf))
@@ -1943,16 +1945,21 @@ func TestProxyInboundChannel_ProviderClosesInChannel(t *testing.T) {
 	proxyIn <- &types.Msg{Data: []byte("msg1")}
 	proxyIn <- &types.Msg{Data: []byte("msg2")}
 
-	// Give goroutine time to read second message and block on forward
-	time.Sleep(50 * time.Millisecond)
+	// Wait deterministically until msg1 is in originalIn and msg2 has been read from proxyIn
+	for len(originalIn) != cap(originalIn) || len(proxyIn) != 0 {
+		runtime.Gosched()
+	}
 
-	// Provider closes originalIn during shutdown
+	// Module stopping event cleanly cancels and waits for proxy goroutines before provider Stop
+	m.OnModuleLifecycle(context.Background(), types.ModuleLifecycleEvent{
+		Type:       types.ModuleStoppingEvent,
+		ModuleName: "test-module",
+	})
+
+	// Provider closes originalIn during shutdown (now safe, no proxy goroutine is sending)
 	close(originalIn)
 
-	// Wait briefly for proxy goroutine to handle
-	time.Sleep(50 * time.Millisecond)
-
-	// Stop the module (must succeed cleanly without panicking)
+	// Stop the accesslog module
 	if err := m.Stop(context.Background()); err != nil {
 		t.Fatalf("Stop() failed: %v", err)
 	}

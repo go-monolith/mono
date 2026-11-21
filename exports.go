@@ -276,8 +276,9 @@ type ModuleLifecycleEventType = types.ModuleLifecycleEventType
 
 // Module lifecycle event type constants
 const (
-	ModuleStartedEvent = types.ModuleStartedEvent
-	ModuleStoppedEvent = types.ModuleStoppedEvent
+	ModuleStartedEvent  = types.ModuleStartedEvent
+	ModuleStoppingEvent = types.ModuleStoppingEvent
+	ModuleStoppedEvent  = types.ModuleStoppedEvent
 )
 
 // ModuleLifecycleEvent contains data for module lifecycle events.
