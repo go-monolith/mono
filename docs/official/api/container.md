@@ -637,7 +637,7 @@ Acknowledgement is owned by the framework: return `nil` to Ack the occurrence, o
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `Schedule` | `string` | Required. Cron expression — standard five-field (`"0 0 * * *"` = daily at midnight) or six-field seconds-first (`"0 0 0 * * *"`; five-field forms get a `"0"` seconds field prepended) — alias (`"@daily"`), or interval (`"@every 5m"`, min 1s) |
+| `Schedule` | `string` | Required. Cron expression — standard five-field (`"0 0 * * *"` = daily at midnight) or six-field seconds-first (`"0 0 0 * * *"`; five-field forms get a `"0"` seconds field prepended) — alias (`"@daily"`), interval (`"@every 5m"`, min 1s), or one time (`"@at 2026-07-01T09:00:00Z"`, RFC 3339) |
 | `Payload` | `[]byte` | Static payload delivered each occurrence (mutually exclusive with `SourceSubject`) |
 | `SourceSubject` | `string` | Deliver the last message seen on this subject instead of a static payload |
 | `TimeZone` | `string` | Optional IANA time zone (cron expressions only; not `@every`) |
@@ -674,7 +674,9 @@ func (m *ReportModule) handleRollup(ctx context.Context, msg *mono.Msg) error {
 - Delivery stays at-least-once: after a crash, or an acknowledgement lost at shutdown, the occurrence is delivered again. Keep handlers idempotent.
 
 **Changing and retiring a schedule:**
-- Re-publishing the schedule on every startup is idempotent (rollup by subject), so changing `Schedule`/`Payload`/`TimeZone`/`TTL` and redeploying overwrites the live schedule in place.
+- Changing `Schedule`/`Payload`/`TimeZone`/`TTL`/`SourceSubject` and redeploying overwrites the live schedule in place (rollup by subject).
+- An unchanged schedule is left alone at startup (since v0.2.20): the stored schedule is read first and published only when it is missing or differs. The server counts an interval from the time the schedule was published, so before, every start of any instance began an `@every` interval anew, and an interval longer than the time between two starts (`@every 24h` with a daily deploy, or any interval in a cluster whose instances restart more often) never fired. A changed schedule still starts its interval from the deploy. The fix holds once every instance runs v0.2.20.
+- A one-shot schedule (`@at 2026-07-01T09:00:00Z`) fires once (since v0.2.20). Before, a schedule whose time had passed fired again at every start. Changing the time schedules the job once more.
 - Removing `TTL` again works since v0.2.14. The service's stream keeps per-message TTLs enabled, because the server cannot switch them off; a schedule without `TTL` simply sends none. Before, removing `TTL` failed every `Start` (`message TTL status can not be disabled`).
 - `SourceSubject` may be a subject under the service's own subjects (`services.<module>.<name>.<anything>`) since v0.2.14; before, the server rejected the stream. The `.schedule` and `.control` sub-subjects are reserved.
 - `SourceSubject` must be a single subject. One with a wildcard (`*` or `>`) is rejected at registration since v0.2.14; before, `Start` failed after the stream was written (`message schedules source is invalid`).

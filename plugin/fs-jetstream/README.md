@@ -386,6 +386,7 @@ func (m *BackupModule) SetPlugin(alias string, plugin mono.PluginModule) {
 An object is stored as chunk messages followed by a metadata message. Chunks no metadata refers to are invisible to `List`, `Delete` and `Reset`, but count towards `MaxBytes`.
 
 - A `Put` whose context is cancelled or times out leaves no chunks: the upload stops at the next read, what it wrote is removed, and `Put` returns the context's error.
+- A `Put` the bucket has no room for (`maximum bytes exceeded`) leaves the object stored under that name as it was: the metadata is written only after every chunk is stored. Up to v0.2.19 such a `Put` could replace the object although it returned an error.
 - An upload whose data was read completely is finished, also when its context ends in that moment.
 - Uploads and deletes of one name are serialised within one application instance. A `Delete` that has begun is finished.
 - Not covered: uploads of one name from several instances at once, and an instance that dies during an upload.

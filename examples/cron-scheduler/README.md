@@ -54,8 +54,9 @@ func (m *HeartbeatModule) RegisterServices(c mono.ServiceContainer) error {
 - **Restart-safe**: the consumer is durable, so a restart delivers only occurrences not yet
   acknowledged. A consumer missing at startup is recreated after the occurrences already stored,
   so it delivers only new ones, and the number it skipped is logged.
-- **Idempotent**: the schedule is (re)published on every startup, so changing the `Schedule`,
-  `Payload`, `TimeZone`, or `TTL` and redeploying overwrites the live schedule in place.
+- **Updated in place**: changing the `Schedule`, `Payload`, `TimeZone`, or `TTL` and redeploying
+  overwrites the live schedule. An unchanged schedule is left alone at startup, so the interval of
+  an `@every` schedule runs on across restarts.
 - **Retiring a cron service**: set `Deprecated: true` and deploy to purge the schedule (keeping the
   code), then remove the `RegisterCronService` call in a later release.
 

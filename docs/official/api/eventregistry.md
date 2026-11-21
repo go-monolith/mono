@@ -262,7 +262,7 @@ type EventConsumerOptions struct {
 
 - Event handlers are **serial by default**: one event at a time, in publish order, as with `RegisterEventConsumer`.
 - Set `MaxConcurrency` above 1 to handle events concurrently when the handler does not depend on order (see [Handler Concurrency](container.md#handler-concurrency-worker-pools)).
-- Events carry no reply subject, so a full pool does not reject them: the subscription waits for a slot instead.
+- A full pool does not reject an event: the subscription waits for a slot instead. That also holds for an event that carries a reply subject, such as one published with `EventStream().Publish` (since v0.2.20; before, such an event was dropped by a full pool and the publish could fail with `invalid jetstream publish response`).
 - Negative values fail registration.
 
 **Typed (recommended):** `helper.RegisterTypedEventConsumerWithOptions(registry, eventDef, handler, module, opts)`.

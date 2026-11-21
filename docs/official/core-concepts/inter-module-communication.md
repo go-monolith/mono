@@ -446,7 +446,7 @@ Additional `CronServiceConfig` options: `TimeZone` (cron expressions only), `TTL
 
 #### Updating and Retiring a Schedule
 
-- **Update**: change `Schedule`/`Payload`/`TimeZone`/`TTL` and redeploy — the schedule is re-published idempotently and overwritten in place (rollup by subject).
+- **Update**: change `Schedule`/`Payload`/`TimeZone`/`TTL` and redeploy — the schedule is overwritten in place (rollup by subject). A schedule that did not change is not published again, so the interval of an `@every` schedule runs on across restarts (since v0.2.20).
 - **Retire (two-phase, revertible)**: set `Deprecated: true` and deploy — the framework purges the server-side schedule and does not start the consumer, while keeping the registration code. In a later release, delete the `RegisterCronService` call.
 - Removing the call without first deprecating leaves an orphaned durable schedule; the framework logs a warning on startup when it detects one.
 

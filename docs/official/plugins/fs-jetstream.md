@@ -488,11 +488,20 @@ func (m *MediaModule) Start(ctx context.Context) error {
 An object is stored as chunk messages followed by a metadata message. Chunks that no metadata refers to are invisible (`List`, `Delete` and `Reset` do not see them) but count towards `MaxBytes`.
 
 - **A `Put` whose context is cancelled or times out leaves no chunks** (since v0.2.17). The upload is stopped at the next read and what it had written is removed. `Put` then returns the context's error (`context.Canceled`, `context.DeadlineExceeded`). Removing the chunks takes a request of its own, so a `Put` can return shortly after its deadline.
+- **An upload the bucket has no room for leaves the object as it was** (since v0.2.20). The metadata is written only after every chunk is stored, so a `Put` that fails with `maximum bytes exceeded` changes nothing, and what it had written is removed. Before, such a `Put` returned the error and had still replaced the object stored under that name: `Stat` and `List` showed the rejected upload and `Get` timed out. See [Objects damaged by a rejected upload](#objects-damaged-by-a-rejected-upload).
 - **An upload whose data was read completely is finished**, also when its context ends in that moment.
 - **Uploads and deletes of one name are serialised** within one application instance. Of several concurrent uploads of one name only the last is kept, and a `Delete` waits for an upload of that name (it gives up with its own context). A reader that blocks holds the name until its `Read` returns; calls without a context (`Delete(key)`, `Reset()`) then wait for as long as that takes.
 - **A `Delete` that has begun is finished**, also when its context ends meanwhile: it marks the object deleted and then removes the chunks, in two requests. A `Delete` whose context has already ended deletes nothing.
 - **Not covered:** uploads of one name from several instances at once, and an instance that dies during an upload. Both can leave chunks behind.
 - **Chunks left behind earlier are not removed automatically**: they cannot be told from the chunks of an upload another instance is making. Up to v0.2.16 every cancelled or timed-out `Put` left its chunks, and a bucket with `MaxBytes` could fill up with them until every `Put` failed with `maximum bytes exceeded`. To reclaim the space, compare the bucket's stream (`OBJ_<bucket>`) with its objects while nothing is uploading, or move the objects to a new bucket.
+
+### Objects Damaged by a Rejected Upload
+
+Up to v0.2.19, a `Put` into a bucket with `MaxBytes` that had no room for the object could replace the metadata of the object stored under that name while its chunks were rejected. This happened for objects of one chunk (up to 128 KiB), and for larger ones whose last chunks did not fit.
+
+- **How to recognise one:** `Stat` and `List` return the object, and `Get` or `GetReader` fails with a timeout. A `Put` of a new name left the same kind of entry.
+- **What to do:** upload the object again, or delete it. Neither is done automatically: the content of the previous version cannot be found from the name any more.
+- **The previous version's chunks** are still in the bucket and count towards `MaxBytes`; see the last point of the list above for reclaiming the space.
 
 ## How It Works
 
