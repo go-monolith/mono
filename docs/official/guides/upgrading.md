@@ -289,7 +289,6 @@ See [A Request Always Gets a Reply](error-handling.md#a-request-always-gets-a-re
 - **`EventBus.ChanSubscribe`** left one goroutine behind for every subscription; it now ends with the subscription. The channel is not closed (it never was). Messages delivered before an `Unsubscribe` or `Drain` are still handed over, but one that is not taken within a second is dropped with the rest; keep reading until the channel is empty.
 - **kv-jetstream:** in a bucket with one replica, `Delete` of a key that does not exist no longer writes a delete marker (it costs one read per delete; a replicated bucket is deleted from as before). A `Reset` that fails no longer leaves goroutines behind, and one cut short by its context returns the context's error.
 - **Access log:** a request whose handler panics is logged, with status `error`. Two modules with a channel service of the same name no longer share one proxy entry (the first one's goroutines were never stopped).
-- **Access log channel proxy shutdown & `ModuleStoppingEvent`:** the lifecycle now emits `types.ModuleStoppingEvent` (`"module.stopping"`) before each module's `Stop()` executes (both during normal shutdown and during rollback). The access log middleware intercepts this event to cancel and wait for that module's channel proxies so background goroutines return before the module closes its channels. Third-party middleware switching over all lifecycle types will observe this new event type.
 - **`pkg/certreload`:** the certificate files are read without holding the reloader's lock, so a file system that stalls no longer blocks every TLS handshake, and a certificate that expired without being renewed is warned about.
 - **Channel services:** a nil message on a provider's out channel is dropped with a warning; it crashed the process.
 - **Locks:** middleware hooks no longer run with the service container's lock held, and a module's `SetDependencyServiceContainer` no longer runs under the lifecycle lock; code in them that asked the framework something could deadlock.
@@ -322,6 +321,10 @@ See [A Request Always Gets a Reply](error-handling.md#a-request-always-gets-a-re
 - **Objects damaged before** are not repaired: `Stat` returns them and `Get` times out. Upload them again or delete them; see [Objects damaged by a rejected upload](../plugins/fs-jetstream.md#objects-damaged-by-a-rejected-upload).
 - **Code that builds a backend itself:** `fsjetstream.NewJetStreamBackend` still uploads through the object store client. Use `fsjetstream.NewJetStreamBackendWithJetStream`, as the plugin does.
 
+### Other fixes in v0.2.20
+
+- **Access log channel proxy shutdown & `ModuleStoppingEvent`:** the lifecycle now emits `types.ModuleStoppingEvent` (`"module.stopping"`) before each module's `Stop()` executes (both during normal shutdown and during rollback). The access log middleware intercepts this event to cancel and wait for that module's channel proxies so background goroutines return before the module closes its channels. Third-party middleware switching over all lifecycle types will observe this new event type. Channel services of a `middleware` module registered after the access log, and providers that close their `in` channel on runtime-context cancellation (before modules stop), don't get `module.stopping`, so they are not covered.
+
 ## New Features
 
 All optional.
@@ -343,12 +346,12 @@ All optional.
 | `audit.CanonicalDetails`, `audit.HashEntry`, `audit.LegacyEmptyDetailsHash` | v0.2.17 | The form an audit entry's details are hashed in, and the hash earlier versions gave an entry with empty details |
 | `fsjetstream.NewJetStreamBackendWithJetStream`, `UploadObject`, `ErrUploadAckTimeout`, `ErrUploadOutOfOrder` | v0.2.20 | A backend whose uploads write the metadata only after every chunk is stored, the upload itself, and the errors of an upload whose chunk was not acknowledged within `UploadAckTimeout` (10s) or whose chunks were not stored in the order they were read |
 | `types.IsOneShotCronSchedule`, `types.CronOneShotSubject` | v0.2.20 | Whether a cron schedule fires once (`@at`), and the subject on which the framework records a one-shot schedule it has published |
+| `types.ModuleStoppingEvent` (`module.stopping`) | v0.2.20 | Lifecycle event emitted by the lifecycle manager before a module's `Stop()` executes (during shutdown and rollback) |
 | `monoerrors.ErrReplyFailed`, `types.ErrorTypeReplyFailed` (`reply-failed`) | v0.2.19 | The error a request-reply caller gets when the handler ran but its response could not be sent, and its type on the wire |
 | `types.IsFrameworkErrorType`, `types.HandlerPanicMessage` | v0.2.19 | Whether a `Mono-Error-Type` is one the framework itself answers with, and the message it sends for a handler that panicked |
 | `audit.ErrAmbiguousEntry`, `audit.CheckHashable`, `audit.SaveFailure` | v0.2.19 | The error for an audit entry whose event type, module name or service name contains `|`, the check for it, and the error type `SaveAuditTrail` returns for an entry that was not saved (`errors.Is` finds `ErrAmbiguousEntry` through it) |
 | `types.BoundaryViolationRuntimeContextReplaced` (`runtime-context-replaced`) | v0.2.19 | The boundary violation of a module that calls `SetRuntimeContext` on its event bus |
 | `certreload.ExpiryWarnInterval` | v0.2.19 | The least time between two warnings that the certificate being served has expired |
-| `types.ModuleStoppingEvent` (`module.stopping`) | v0.2.19 | Lifecycle event emitted by the lifecycle manager before a module's `Stop()` executes (during shutdown and rollback) |
 | `monoerrors.ErrStopAbandoned` | v0.2.18 | The error `Stop` returns for a module, middleware module or plugin whose `Stop` did not return after its context ended, and `Start` while such a `Stop` is still running |
 | [`types.RollbackAwareMiddleware`](../middleware/README.md#middleware-lifecycle) | v0.2.18 | Optional `RollbackStart(ctx)` of a middleware module, called instead of `Stop` when a failed `Start` is rolled back, so the middleware can be started again |
 | `audit.ErrOutputClosed`, `accesslog.ErrOutputClosed` | v0.2.18 | `Start` of a module whose log `Stop` has closed |

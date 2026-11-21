@@ -190,7 +190,7 @@ func (m *MyMiddleware) OnEventStreamConsumerRegistration(ctx context.Context, e 
 Middleware implementing `OnModuleLifecycle` intercepts lifecycle transitions for every module:
 
 - **`types.ModuleStartedEvent` (`"module.started"`):** Fired after a module's `Start()` succeeds.
-- **`types.ModuleStoppingEvent` (`"module.stopping"`):** Fired before a module's `Stop()` begins (both during normal shutdown and during rollback). Used by middleware such as `accesslog` to cancel and drain proxies before the provider module closes channels.
+- **`types.ModuleStoppingEvent` (`"module.stopping"`):** Fired before a module's `Stop()` begins (both during normal shutdown and during rollback). Used by middleware such as `accesslog` to cancel and drain proxies before the provider module closes channels. (Known limit: channel services of a `middleware` module registered after the access log, and providers that close their `in` channel on runtime-context cancellation before modules stop, don't get `module.stopping`, so they are not covered.)
 - **`types.ModuleStoppedEvent` (`"module.stopped"`):** Fired after a module's `Stop()` completes (with `event.Error` set if `Stop` failed).
 
 ## Performance Considerations

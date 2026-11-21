@@ -21,7 +21,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log/slog"
 	"os"
 	"reflect"
 	"sync"
@@ -324,7 +323,7 @@ func (m *AccessLogModule) stopModuleProxies(ctx context.Context, moduleName stri
 	}()
 
 	if !WaitWithGrace(ctx, done) {
-		slog.Warn("channel proxies did not stop within grace period", "module", moduleName)
+		fmt.Fprintf(os.Stderr, "WARNING: Access log channel proxies for module %s did not stop within grace period\n", moduleName)
 	}
 }
 

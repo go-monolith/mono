@@ -1945,8 +1945,12 @@ func TestProxyInboundChannel_ProviderClosesInChannel(t *testing.T) {
 	proxyIn <- &types.Msg{Data: []byte("msg1")}
 	proxyIn <- &types.Msg{Data: []byte("msg2")}
 
-	// Wait deterministically until msg1 is in originalIn and msg2 has been read from proxyIn
+	// Wait deterministically until msg1 is in originalIn and msg2 has been read from proxyIn (fail after ~1s)
+	deadline := time.Now().Add(time.Second)
 	for len(originalIn) != cap(originalIn) || len(proxyIn) != 0 {
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for proxy to read proxyIn and buffer originalIn")
+		}
 		runtime.Gosched()
 	}
 

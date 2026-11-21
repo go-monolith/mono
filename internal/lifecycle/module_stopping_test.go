@@ -111,7 +111,7 @@ func TestLifecycle_ModuleStoppingEvent_NormalStop(t *testing.T) {
 		t.Fatalf("expected ModuleStoppedEvent for test-module in events: %v", events)
 	}
 
-	if !(stopEventIdx < moduleStopIdx && moduleStopIdx < stoppedEventIdx) {
+	if stopEventIdx >= moduleStopIdx || moduleStopIdx >= stoppedEventIdx {
 		t.Fatalf("expected order ModuleStoppingEvent (%d) < module.Stop (%d) < ModuleStoppedEvent (%d), events: %v",
 			stopEventIdx, moduleStopIdx, stoppedEventIdx, events)
 	}
@@ -184,7 +184,7 @@ func TestLifecycle_ModuleStoppingEvent_Rollback(t *testing.T) {
 		t.Fatalf("expected ModuleStoppedEvent for mod-a in rollback events: %v", events)
 	}
 
-	if !(stopEventIdx < moduleStopIdx && moduleStopIdx < stoppedEventIdx) {
+	if stopEventIdx >= moduleStopIdx || moduleStopIdx >= stoppedEventIdx {
 		t.Fatalf("expected rollback order ModuleStoppingEvent (%d) < mod-a.Stop (%d) < ModuleStoppedEvent (%d), events: %v",
 			stopEventIdx, moduleStopIdx, stoppedEventIdx, events)
 	}
