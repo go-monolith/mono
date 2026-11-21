@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -244,5 +245,54 @@ func TestTailContradicted(t *testing.T) {
 				t.Fatalf("TailContradicted = %v, want %v", got, tc.want)
 			}
 		})
+	}
+}
+
+// UnansweredAPI is a JetStream client whose message get requests go to an
+// API prefix nobody answers, as while the stream has no leader.
+type UnansweredAPI struct {
+	jetstream.JetStream
+}
+
+// Options returns the options of the client with another API prefix.
+func (u UnansweredAPI) Options() jetstream.JetStreamOptions {
+	opts := u.JetStream.Options()
+	opts.APIPrefix = "nobody.api"
+	return opts
+}
+
+// While nobody answers whether anything is left, the copy does not count as
+// complete: the question is asked again until the copy timeout, and then
+// nothing is deleted.
+func TestOpen_TailCheckWithoutALeaderDeletesNothing(t *testing.T) {
+	js := startJetStream(t)
+	fileBucket(t, js, "locks", 2)
+	real := StreamAPI{JS: js}
+	// The copy ends short of the last sequence the stream was read with.
+	info := func(ctx context.Context, name string) (*jetstream.StreamInfo, error) {
+		i, err := real.StreamInfo(ctx, name)
+		if err == nil {
+			i.State.LastSeq += 10
+		}
+		return i, err
+	}
+	deletes := 0
+	spec := kvSpec(UnansweredAPI{JetStream: js}, fakeStreams{StreamAPI: real, info: info, deletes: &deletes}, "locks", Options{Recreate: true}, nil)
+	spec.CopyTimeout = time.Second
+	started := time.Now()
+	_, err := Open(context.Background(), spec)
+	if !errors.Is(err, errMismatch) || !strings.Contains(err.Error(), "backup failed") {
+		t.Fatalf("err = %v, want a failed backup", err)
+	}
+	// The rounds went on until the copy timeout: a first answer taken as an
+	// error would have ended them at once.
+	if waited := time.Since(started); waited < spec.CopyTimeout*8/10 {
+		t.Fatalf("Open returned after %s: the question was not asked again (%v)", waited, err)
+	}
+	if deletes != 0 {
+		t.Fatalf("deletes = %d", deletes)
+	}
+	if b := backups(t, js, "locks"); len(b) != 0 {
+		t.Fatalf("incomplete backup left: %v", b)
 	}
 }
