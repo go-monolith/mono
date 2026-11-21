@@ -2524,11 +2524,18 @@ func (lm *lifecycleManager) setupCronService(ctx context.Context, entry *types.S
 		return fmt.Errorf("failed to provision cron consumer %q: %w", consumerName, err)
 	}
 
-	// Publish the schedule message. Rollup-by-subject makes re-publishing on
-	// every boot idempotent: a changed Schedule/Payload/TimeZone/TTL overwrites
-	// the prior schedule in place.
-	if err := lm.publishCronSchedule(ctx, es, entry); err != nil {
+	// Publish the schedule message, unless the stream already holds this
+	// schedule (see EnsureCronSchedule): publishing it again restarts an
+	// interval.
+	published, err := EnsureCronSchedule(ctx, es, streamName, entry)
+	if err != nil {
 		return fmt.Errorf("failed to publish cron schedule %q: %w", entry.Name, err)
+	}
+	if published {
+		lm.logger.Info("Cron schedule published",
+			"service", entry.Name,
+			"stream", streamName,
+			"schedule", cfg.Schedule)
 	}
 
 	// Key the cancel func by a module-qualified, type-prefixed key so a cron
@@ -2551,32 +2558,6 @@ func (lm *lifecycleManager) setupCronService(ctx context.Context, entry *types.S
 		"target_subject", targetSubject)
 
 	return nil
-}
-
-// publishCronSchedule publishes the schedule message that drives the server-side
-// scheduler. The schedule headers flow to the wire unchanged through the
-// existing EventStream.PublishMsg path.
-func (lm *lifecycleManager) publishCronSchedule(ctx context.Context, es types.EventStream, entry *types.ServiceEntry) error {
-	cfg := entry.CronConfig
-	hdr := types.Header{
-		types.HeaderNatsSchedule:       []string{cfg.Schedule},
-		types.HeaderNatsScheduleTarget: []string{entry.Subject},
-	}
-	if cfg.TimeZone != "" {
-		hdr[types.HeaderNatsScheduleTimeZone] = []string{cfg.TimeZone}
-	}
-	if cfg.TTL > 0 {
-		hdr[types.HeaderNatsScheduleTTL] = []string{cfg.TTL.String()}
-	}
-	if cfg.SourceSubject != "" {
-		hdr[types.HeaderNatsScheduleSource] = []string{cfg.SourceSubject}
-	}
-	_, err := es.PublishMsg(ctx, &types.Msg{
-		Subject: entry.ScheduleSubject,
-		Data:    cfg.Payload,
-		Header:  hdr,
-	})
-	return err
 }
 
 // purgeCronSchedule cancels a server-side schedule. The purge must be published

@@ -122,7 +122,21 @@ const (
 	// HeaderNatsScheduleNextPurge is the only value clients may use with
 	// HeaderNatsScheduleNext; it cancels (purges) the schedule.
 	HeaderNatsScheduleNextPurge = "purge"
+
+	// HeaderCronOneShot carries the schedule of a one-shot cron service
+	// ("@at <time>") on its schedule message. The server copies it to the
+	// occurrence it publishes, which is how a later Start recognises that the
+	// schedule has fired and does not publish it again (see
+	// IsOneShotCronSchedule). Schedules that repeat do not carry it.
+	HeaderCronOneShot = "Mono-Cron-Schedule"
 )
+
+// IsOneShotCronSchedule reports whether a normalised schedule fires once, at a
+// given time ("@at 2026-01-02T15:04:05Z"), instead of repeating. The server
+// removes such a schedule when it has fired.
+func IsOneShotCronSchedule(schedule string) bool {
+	return strings.HasPrefix(schedule, "@at ")
+}
 
 // CronHandler processes a single message fired by a server-side cron schedule.
 //
