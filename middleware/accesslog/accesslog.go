@@ -738,6 +738,30 @@ func (m *AccessLogModule) wrapChannelService(
 	return proxyIn, proxyOut
 }
 
+// forwardInbound forwards msg to originalIn. It returns false if originalIn was
+// closed (recovering from the panic on send) or if proxy.ctx was cancelled,
+// indicating that the proxy should terminate.
+func (m *AccessLogModule) forwardInbound(proxy *channelProxy, msg *types.Msg) bool {
+	var closed bool
+	var cancelled bool
+
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				closed = true
+			}
+		}()
+
+		select {
+		case proxy.originalIn <- msg:
+		case <-proxy.ctx.Done():
+			cancelled = true
+		}
+	}()
+
+	return !closed && !cancelled
+}
+
 // proxyInboundChannel reads from proxyIn, logs request, forwards to originalIn.
 func (m *AccessLogModule) proxyInboundChannel(proxy *channelProxy) {
 	defer proxy.wg.Done()
@@ -750,6 +774,9 @@ func (m *AccessLogModule) proxyInboundChannel(proxy *channelProxy) {
 			if !ok {
 				// Channel closed, also close the original (using Once to prevent double-close)
 				proxy.closeInOnce.Do(func() {
+					defer func() {
+						_ = recover()
+					}()
 					close(proxy.originalIn)
 				})
 				return
@@ -760,9 +787,7 @@ func (m *AccessLogModule) proxyInboundChannel(proxy *channelProxy) {
 			// sends; one a consumer sends reaches the provider).
 			if m.shutdown.Load() || msg == nil {
 				// Forward without logging during shutdown
-				select {
-				case proxy.originalIn <- msg:
-				case <-proxy.ctx.Done():
+				if !m.forwardInbound(proxy, msg) {
 					return
 				}
 				continue
@@ -783,9 +808,7 @@ func (m *AccessLogModule) proxyInboundChannel(proxy *channelProxy) {
 			m.writeEntry(entry)
 
 			// Forward to original channel
-			select {
-			case proxy.originalIn <- msg:
-			case <-proxy.ctx.Done():
+			if !m.forwardInbound(proxy, msg) {
 				return
 			}
 		}

@@ -1928,6 +1928,36 @@ func TestProxyInboundChannel_ContextDoneDuringForward(t *testing.T) {
 	}
 }
 
+// TestProxyInboundChannel_ProviderClosesInChannel verifies that the accesslog proxy
+// does not panic when the service provider closes originalIn (e.g. during module Stop).
+func TestProxyInboundChannel_ProviderClosesInChannel(t *testing.T) {
+	buf := &syncWriter{}
+	m, _ := New(WithOutput(buf))
+
+	originalIn := make(chan *types.Msg, 1)
+	originalOut := make(chan *types.Msg, 1)
+
+	proxyIn, _ := m.wrapChannelService(originalIn, originalOut, "test-module", "test-channel")
+
+	// Send two messages: first fills originalIn (cap 1), second causes proxy to block waiting to forward
+	proxyIn <- &types.Msg{Data: []byte("msg1")}
+	proxyIn <- &types.Msg{Data: []byte("msg2")}
+
+	// Give goroutine time to read second message and block on forward
+	time.Sleep(50 * time.Millisecond)
+
+	// Provider closes originalIn during shutdown
+	close(originalIn)
+
+	// Wait briefly for proxy goroutine to handle
+	time.Sleep(50 * time.Millisecond)
+
+	// Stop the module (must succeed cleanly without panicking)
+	if err := m.Stop(context.Background()); err != nil {
+		t.Fatalf("Stop() failed: %v", err)
+	}
+}
+
 // TestProxyOutboundChannel_ContextDoneDuringForward tests context cancellation during outbound forward
 func TestProxyOutboundChannel_ContextDoneDuringForward(t *testing.T) {
 	buf := &syncWriter{}
