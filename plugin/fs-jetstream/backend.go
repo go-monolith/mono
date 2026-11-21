@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"math"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/go-monolith/mono/pkg/storage"
@@ -32,6 +33,19 @@ type JetStreamBackend struct {
 	// puts serialises the uploads and deletes of one object name (see
 	// PutObject and DeleteObject).
 	puts KeyedMutex
+	// js publishes the messages of an upload (see UploadObject). It is nil
+	// for a backend built with NewJetStreamBackend.
+	js jetstream.JetStream
+	// uploads publishes the chunks of an upload. It is a JetStream context
+	// of its own on the connection of js, with an acknowledgement timeout:
+	// without one, a chunk that is never acknowledged stays with the
+	// publisher, and counts towards its limit of pending messages, until the
+	// connection reconnects.
+	uploads jetstream.JetStream
+	// stream is the bucket's stream, looked up by the first upload that
+	// removes chunks (see BucketStream).
+	streamMu sync.Mutex
+	stream   jetstream.Stream
 }
 
 // Compile-time interface checks.
@@ -44,6 +58,10 @@ var (
 )
 
 // NewJetStreamBackend creates a new JetStream backend for the given bucket.
+//
+// Its uploads go through the object store client, which can replace an
+// object's metadata by an upload whose chunks the bucket rejected (see
+// UploadObject). Use NewJetStreamBackendWithJetStream, as the plugin does.
 func NewJetStreamBackend(bucketName string, store jetstream.ObjectStore, bucketTTL time.Duration, logger *slog.Logger) *JetStreamBackend {
 	return &JetStreamBackend{
 		bucketName: bucketName,
@@ -51,6 +69,26 @@ func NewJetStreamBackend(bucketName string, store jetstream.ObjectStore, bucketT
 		store:      store,
 		logger:     logger,
 	}
+}
+
+// NewJetStreamBackendWithJetStream creates a backend for the given bucket
+// that publishes the messages of an upload itself, through js, and writes an
+// object's metadata only after all of its chunks are stored (see
+// UploadObject). js must be the JetStream context the store was opened with.
+func NewJetStreamBackendWithJetStream(js jetstream.JetStream, bucketName string, store jetstream.ObjectStore, bucketTTL time.Duration, logger *slog.Logger) *JetStreamBackend {
+	backend := NewJetStreamBackend(bucketName, store, bucketTTL, logger)
+	backend.js = js
+	backend.uploads = js
+	// Chunks are published to their subject, which no API prefix or domain
+	// changes, so the publisher needs nothing of js but its connection.
+	uploads, err := jetstream.New(js.Conn(), jetstream.WithPublishAsyncTimeout(UploadAckTimeout))
+	if err == nil {
+		backend.uploads = uploads
+	} else if logger != nil {
+		logger.Warn("uploads use the shared JetStream context: a chunk that is never acknowledged stays pending until the connection reconnects",
+			"bucket", bucketName, "error", err)
+	}
+	return backend
 }
 
 // =============================================================================

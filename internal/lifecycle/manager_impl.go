@@ -685,8 +685,8 @@ func frameworkErrorReply(reply, errorType, message string) *types.Msg {
 // awaiting its ACK) is never made to wait: when the pool and its queue are
 // full it is answered at once with an overloaded error, and after shutdown
 // began with a shutting-down error, so the caller fails fast and can retry
-// elsewhere. A message without a reply subject (an event, or a queue group
-// send in optimistic publish mode) cannot be answered, so the subscription
+// elsewhere. A message without a reply subject (a queue group send in
+// optimistic publish mode) cannot be answered, so the subscription
 // waits for a queue slot instead of dropping it; only a message still
 // buffered when the pool closed at the end of shutdown is dropped, with a
 // rate-limited warning.
@@ -726,6 +726,33 @@ func SubmitToPoolWait(pool *workerpool.Pool, eventBus types.EventBus, logger typ
 		}
 	default:
 		logger.Error("Failed to submit message to worker pool", reporter.withFields("error", err)...)
+	}
+	return false
+}
+
+// SubmitEventToPool hands an event's handler run to the pool. An event is
+// never rejected and never answered: the subscription waits for room in the
+// pool (back-pressure), whether or not the message carries a reply subject.
+//
+// An event has no caller waiting for an answer, but it can carry a reply
+// subject all the same: one published through JetStream (EventStream) is a
+// request whose reply subject is the inbox of the publish acknowledgement.
+// Treated as a request, such an event was rejected by a full pool, lost for
+// this consumer, and answered with an overloaded error into that inbox, where
+// it could arrive before the server's acknowledgement and fail a publish the
+// stream had stored. An event still buffered when the pool closed at the end
+// of shutdown is dropped, counted and warned about, and not answered either.
+//
+// It returns true when the pool accepted the job.
+func SubmitEventToPool(pool *workerpool.Pool, logger types.Logger, reporter *overloadReporter, job workerpool.Job) bool {
+	err := pool.Submit(job, true)
+	switch {
+	case err == nil:
+		return true
+	case errors.Is(err, workerpool.ErrClosed):
+		reporter.drop(pool)
+	default:
+		logger.Error("Failed to submit event to worker pool", reporter.withFields("error", err)...)
 	}
 	return false
 }
@@ -1458,14 +1485,14 @@ func (lm *lifecycleManager) setupNATSSubscriptions(ctx context.Context) error {
 			queueGroup := consumer.QueueGroup
 
 			// One bounded worker pool per event consumer subscription, serial
-			// unless the registration opted in to concurrency. Events carry no
-			// reply subject, so a full pool applies back-pressure instead of
-			// dropping them.
+			// unless the registration opted in to concurrency. A full pool
+			// applies back-pressure instead of dropping an event, also one
+			// that carries a reply subject (see SubmitEventToPool).
 			pool := lm.newPool(consumer.Options, false, logger, consumerModule, "event_consumer", eventName, queueGroup)
 			reporter := newOverloadReporter(logger, "consumer_module", consumerModule, "event", eventName)
 
 			sub, err := eventBus.QueueSubscribe(consumer.EventDef.Subject, queueGroup, func(ctx context.Context, msg *types.Msg) {
-				submitToPool(pool, eventBus, logger, reporter, msg, func() {
+				SubmitEventToPool(pool, logger, reporter, func() {
 					if err := invokeMsgHandler(ctx, handler, msg); err != nil {
 						logger.Error("Event consumer handler error",
 							append([]any{"consumer_module", consumerModule, "event", eventName, "subject", msg.Subject}, handlerErrorFields(err)...)...)
@@ -2471,6 +2498,13 @@ func (lm *lifecycleManager) setupCronService(ctx context.Context, entry *types.S
 		if err := lm.purgeCronSchedule(ctx, es, controlSubject, scheduleSubject); err != nil {
 			return fmt.Errorf("failed to purge deprecated cron schedule %q: %w", entry.Name, err)
 		}
+		// The purged schedule of a one-shot service must be published again
+		// when the registration is enabled once more.
+		if types.IsOneShotCronSchedule(cfg.Schedule) {
+			if err := WriteOneShotCronRecord(ctx, es, entry, ""); err != nil {
+				return fmt.Errorf("failed to clear the one-shot record of deprecated cron service %q: %w", entry.Name, err)
+			}
+		}
 		lm.logger.Info("Cron service deprecated; schedule purged",
 			"service", entry.Name,
 			"schedule_subject", scheduleSubject)
@@ -2497,11 +2531,18 @@ func (lm *lifecycleManager) setupCronService(ctx context.Context, entry *types.S
 		return fmt.Errorf("failed to provision cron consumer %q: %w", consumerName, err)
 	}
 
-	// Publish the schedule message. Rollup-by-subject makes re-publishing on
-	// every boot idempotent: a changed Schedule/Payload/TimeZone/TTL overwrites
-	// the prior schedule in place.
-	if err := lm.publishCronSchedule(ctx, es, entry); err != nil {
-		return fmt.Errorf("failed to publish cron schedule %q: %w", entry.Name, err)
+	// Publish the schedule message, unless the stream already holds this
+	// schedule (see EnsureCronSchedule): publishing it again restarts an
+	// interval.
+	published, err := EnsureCronSchedule(ctx, es, streamName, entry)
+	if err != nil {
+		return fmt.Errorf("failed to set up cron schedule %q: %w", entry.Name, err)
+	}
+	if published {
+		lm.logger.Info("Cron schedule published",
+			"service", entry.Name,
+			"stream", streamName,
+			"schedule", cfg.Schedule)
 	}
 
 	// Key the cancel func by a module-qualified, type-prefixed key so a cron
@@ -2524,32 +2565,6 @@ func (lm *lifecycleManager) setupCronService(ctx context.Context, entry *types.S
 		"target_subject", targetSubject)
 
 	return nil
-}
-
-// publishCronSchedule publishes the schedule message that drives the server-side
-// scheduler. The schedule headers flow to the wire unchanged through the
-// existing EventStream.PublishMsg path.
-func (lm *lifecycleManager) publishCronSchedule(ctx context.Context, es types.EventStream, entry *types.ServiceEntry) error {
-	cfg := entry.CronConfig
-	hdr := types.Header{
-		types.HeaderNatsSchedule:       []string{cfg.Schedule},
-		types.HeaderNatsScheduleTarget: []string{entry.Subject},
-	}
-	if cfg.TimeZone != "" {
-		hdr[types.HeaderNatsScheduleTimeZone] = []string{cfg.TimeZone}
-	}
-	if cfg.TTL > 0 {
-		hdr[types.HeaderNatsScheduleTTL] = []string{cfg.TTL.String()}
-	}
-	if cfg.SourceSubject != "" {
-		hdr[types.HeaderNatsScheduleSource] = []string{cfg.SourceSubject}
-	}
-	_, err := es.PublishMsg(ctx, &types.Msg{
-		Subject: entry.ScheduleSubject,
-		Data:    cfg.Payload,
-		Header:  hdr,
-	})
-	return err
 }
 
 // purgeCronSchedule cancels a server-side schedule. The purge must be published

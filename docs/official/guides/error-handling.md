@@ -156,7 +156,7 @@ if errors.Is(err, monoerrors.ErrServiceOverloaded) {
 }
 ```
 
-Events and optimistic queue group sends carry no reply subject, so they are not rejected: the subscription waits for a free slot instead. See [Handler Concurrency](../api/container.md#handler-concurrency-worker-pools) for the options.
+Events and optimistic queue group sends are not rejected: the subscription waits for a free slot instead. An event is never rejected, also when it carries a reply subject (one published with `EventStream().Publish` does). See [Handler Concurrency](../api/container.md#handler-concurrency-worker-pools) for the options.
 
 ## Handling Framework Errors
 

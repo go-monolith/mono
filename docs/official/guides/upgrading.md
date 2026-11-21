@@ -296,6 +296,31 @@ See [A Request Always Gets a Reply](error-handling.md#a-request-always-gets-a-re
 - **`RecreateOnStorageMismatch` in a cluster:** whether a backup that ends short of the bucket's last sequence is complete is asked of the bucket's leader. It was read with a request any replica answers, and a replica that was behind could have said that nothing was left. While the bucket has no leader the question is asked again, until the backup's copy timeout.
 - **CI and dependencies:** the issue triage workflow reads a new issue as data and may only label and comment on that issue; actions are pinned by commit; `golang.org/x/net` is v0.62.0 and `golang.org/x/crypto` v0.59.0.
 
+### Cron: an unchanged schedule is not published again (v0.2.20)
+
+*v0.2.20.* The schedule of a cron service was published at every `Start`. The server counts an interval from the time of that message, so every start of any instance began an `@every` interval anew.
+
+- **What went wrong:** an interval longer than the time between two starts never fired: `@every 24h` in an application that is deployed daily, or any interval in a cluster where an instance starts more often than that (a rolling deploy, scale-out, one instance restarting in a loop). `Start` succeeded and nothing was logged. Cron expressions and aliases (`@daily`) were not affected.
+- **Now:** the stored schedule is read first (two requests per cron service and start) and published only when it is missing or differs. A changed schedule is published as before, and its interval starts from the deploy.
+- **During a rolling upgrade** an instance of an earlier version still publishes at every start. The interval is safe once every instance runs v0.2.20.
+- **One-shot schedules** (`@at <time>`) fire once. Before, one whose time had passed fired at every start of every instance. The framework records the schedule it published on `services.<module>.<service>.one-shot`, a subject that is now reserved like `.schedule` and `.control`; changing the time schedules the job once more.
+
+### Events with a reply subject are no longer rejected (v0.2.20)
+
+*v0.2.20.* An event published with `EventStream().Publish` carries the inbox of its publish acknowledgement as reply subject. A core event consumer (`RegisterEventConsumer`) whose worker pool was full treated it as a request.
+
+- **What went wrong:** the event was dropped for that consumer, and an overloaded error was sent to the publisher's inbox, where it could arrive before the server's acknowledgement: `Publish` then failed with `nats: invalid jetstream publish response` although the stream had stored the event. A publisher that retried without a message ID stored it twice.
+- **Now:** an event consumer always waits for room in its pool and never answers, whatever the message carries. A burst is held back in the client buffer, as it is for events without a reply subject.
+- **Who is affected:** applications that publish events through JetStream and consume the same subject with a core event consumer. Check `Rejected` of the event consumer in `SubscriptionStats()` or the warning `Messages rejected: worker pool and pending queue are full` in earlier logs.
+
+### fs-jetstream: a rejected upload no longer replaces the object (v0.2.20)
+
+*v0.2.20.* In a bucket with `MaxBytes`, a `Put` the bucket had no room for returned `maximum bytes exceeded` and could still replace the object stored under that name with metadata of chunks that were never stored.
+
+- **Now:** the plugin publishes an upload itself and writes the metadata only after every chunk is stored. A failed upload removes its chunks and leaves the object as it was.
+- **Objects damaged before** are not repaired: `Stat` returns them and `Get` times out. Upload them again or delete them; see [Objects damaged by a rejected upload](../plugins/fs-jetstream.md#objects-damaged-by-a-rejected-upload).
+- **Code that builds a backend itself:** `fsjetstream.NewJetStreamBackend` still uploads through the object store client. Use `fsjetstream.NewJetStreamBackendWithJetStream`, as the plugin does.
+
 ## New Features
 
 All optional.
@@ -315,6 +340,8 @@ All optional.
 | [`monoerrors.ErrWorkQueueConsumerConflict`](../api/container.md#work-queue-streams-one-consumer-per-subject), [`monoerrors.ErrStreamSubjectsOverlap`](../api/container.md#renaming-a-stream-or-switching-a-service-between-stream-consumer-and-cron) | v0.2.16 | `Start` errors for a second consumer on the same subjects of a work-queue stream, and for a stream that asks for subjects another stream holds. Both failed before as well, with the server's error; nothing is deleted |
 | `helper.DecodeBatch`, `helper.ErrUndecodableMessage` | v0.2.17 | Decode a batch leaving out the messages that fail to unmarshal; the error the typed batch handlers return for such a batch |
 | `audit.CanonicalDetails`, `audit.HashEntry`, `audit.LegacyEmptyDetailsHash` | v0.2.17 | The form an audit entry's details are hashed in, and the hash earlier versions gave an entry with empty details |
+| `fsjetstream.NewJetStreamBackendWithJetStream`, `UploadObject`, `ErrUploadAckTimeout`, `ErrUploadOutOfOrder` | v0.2.20 | A backend whose uploads write the metadata only after every chunk is stored, the upload itself, and the errors of an upload whose chunk was not acknowledged within `UploadAckTimeout` (10s) or whose chunks were not stored in the order they were read |
+| `types.IsOneShotCronSchedule`, `types.CronOneShotSubject` | v0.2.20 | Whether a cron schedule fires once (`@at`), and the subject on which the framework records a one-shot schedule it has published |
 | `monoerrors.ErrReplyFailed`, `types.ErrorTypeReplyFailed` (`reply-failed`) | v0.2.19 | The error a request-reply caller gets when the handler ran but its response could not be sent, and its type on the wire |
 | `types.IsFrameworkErrorType`, `types.HandlerPanicMessage` | v0.2.19 | Whether a `Mono-Error-Type` is one the framework itself answers with, and the message it sends for a handler that panicked |
 | `audit.ErrAmbiguousEntry`, `audit.CheckHashable`, `audit.SaveFailure` | v0.2.19 | The error for an audit entry whose event type, module name or service name contains `|`, the check for it, and the error type `SaveAuditTrail` returns for an entry that was not saved (`errors.Is` finds `ErrAmbiguousEntry` through it) |

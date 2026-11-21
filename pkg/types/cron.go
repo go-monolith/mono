@@ -50,8 +50,18 @@ func CronControlSubject(serviceSubject string) string {
 	return serviceSubject + ".control"
 }
 
+// CronOneShotSubject returns the subject on which the framework records the
+// one-shot schedule ("@at <time>") it has published for a service, derived as
+// "<serviceSubject>.one-shot". The server removes a one-shot schedule when it
+// has fired, so this record is what tells a later Start that the schedule was
+// published before and must not be published again. Like the schedule and
+// control subjects it is never delivered to the handler.
+func CronOneShotSubject(serviceSubject string) string {
+	return serviceSubject + ".one-shot"
+}
+
 // CronSubjectsWildcard returns the wildcard covering the cron sub-subjects
-// (schedule + control) for a service, as "<serviceSubject>.>". The stream
+// (schedule, control and one-shot record) for a service, as "<serviceSubject>.>". The stream
 // listens on this plus the concrete target service subject.
 func CronSubjectsWildcard(serviceSubject string) string {
 	return serviceSubject + ".>"
@@ -123,6 +133,13 @@ const (
 	// HeaderNatsScheduleNext; it cancels (purges) the schedule.
 	HeaderNatsScheduleNextPurge = "purge"
 )
+
+// IsOneShotCronSchedule reports whether a normalised schedule fires once, at a
+// given time ("@at 2026-01-02T15:04:05Z"), instead of repeating. The server
+// removes such a schedule when it has fired.
+func IsOneShotCronSchedule(schedule string) bool {
+	return strings.HasPrefix(schedule, "@at ")
+}
 
 // CronHandler processes a single message fired by a server-side cron schedule.
 //

@@ -1012,9 +1012,14 @@ func TestRequestReplyPublishError(t *testing.T) {
 		t.Fatal("Handler didn't complete within timeout")
 	}
 
-	// Verify error was logged
-	if !logger.hasErrorContaining("Failed to publish response") {
-		t.Errorf("Expected error log for publish failure")
+	// Verify error was logged. The pool worker publishes the response and
+	// logs its failure after the handler returned, so wait for the log line.
+	deadline := time.Now().Add(time.Second)
+	for !logger.hasErrorContaining("Failed to publish response") {
+		if time.Now().After(deadline) {
+			t.Fatal("Expected error log for publish failure")
+		}
+		time.Sleep(time.Millisecond)
 	}
 }
 

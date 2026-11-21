@@ -59,7 +59,7 @@ func NewPutTestBackend(t *testing.T, cfg BucketConfig) (*JetStreamBackend, jetst
 	t.Helper()
 	_, js := setupTestNATSWithJetStream(t)
 	store := createTestObjectStore(t, js, cfg)
-	return NewJetStreamBackend(cfg.Name, store, cfg.TTL, nil), js
+	return NewJetStreamBackendWithJetStream(js, cfg.Name, store, cfg.TTL, nil), js
 }
 
 // An upload that is given up must leave no chunks in the bucket: they are

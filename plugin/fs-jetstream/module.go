@@ -138,7 +138,7 @@ func (m *PluginModule) Start(ctx context.Context) error {
 		}
 
 		// Create backend (implements storage.Storage and extended interfaces)
-		backend := NewJetStreamBackend(bucketCfg.Name, os, bucketCfg.TTL, m.logger)
+		backend := NewJetStreamBackendWithJetStream(js, bucketCfg.Name, os, bucketCfg.TTL, m.logger)
 
 		// Wrap backend in adapter (implements FileStoragePort)
 		adapter := NewAdapter(backend, m.logger)

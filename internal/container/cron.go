@@ -84,7 +84,8 @@ func (c *serviceContainer) RegisterCronService(
 	scheduleSubject := types.CronScheduleSubject(targetSubject)
 	// The schedule and control sub-subjects carry the framework's own
 	// messages; a schedule cannot take its payload from them.
-	if config.SourceSubject == scheduleSubject || config.SourceSubject == types.CronControlSubject(targetSubject) {
+	if config.SourceSubject == scheduleSubject || config.SourceSubject == types.CronControlSubject(targetSubject) ||
+		config.SourceSubject == types.CronOneShotSubject(targetSubject) {
 		return fmt.Errorf("cron service '%s': SourceSubject %q is reserved for the service's schedule", name, config.SourceSubject)
 	}
 
