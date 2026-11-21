@@ -142,7 +142,12 @@ func CheckModule(tb testing.TB, module types.Module, opts ...Option) {
 		if v.Subject != "" {
 			where += " (" + v.Subject + ")"
 		}
-		tb.Errorf("rule 5: boundary violation %s on %s, %d time(s): %s", v.Kind, where, v.Count, violationHint(v.Kind))
+		if where != "" {
+			// A violation that names no dependency (runtime-context-replaced)
+			// is reported without one.
+			where = " on " + where
+		}
+		tb.Errorf("rule 5: boundary violation %s%s, %d time(s): %s", v.Kind, where, v.Count, violationHint(v.Kind))
 	}
 
 	// Rule 6: unused dependencies.
@@ -211,6 +216,8 @@ func violationHint(kind types.BoundaryViolationKind) string {
 	case types.BoundaryViolationUndeclaredServiceUse:
 		return "add the service's contract to ConsumeServices(): a module that declares what it consumes must declare all of it, " +
 			"whether it reaches the service through the dependency container or the event bus"
+	case types.BoundaryViolationRuntimeContextReplaced:
+		return "a module must not call SetRuntimeContext on its event bus: the runtime context of all handlers is the framework's"
 	default:
 		return fmt.Sprintf("unknown violation kind %q", kind)
 	}

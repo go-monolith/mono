@@ -289,3 +289,21 @@ func TestCheckModuleCountsAContractReachedOverTheBus(t *testing.T) {
 		t.Fatalf("unexpected failures: %v", rec.errors)
 	}
 }
+
+// RuntimeContextModule replaces the runtime context of the bus it is handed.
+type RuntimeContextModule struct{}
+
+func (*RuntimeContextModule) Name() string                { return "runtime-context" }
+func (*RuntimeContextModule) Start(context.Context) error { return nil }
+func (*RuntimeContextModule) Stop(context.Context) error  { return nil }
+func (*RuntimeContextModule) SetEventBus(bus types.EventBus) {
+	bus.SetRuntimeContext(context.Background())
+}
+
+func TestCheckModuleReportsAReplacedRuntimeContext(t *testing.T) {
+	rec := runCheck(t, &RuntimeContextModule{})
+	want := "rule 5: boundary violation runtime-context-replaced, 1 time(s): a module must not call SetRuntimeContext"
+	if !rec.has(want) {
+		t.Fatalf("missing failure %q in %v", want, rec.errors)
+	}
+}

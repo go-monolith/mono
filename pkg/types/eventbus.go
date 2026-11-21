@@ -111,6 +111,11 @@ type EventBus interface {
 
 	// SetRuntimeContext sets the context that will be passed to all message handlers.
 	// When this context is cancelled, handlers can detect shutdown and terminate gracefully.
+	//
+	// The framework sets it; module code must not. On the bus a module is
+	// handed through SetEventBus the call is a boundary violation
+	// (BoundaryViolationRuntimeContextReplaced): recorded, and ignored under
+	// WithStrictModuleBoundaries.
 	SetRuntimeContext(ctx context.Context)
 }
 

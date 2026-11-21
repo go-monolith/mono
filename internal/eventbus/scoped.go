@@ -214,4 +214,13 @@ func (s *scopedEventBus) ChanSubscribe(subject string, ch chan *types.Msg) (type
 
 func (s *scopedEventBus) EventStream() (types.EventStream, error) { return s.inner.EventStream() }
 
-func (s *scopedEventBus) SetRuntimeContext(ctx context.Context) { s.inner.SetRuntimeContext(ctx) }
+// SetRuntimeContext replaces the context of every handler of every module,
+// which is the framework's to set (it does so on the shared bus). From a
+// module it is a violation: recorded and passed on, or, under strict
+// boundaries, ignored, as the method has no error to return.
+func (s *scopedEventBus) SetRuntimeContext(ctx context.Context) {
+	if err := s.rec.Violation(types.BoundaryViolationRuntimeContextReplaced, "", ""); err != nil {
+		return
+	}
+	s.inner.SetRuntimeContext(ctx)
+}
