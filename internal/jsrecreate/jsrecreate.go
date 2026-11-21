@@ -10,6 +10,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -17,6 +18,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 )
 
@@ -589,17 +591,94 @@ func backupCopied(ctx context.Context, js jetstream.JetStream, backup jetstream.
 	}
 	// Caught up with no lag, but short of lastSeq: done if the stream holds
 	// nothing after what was copied (the rest expired before it was read).
-	original, err := js.Stream(ctx, streamName)
+	holds, err := HoldsMsgAfter(ctx, js, streamName, copied)
 	if err != nil {
-		return false, copied, fmt.Errorf("failed to read stream %s: %w", streamName, err)
-	}
-	if _, err := original.GetMsg(ctx, copied+1, jetstream.WithGetMsgSubject(">")); err != nil {
-		if errors.Is(err, jetstream.ErrMsgNotFound) {
-			return true, copied, nil
+		if errors.Is(err, nats.ErrNoResponders) {
+			// The stream has no leader at the moment: asked again on the
+			// next round, within the copy timeout.
+			return false, copied, nil
 		}
 		return false, copied, fmt.Errorf("failed to read stream %s after sequence %d: %w", streamName, copied, err)
 	}
-	return false, copied, nil
+	return !holds, copied, nil
+}
+
+// HoldsMsgAfter reports whether the stream holds a message after sequence
+// seq, as answered by the stream's leader.
+//
+// Stream.GetMsg cannot be used for it: for a stream with AllowDirect, which
+// every KV and object store bucket has, nats.go sends a direct get, and any
+// replica of the stream answers one. A replica that is behind answers "no
+// message" for a message the leader holds, the copy would count as complete
+// without it, and the bucket would be deleted. The request is therefore sent
+// to the message get API itself, with the body Stream.GetMsg sends.
+//
+// It returns nats.ErrNoResponders while the stream has no leader.
+func HoldsMsgAfter(ctx context.Context, js jetstream.JetStream, streamName string, seq uint64) (bool, error) {
+	nc := js.Conn()
+	if nc == nil {
+		return false, errors.New("jsrecreate: the JetStream client has no connection")
+	}
+	req, err := json.Marshal(MsgGetRequest{Seq: seq + 1, NextFor: ">"})
+	if err != nil {
+		return false, err
+	}
+	if _, ok := ctx.Deadline(); !ok {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, MsgGetTimeout)
+		defer cancel()
+	}
+	reply, err := nc.RequestWithContext(ctx, APIPrefix(js.Options())+"STREAM.MSG.GET."+streamName, req)
+	if err != nil {
+		return false, err
+	}
+	var resp MsgGetResponse
+	if err := json.Unmarshal(reply.Data, &resp); err != nil {
+		return false, fmt.Errorf("unreadable answer of the message get API: %w", err)
+	}
+	switch {
+	case resp.Error != nil && resp.Error.ErrorCode == jetstream.JSErrCodeMessageNotFound:
+		return false, nil
+	case resp.Error != nil:
+		return false, resp.Error
+	case len(resp.Message) == 0:
+		return false, errors.New("the message get API answered without a message and without an error")
+	}
+	return true, nil
+}
+
+// MsgGetTimeout bounds the message get request of a caller whose context has
+// no deadline (nats.go requires one).
+const MsgGetTimeout = 5 * time.Second
+
+// MsgGetRequest is the body of a JetStream message get request: the first
+// message at or after Seq whose subject matches NextFor.
+type MsgGetRequest struct {
+	Seq     uint64 `json:"seq,omitempty"`
+	NextFor string `json:"next_by_subj,omitempty"`
+}
+
+// MsgGetResponse is what HoldsMsgAfter reads of the answer.
+type MsgGetResponse struct {
+	Error   *jetstream.APIError `json:"error,omitempty"`
+	Message json.RawMessage     `json:"message,omitempty"`
+}
+
+// APIPrefix returns the subject prefix of the JetStream API a client with
+// opts sends its requests to, with its trailing dot: the client's own prefix,
+// that of its domain, or the default. nats.go keeps the prefix it computed
+// private, so this repeats its rule.
+func APIPrefix(opts jetstream.JetStreamOptions) string {
+	switch {
+	case opts.APIPrefix != "" && strings.HasSuffix(opts.APIPrefix, "."):
+		return opts.APIPrefix
+	case opts.APIPrefix != "":
+		return opts.APIPrefix + "."
+	case opts.Domain != "":
+		return "$JS." + opts.Domain + ".API."
+	default:
+		return jetstream.DefaultAPIPrefix
+	}
 }
 
 // SourceSequence parses the source sequence of a Nats-Stream-Source header.
