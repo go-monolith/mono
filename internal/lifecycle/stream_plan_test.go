@@ -311,6 +311,42 @@ func TestNewStreamPlan_ImmutableConflict(t *testing.T) {
 	}
 }
 
+func TestNewStreamPlan_DuplicateConsumerDurableName(t *testing.T) {
+	// Different streams may reuse the same consumer durable name.
+	diffStreams := StreamRegistrations([]*types.ServiceEntry{
+		planService("order", "sync", "ORDERS", "orders.>"),
+		planService("order", "sync", "ARCHIVE", "archive.>"),
+	}, nil)
+	if err := CheckStreamConsumers(diffStreams); err != nil {
+		t.Fatalf("different streams: error = %v, want nil", err)
+	}
+
+	// Two stream consumer services whose module and service names join to
+	// the same durable consumer name on the same stream are rejected.
+	s1 := planService("order", "events-sync", "ORDERS", "orders.events.>")
+	s2 := planService("order-events", "sync", "ORDERS", "orders.sync.>")
+	regs := StreamRegistrations([]*types.ServiceEntry{s1, s2}, nil)
+
+	if err := CheckStreamConsumers(regs); !errors.Is(err, monoerrors.ErrInvalidConfiguration) {
+		t.Fatalf("CheckStreamConsumers: error = %v, want ErrInvalidConfiguration", err)
+	}
+
+	_, err := NewStreamPlan(regs)
+	if !errors.Is(err, monoerrors.ErrInvalidConfiguration) {
+		t.Fatalf("NewStreamPlan: error = %v, want ErrInvalidConfiguration", err)
+	}
+	for _, part := range []string{
+		`stream ORDERS has duplicate consumer durable name "order-events-sync"`,
+		"registered by the stream consumer service order.events-sync",
+		"and by the stream consumer service order-events.sync",
+		"consumer durable names must be distinct on the same stream",
+	} {
+		if !strings.Contains(err.Error(), part) {
+			t.Errorf("error %q does not contain %q", err.Error(), part)
+		}
+	}
+}
+
 func TestStreamPlan_FilterConsumer(t *testing.T) {
 	plan, err := NewStreamPlan(StreamRegistrations(
 		[]*types.ServiceEntry{

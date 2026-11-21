@@ -323,6 +323,7 @@ See [A Request Always Gets a Reply](error-handling.md#a-request-always-gets-a-re
 
 ### Other fixes in v0.2.20
 
+- **Duplicate stream consumer durable names:** the stream planner now validates that no two services or event consumers on the same stream register with module and service names that produce the same consumer durable name (for example, module `order` with service `events-sync` and module `order-events` with service `sync`). Registrations with duplicate consumer durable names fail `Start` at once with an error wrapping `monoerrors.ErrInvalidConfiguration` before any NATS consumer is declared.
 - **Access log channel proxy shutdown & `ModuleStoppingEvent`:** the lifecycle now emits `types.ModuleStoppingEvent` (`"module.stopping"`) before each module's `Stop()` executes (both during normal shutdown and during rollback). The access log middleware intercepts this event to cancel and wait for that module's channel proxies so background goroutines return before the module closes its channels. Third-party middleware switching over all lifecycle types will observe this new event type. Channel services of a `middleware` module registered after the access log, and providers that close their `in` channel on runtime-context cancellation (before modules stop), don't get `module.stopping`, so they are not covered.
 
 ## New Features
