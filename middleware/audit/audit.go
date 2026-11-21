@@ -492,8 +492,12 @@ func (m *AuditModule) writeEntry(ctx context.Context, entry Entry) error {
 	// Add user context if available
 	entry.UserContext = m.userCtxFunc(ctx)
 
-	// Add hash chaining if enabled
+	// Add hash chaining if enabled. An entry the chain could not vouch for
+	// is refused: written, it would make the whole log fail verification.
 	if m.hashChain != nil {
+		if err := CheckHashable(entry); err != nil {
+			return fmt.Errorf("audit entry not written: %w", err)
+		}
 		entry = m.hashChain.Next(entry)
 	}
 
