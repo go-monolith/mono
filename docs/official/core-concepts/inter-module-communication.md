@@ -312,7 +312,7 @@ container.RegisterQueueGroupService("send-notification",
 )
 ```
 
-When the pool and its pending queue are full, `Send` in ACK mode returns `ErrServiceOverloaded` (the message was not accepted); a send in optimistic publish mode is held back until a slot frees instead of being dropped. A service with several queue groups never rejects a message: every group receives it, and a full group ACKs it and handles it once it has room. See [Handler Concurrency](../api/container.md#handler-concurrency-worker-pools) and [RegisterQueueGroupService](../api/container.md#registerqueuegroupservice).
+When the pool and its pending queue are full, `Send` in ACK mode returns `ErrServiceOverloaded` (the message was not accepted); a send in optimistic publish mode is held back until a slot frees instead of being dropped. A service with several queue groups delivers every message to every group: `Send` returns `nil` when any group accepted it and `ErrServiceOverloaded` only when every group rejected it; a group that rejected it does not handle it and logs a warning. See [Handler Concurrency](../api/container.md#handler-concurrency-worker-pools) and [RegisterQueueGroupService](../api/container.md#registerqueuegroupservice).
 
 ---
 

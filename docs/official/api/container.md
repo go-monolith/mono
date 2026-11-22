@@ -266,15 +266,16 @@ container.RegisterQueueGroupService("order-placed",
 )
 ```
 
-Every group answers the same `Send`, and `Send` returns on the first answer. So that no group's answer can contradict another's, a service with more than one group never rejects a message:
-- A group whose worker pool is full sends its ACK at once and handles the message once it has room. The subscription waits meanwhile, so the backlog builds up in the NATS client buffer of that group only.
-- Every answer is an ACK, so `Send` returns `nil` as soon as one group has received the message; the other groups' answers are not waited for. A group that cannot take the message (no instance online, or its pool closed at the end of shutdown) sends nothing, and a group's handler error is only logged.
-- `Send` to such a service never returns `ErrServiceOverloaded`. It still returns `ErrServiceUnavailable` when no instance subscribes.
-- **The client buffer of a full group is its last reserve** (nats.go's 500,000 messages / 64 MB unless set with `WithPendingLimits`). When it fills, nats.go drops messages before the framework sees them and the framework logs a slow consumer with the queue group; another group has ACKed them, so the sender got `nil` for a message the full group never handles. Lower `PendingMsgs` on one group of such a service only when losing its share under overload is acceptable.
-- **When every group is full**, the next messages wait unanswered in the client buffers until a group has room, so `Send` may return a timeout. A timed-out message is still handled once the groups catch up; re-send it only if the handlers are idempotent.
-- A service with one group keeps rejecting messages when its pool is full (see [Handler Concurrency](#handler-concurrency-worker-pools)).
+Every group answers the same `Send`: an ACK, or a rejection when its worker pool is full or it is shutting down. A message counts as delivered when **one** group has received it:
+- **Any ACK:** `Send` returns `nil` as soon as it arrives, whichever group answered first. The client reads every group's answer from its own inbox instead of taking the first one.
+- **Every group rejected it:** `Send` returns the rejection, `ErrServiceOverloaded` (full) or `ErrServiceUnavailable` (shutting down), as soon as each group has answered.
+- **Some groups rejected it and the others did not answer** (no instance of them online): `Send` returns the rejection 250ms after the first one (`FanOutRejectionGrace`; a group answers as soon as it receives a message), or earlier when the context ends.
+- **No instance subscribes at all:** `Send` returns `ErrServiceUnavailable` at once, as for one group.
+- **A group that rejects a message does not handle it**, although `Send` returned `nil` because another group did. Nothing tells the sender; the rejecting instance logs a warning (`Messages rejected by one queue group of a service with several`, at most once per second per group with the count, `queueGroup` naming the group). Size the pools of a fan-out service for the burst of its slowest group, or use a stream consumer service when every handler must get every message.
+- **Cost:** in ACK mode each send to such a service subscribes and unsubscribes an inbox of its own (a service with one group uses the connection's shared request inbox). The inbox follows a `nats.CustomInboxPrefix` set through `WithNATSClientOptions`.
+- **The sender counts the groups of its own registration.** During a deploy that adds a queue group, a sender whose registration has fewer groups stops reading once those have rejected the message, and may return `ErrServiceOverloaded` while the new group accepts it; a retry then handles it there twice.
 
-Up to v0.2.22 each group answered for itself, and `Send` kept whichever answer came first. A sender could get `ErrServiceOverloaded` for a message another group had handled, and a retry handled it there twice. It could also get `nil` for a message a full group had dropped.
+Up to v0.2.22 `Send` kept whichever answer came first, so it returned `ErrServiceOverloaded` for a message another group had handled, and a retry handled it there twice.
 
 ### RegisterStreamConsumerService
 
@@ -849,7 +850,7 @@ type QueueGroupServiceClient interface {
 }
 ```
 
-`Send` returns `nil` once the message was accepted. The handler's result never reaches the sender. See [RegisterQueueGroupService](#registerqueuegroupservice) for what the ACK means and how a service with several queue groups answers.
+`Send` returns `nil` once the message was accepted (by one group, for a service with several). The handler's result never reaches the sender. See [RegisterQueueGroupService](#registerqueuegroupservice) for what the ACK means and how a service with several queue groups answers.
 
 **Example:**
 ```go
@@ -1033,7 +1034,7 @@ container.RegisterQueueGroupService("send-notification",
 |---------|-----------|
 | Request-reply call | Answered at once with an error the caller sees as `errors.ErrServiceOverloaded`. The request was not handled; retry, ideally on another instance. |
 | Queue group `Send` (ACK mode), service with one queue group | `Send` returns `ErrServiceOverloaded` instead of an ACK. The message was not handled. |
-| Queue group `Send` (ACK mode), service with several queue groups | Not rejected: the full group sends its ACK at once and the subscription waits for a free slot. Every group handles the message (see [RegisterQueueGroupService](#registerqueuegroupservice)). |
+| Queue group `Send` (ACK mode), service with several queue groups | The full group rejects the message and logs a warning. `Send` returns `nil` when another group accepted it, and `ErrServiceOverloaded` when every group rejected it (see [RegisterQueueGroupService](#registerqueuegroupservice)). |
 | Queue group send in optimistic publish mode, event | Not rejected: the subscription waits for a free slot (back-pressure through the NATS client buffer). |
 
 **The NATS client buffer behind the pool:** messages wait there before the subscription callback hands them to the pool.

@@ -563,10 +563,13 @@ const overloadLogInterval = time.Second
 // overloadLogInterval per subscription, with the number affected since the
 // previous line.
 type overloadReporter struct {
-	logger   types.Logger
-	fields   []any
-	lastLog  atomic.Int64 // unix nanoseconds of the last line written
-	rejected atomic.Int64 // rejected or dropped since the last line
+	logger types.Logger
+	fields []any
+	// RejectMessage replaces the warning written for rejected messages
+	// when set (a queue group of a service with several queue groups).
+	RejectMessage string
+	lastLog       atomic.Int64 // unix nanoseconds of the last line written
+	rejected      atomic.Int64 // rejected or dropped since the last line
 
 	lastExpiredLog atomic.Int64 // unix nanoseconds of the last expired-requests line
 	expired        atomic.Int64 // expired requests dropped since that line
@@ -594,10 +597,21 @@ func (r *overloadReporter) withFields(extra ...any) []any {
 	return append(fields, extra...)
 }
 
+// QueueGroupFanOutRejectMessage is the warning written, at most once per
+// second with the count, when one queue group of a service with several queue
+// groups rejects messages because its worker pool and pending queue are full.
+// The sender's Send returns nil when another group accepted the message, so
+// this line is the only trace that this group did not handle it.
+const QueueGroupFanOutRejectMessage = "Messages rejected by one queue group of a service with several: worker pool and pending queue are full; this group does not handle them, and the sender is told they were delivered when another group accepted them"
+
 // reject records one rejected message and writes the warning when due.
 func (r *overloadReporter) reject(pool *workerpool.Pool) {
 	r.rejectedTotal.Add(1)
-	r.report("Messages rejected: worker pool and pending queue are full", pool, "rejected")
+	msg := "Messages rejected: worker pool and pending queue are full"
+	if r.RejectMessage != "" {
+		msg = r.RejectMessage
+	}
+	r.report(msg, pool, "rejected")
 }
 
 // drop records one message dropped because it was delivered after the pool
@@ -753,54 +767,6 @@ func SubmitEventToPool(pool *workerpool.Pool, logger types.Logger, reporter *ove
 		reporter.drop(pool)
 	default:
 		logger.Error("Failed to submit event to worker pool", reporter.withFields("error", err)...)
-	}
-	return false
-}
-
-// SubmitFanOutToPool hands a message of a queue group service with more than
-// one queue group (QGHP pair) to the pool of one of its groups. Such a message
-// is never rejected: accepted is called (it sends the ACK) and the message is
-// handled once the pool has room.
-//
-// Every group receives every message and answers the same inbox, and the
-// sender keeps the first answer. A group that rejected the message with an
-// overloaded or shutting-down error therefore either contradicted a group that
-// had accepted it (the sender re-sent a message that was handled, and it was
-// handled again there) or was hidden by it (the sender was told the message
-// was accepted, and this group dropped it). Every group now gives the same
-// answer: the pool is tried without waiting, and when it is full the ACK is
-// sent at once and the subscription waits for room (back-pressure through the
-// NATS client buffer, as for events). A pool that is closed (the end of
-// shutdown) sends no answer, since another group may have accepted the
-// message; the message is dropped, counted and warned about. A message that
-// was acknowledged while the pool was full and is still waiting when the pool
-// closes is dropped the same way. When every group is full, the next messages
-// wait unanswered in the client buffers, so the sender's ACK times out, and
-// they are still handled once the groups have room.
-//
-// accepted is called at most once, and only when the job is queued or about to
-// be; the caller makes the job wait for it (the queue group callback does so
-// with ackDone), since on the first try a worker may pick the job up before
-// accepted runs. SubmitFanOutToPool returns true when the pool accepted the
-// job.
-func SubmitFanOutToPool(pool *workerpool.Pool, logger types.Logger, reporter *overloadReporter, job workerpool.Job, accepted func()) bool {
-	err := pool.Submit(job, false)
-	if errors.Is(err, workerpool.ErrOverloaded) {
-		// Acknowledge before waiting: the message will be handled, and a
-		// sender waiting for room in the slowest group would time out and
-		// send it again to every group.
-		accepted()
-		accepted = func() {}
-		err = pool.Submit(job, true)
-	}
-	switch {
-	case err == nil:
-		accepted()
-		return true
-	case errors.Is(err, workerpool.ErrClosed):
-		reporter.drop(pool)
-	default:
-		logger.Error("Failed to submit message to worker pool", reporter.withFields("error", err)...)
 	}
 	return false
 }
@@ -1405,10 +1371,7 @@ func (lm *lifecycleManager) setupNATSSubscriptions(ctx context.Context) error {
 
 			case types.ServiceTypeQueueGroup:
 				// Create NATS queue group subscription
-				// Iterate over all queue group handler pairs. With more than
-				// one pair every group receives every message and answers the
-				// same inbox, so no group may reject it (SubmitFanOutToPool).
-				fanOut := len(entry.QueueHandlers) > 1
+				// Iterate over all queue group handler pairs
 				for _, pair := range entry.QueueHandlers {
 					queueGroup := pair.QueueGroup
 					handler := pair.Handler
@@ -1421,6 +1384,13 @@ func (lm *lifecycleManager) setupNATSSubscriptions(ctx context.Context) error {
 					// serial unless the pair opted in to concurrency.
 					pool := lm.newPool(pair.Options, false, logger, modName, "queue_group", serviceName, queueGroup)
 					reporter := newOverloadReporter(logger, "service", serviceName, "queueGroup", queueGroup)
+					if len(entry.QueueHandlers) > 1 {
+						// Every group receives every message, and the sender is
+						// told the message was delivered when any group accepted
+						// it (queueGroupClient), so this group's rejection would
+						// otherwise go unnoticed.
+						reporter.RejectMessage = QueueGroupFanOutRejectMessage
+					}
 
 					sub, err := eventBus.QueueSubscribe(entry.Subject, queueGroup, func(reqCtx context.Context, msg *types.Msg) {
 						// Hand the message to the pool first: the ACK means
@@ -1436,7 +1406,7 @@ func (lm *lifecycleManager) setupNATSSubscriptions(ctx context.Context) error {
 						// of a failed ACK.
 						ackDone := make(chan struct{})
 						var skip atomic.Bool
-						job := func() {
+						accepted := submitToPool(pool, eventBus, logger, reporter, msg, func() {
 							<-ackDone
 							if skip.Load() {
 								return
@@ -1445,30 +1415,24 @@ func (lm *lifecycleManager) setupNATSSubscriptions(ctx context.Context) error {
 								logger.Error("QueueGroup handler error",
 									append([]any{"service", serviceName, "module", modName, "queueGroup", queueGroup, "subject", msg.Subject}, handlerErrorFields(err)...)...)
 							}
-						}
-						// ack sends the framework's ACK (the handler sends
-						// none) before processing completes
-						// (fire-and-forget semantics) and releases the job.
-						ack := func() {
-							defer close(ackDone)
-							if msg.Reply == "" {
-								return // optimistic publish: nothing to ACK
-							}
-							if pubErr := eventBus.Publish(msg.Reply, []byte{}); pubErr != nil {
-								skip.Store(true)
-								logger.Error("Failed to send ACK for QueueGroup message; handler skipped so the re-sent message is not handled twice",
-									"service", serviceName,
-									"queueGroup", queueGroup,
-									"error", pubErr)
-							}
-						}
-						if fanOut {
-							SubmitFanOutToPool(pool, logger, reporter, job, ack)
+						})
+						if !accepted {
 							return
 						}
-						if submitToPool(pool, eventBus, logger, reporter, msg, job) {
-							ack()
+						if msg.Reply == "" {
+							close(ackDone) // optimistic publish: nothing to ACK
+							return
 						}
+
+						// Send ACK before processing completes (fire-and-forget semantics)
+						if pubErr := eventBus.Publish(msg.Reply, []byte{}); pubErr != nil {
+							skip.Store(true)
+							logger.Error("Failed to send ACK for QueueGroup message; handler skipped so the re-sent message is not handled twice",
+								"service", serviceName,
+								"queueGroup", queueGroup,
+								"error", pubErr)
+						}
+						close(ackDone)
 					})
 					if err != nil {
 						return fmt.Errorf("failed to queue subscribe to %s (queue: %s): %w", entry.Subject, queueGroup, err)

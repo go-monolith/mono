@@ -417,27 +417,36 @@ func TestWorkerPool_QueueGroupOverloadReportedToSender(t *testing.T) {
 	}
 }
 
-// TestWorkerPool_QueueGroupFanOutFullGroup checks that a queue group service
-// with several groups is not reported as overloaded while one group's pool is
-// full: every send returns nil and every group handles every message. Before,
-// the sender kept whichever group answered first, and got ErrServiceOverloaded
-// for messages the fast group had handled, or nil for messages the full group
-// dropped (issue #89).
+// TestWorkerPool_QueueGroupFanOutFullGroup checks how Send reports a queue
+// group service with several groups while one or every group's pool is full
+// (issue #89). Before, the sender kept whichever group answered first, and got
+// ErrServiceOverloaded for messages the fast group had handled.
+//
+// Send delivers a message when any group accepted it: with one full group
+// every send returns nil and the fast group handles every message, while the
+// full group rejects its share. With every group full, Send returns
+// ErrServiceOverloaded at once.
 func TestWorkerPool_QueueGroupFanOutFullGroup(t *testing.T) {
 	fw := newWorkerPoolApp(t)
 
 	const sends = 20
 	release := make(chan struct{})
 	var fast, slow atomic.Int32
+	var fastBlocked atomic.Bool
+	fastRelease := make(chan struct{})
 	worker := &testModule{name: "pool-fanout"}
 	worker.registerServicesFunc = func(container mono.ServiceContainer) error {
 		return container.RegisterQueueGroupService("record",
 			mono.QGHP{
 				QueueGroup: "fast-workers",
 				Handler: func(_ context.Context, _ *mono.Msg) error {
+					if fastBlocked.Load() {
+						<-fastRelease
+					}
 					fast.Add(1)
 					return nil
 				},
+				Options: mono.ServiceOptions{MaxConcurrency: 1, MaxPending: 1},
 			},
 			mono.QGHP{
 				QueueGroup: "slow-workers",
@@ -454,9 +463,11 @@ func TestWorkerPool_QueueGroupFanOutFullGroup(t *testing.T) {
 		t.Fatalf("Failed to register module: %v", err)
 	}
 	startWorkerPoolApp(t, fw)
-	var releaseOnce sync.Once
+	var releaseOnce, fastOnce sync.Once
 	releaseSlow := func() { releaseOnce.Do(func() { close(release) }) }
+	releaseFast := func() { fastOnce.Do(func() { close(fastRelease) }) }
 	defer releaseSlow()
+	defer releaseFast()
 
 	client, err := worker.container.GetQueueGroupService("record")
 	if err != nil {
@@ -464,19 +475,93 @@ func TestWorkerPool_QueueGroupFanOutFullGroup(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
+
+	// One group full: every send is delivered.
 	for i := range sends {
 		if err := client.Send(ctx, []byte(strconv.Itoa(i))); err != nil {
 			t.Fatalf("send %d while the slow group is full: %v", i, err)
 		}
+		// Let the fast group finish, so that only the slow group is full.
+		for deadline := time.Now().Add(5 * time.Second); fast.Load() < int32(i+1) && time.Now().Before(deadline); {
+			time.Sleep(time.Millisecond)
+		}
+	}
+	if fast.Load() != sends {
+		t.Fatalf("fast group handled %d, want %d", fast.Load(), sends)
 	}
 
+	// Every group full: rejected at once.
+	fastBlocked.Store(true)
+	var lastErr error
+	for i := range 4 {
+		sendCtx, sendCancel := context.WithTimeout(ctx, 5*time.Second)
+		started := time.Now()
+		lastErr = client.Send(sendCtx, []byte("full-"+strconv.Itoa(i)))
+		sendCancel()
+		if lastErr != nil {
+			if waited := time.Since(started); waited > 2*time.Second {
+				t.Fatalf("rejection took %v, want an immediate answer", waited)
+			}
+			break
+		}
+	}
+	if !errors.Is(lastErr, monoerrors.ErrServiceOverloaded) {
+		t.Fatalf("send with every group full: %v, want ErrServiceOverloaded", lastErr)
+	}
+
+	releaseFast()
 	releaseSlow()
+	// The slow group handles only what it accepted (its pool's share).
 	deadline := time.Now().Add(10 * time.Second)
-	for (fast.Load() < sends || slow.Load() < sends) && time.Now().Before(deadline) {
+	for slow.Load() < 2 && time.Now().Before(deadline) {
 		time.Sleep(10 * time.Millisecond)
 	}
-	if fast.Load() != sends || slow.Load() != sends {
-		t.Fatalf("handled fast=%d slow=%d, want %d in each group", fast.Load(), slow.Load(), sends)
+	if got := slow.Load(); got < 2 || got >= sends {
+		t.Fatalf("slow group handled %d, want its pool's share (at least 2, fewer than %d)", got, sends)
+	}
+}
+
+// TestWorkerPool_QueueGroupFanOutNoResponders checks that a send to a queue
+// group service with several groups that no instance subscribes to yet fails
+// with ErrServiceUnavailable at once, through the inbox the client reads the
+// groups' answers from (NATS answers it with a "no responders" status).
+func TestWorkerPool_QueueGroupFanOutNoResponders(t *testing.T) {
+	fw := newWorkerPoolApp(t)
+
+	var sendErr error
+	var waited time.Duration
+	worker := &testModule{name: "pool-fanout-early"}
+	handler := func(_ context.Context, _ *mono.Msg) error { return nil }
+	worker.registerServicesFunc = func(container mono.ServiceContainer) error {
+		return container.RegisterQueueGroupService("record",
+			mono.QGHP{QueueGroup: "a", Handler: handler},
+			mono.QGHP{QueueGroup: "b", Handler: handler},
+		)
+	}
+	// Services are subscribed after every module started, so a send from
+	// Start finds no subscriber.
+	worker.startFunc = func(ctx context.Context) error {
+		client, err := worker.container.GetQueueGroupService("record")
+		if err != nil {
+			return err
+		}
+		sendCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		defer cancel()
+		started := time.Now()
+		sendErr = client.Send(sendCtx, []byte("early"))
+		waited = time.Since(started)
+		return nil
+	}
+	if err := fw.Register(worker); err != nil {
+		t.Fatalf("Failed to register module: %v", err)
+	}
+	startWorkerPoolApp(t, fw)
+
+	if !errors.Is(sendErr, monoerrors.ErrServiceUnavailable) {
+		t.Fatalf("send without subscribers: %v, want ErrServiceUnavailable", sendErr)
+	}
+	if waited > 2*time.Second {
+		t.Fatalf("send without subscribers waited %v, want an immediate answer", waited)
 	}
 }
 

@@ -202,8 +202,10 @@ type TypedStreamConsumerHandler[T any] func(ctx context.Context, payloads []T, m
 // instance's framework sends an empty ACK once the queue group accepted the
 // message, before the handler runs. The handler never acknowledges it, and its
 // error is logged, never returned to the sender. A service with several queue
-// groups delivers every message to every group and never rejects one, so a
-// send to it does not return ErrServiceOverloaded.
+// groups delivers every message to every group; a send to it returns nil when
+// any group accepted the message and ErrServiceOverloaded only when every
+// group rejected it (a group that rejected it does not handle it and logs a
+// warning).
 type QueueGroupServiceClient interface {
 	// Send sends a message payload to the queue group and waits for ACK.
 	// Returns ErrServiceUnavailable if no handlers are online.

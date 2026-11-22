@@ -455,14 +455,18 @@ func TestWorkerPool_QueueGroupOverloadReply(t *testing.T) {
 		t.Fatal("rejected message must not be ACKed")
 	}
 	requireErrorReply(t, eventBus, "ack-3", types.ErrorTypeOverloaded)
+	// A service with one queue group keeps the plain warning.
+	if !logger.hasWarnContaining("Messages rejected: worker pool and pending queue are full") || logger.hasWarnContaining(QueueGroupFanOutRejectMessage) {
+		t.Fatal("a service with one queue group must log the plain rejection warning")
+	}
 }
 
-// TestWorkerPool_QueueGroupFanOutNeverRejects checks that a queue group
-// service with several groups answers every message with an ACK from every
-// group, also when one group's pool is full: the full group holds the message
-// back and handles it later instead of rejecting it, so its answer cannot
-// contradict the ACK of a group that accepted the message (issue #89).
-func TestWorkerPool_QueueGroupFanOutNeverRejects(t *testing.T) {
+// TestWorkerPool_QueueGroupFanOutRejectionWarns checks that a full queue group
+// of a service with several queue groups still rejects a message, and that the
+// rejection is logged with a warning saying that the sender may have been told
+// the message was delivered: the client returns nil when another group
+// accepted it (issue #89), so the log is the only trace of this group's share.
+func TestWorkerPool_QueueGroupFanOutRejectionWarns(t *testing.T) {
 	logger := &mockLogger{}
 	reg := registry.NewModuleRegistry(logger)
 	pluginReg := registry.NewPluginRegistry(logger)
@@ -471,44 +475,26 @@ func TestWorkerPool_QueueGroupFanOutNeverRejects(t *testing.T) {
 	lm := NewLifecycleManager(reg, pluginReg, eventBus, eventRegistry, logger, 0)
 
 	release := make(chan struct{})
-	var releaseOnce sync.Once
-	releaseSlow := func() { releaseOnce.Do(func() { close(release) }) }
-	slowStarted := make(chan struct{}, 8)
-	var mu sync.Mutex
-	handled := map[string][]string{}
-	record := func(group string, msg *types.Msg) {
-		mu.Lock()
-		defer mu.Unlock()
-		handled[group] = append(handled[group], string(msg.Data))
-	}
+	started := make(chan struct{}, 8)
 	serviceModule := &mockModuleWithQueueGroupServices{
 		mockModule: mockModule{name: "qg-module"},
-		serviceEntries: []*types.ServiceEntry{
-			{
-				Name:    "qg-service",
-				Type:    types.ServiceTypeQueueGroup,
-				Subject: "services.qg-module.qg-service",
-				QueueHandlers: []types.QGHP{
-					{
-						QueueGroup: "fast",
-						Handler: func(ctx context.Context, msg *types.Msg) error {
-							record("fast", msg)
-							return nil
-						},
+		serviceEntries: []*types.ServiceEntry{{
+			Name:    "qg-service",
+			Type:    types.ServiceTypeQueueGroup,
+			Subject: "services.qg-module.qg-service",
+			QueueHandlers: []types.QGHP{
+				{QueueGroup: "fast", Handler: func(context.Context, *types.Msg) error { return nil }},
+				{
+					QueueGroup: "slow",
+					Handler: func(context.Context, *types.Msg) error {
+						started <- struct{}{}
+						<-release
+						return nil
 					},
-					{
-						QueueGroup: "slow",
-						Handler: func(ctx context.Context, msg *types.Msg) error {
-							slowStarted <- struct{}{}
-							<-release
-							record("slow", msg)
-							return nil
-						},
-						Options: types.ServiceOptions{MaxConcurrency: 1, MaxPending: 1},
-					},
+					Options: types.ServiceOptions{MaxConcurrency: 1, MaxPending: 1},
 				},
 			},
-		},
+		}},
 	}
 	if err := reg.Register(serviceModule); err != nil {
 		t.Fatalf("Failed to register module: %v", err)
@@ -517,84 +503,28 @@ func TestWorkerPool_QueueGroupFanOutNeverRejects(t *testing.T) {
 		t.Fatalf("Start failed: %v", err)
 	}
 	defer func() { _ = lm.Stop(context.Background()) }()
-	defer releaseSlow() // before Stop, which waits for the slow handler
+	defer close(release) // before Stop, which waits for the slow handler
 
 	handlers := eventBus.getHandlers("services.qg-module.qg-service")
 	if len(handlers) != 2 {
 		t.Fatalf("expected 2 handlers, got %d", len(handlers))
 	}
-	fast, slow := handlers[0], handlers[1]
-	// deliver hands a message to both groups, as NATS does.
-	deliver := func(id string) (slowReturned chan struct{}) {
-		msg := func() *types.Msg {
-			return &types.Msg{Subject: "services.qg-module.qg-service", Reply: "ack-" + id, Data: []byte(id)}
-		}
-		fast(context.Background(), msg())
-		slowReturned = make(chan struct{})
-		go func() {
-			defer close(slowReturned)
-			slow(context.Background(), msg())
-		}()
-		return slowReturned
+	slow := handlers[1]
+	send := func(reply string) {
+		slow(context.Background(), &types.Msg{Subject: "services.qg-module.qg-service", Reply: reply, Data: []byte("m")})
 	}
-
-	// within fails the test when ch is not closed in time, so a callback that
-	// blocks fails instead of hanging the test.
-	within := func(ch <-chan struct{}, what string) {
-		t.Helper()
-		select {
-		case <-ch:
-		case <-time.After(2 * time.Second):
-			t.Fatalf("%s did not return", what)
-		}
-	}
-
-	within(deliver("1"), "message 1")
+	send("ack-1")
 	select {
-	case <-slowStarted:
+	case <-started:
 	case <-time.After(2 * time.Second):
 		t.Fatal("slow handler did not start")
 	}
-	within(deliver("2"), "message 2") // queued in the slow group
-	third := deliver("3")
+	send("ack-2")
+	send("ack-3")
 
-	// The slow group is full: it ACKs the third message at once and holds it
-	// back instead of answering overloaded.
-	deadline := time.Now().Add(2 * time.Second)
-	for len(eventBus.getPublishedMessages("ack-3")) < 2 && time.Now().Before(deadline) {
-		time.Sleep(5 * time.Millisecond)
-	}
-	for _, id := range []string{"1", "2", "3"} {
-		// An ACK is an empty Publish; an error answer is a PublishMsg.
-		if acks := eventBus.getPublishedMessages("ack-" + id); len(acks) != 2 {
-			t.Fatalf("message %s: %d ACKs, want one from each group", id, len(acks))
-		}
-		if errs := eventBus.getPublishedMsgs("ack-" + id); len(errs) != 0 {
-			t.Fatalf("message %s: %d error answers, want none", id, len(errs))
-		}
-	}
-	select {
-	case <-third:
-		t.Fatal("the full group should wait for room, not drop the message")
-	default:
-	}
-
-	releaseSlow()
-	within(third, "message 3 after the slow group got room")
-	deadline = time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		mu.Lock()
-		done := len(handled["slow"]) == 3
-		mu.Unlock()
-		if done {
-			break
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
-	mu.Lock()
-	defer mu.Unlock()
-	if len(handled["fast"]) != 3 || len(handled["slow"]) != 3 {
-		t.Fatalf("handled %v, want every message in both groups", handled)
+	requireErrorReply(t, eventBus, "ack-3", types.ErrorTypeOverloaded)
+	if !logger.hasWarnContaining(QueueGroupFanOutRejectMessage) {
+		t.Fatalf("no warning %q was logged", QueueGroupFanOutRejectMessage)
 	}
 }
 
@@ -904,76 +834,4 @@ func TestNewPool_PanicInJobIsLoggedAndPoolSurvives(t *testing.T) {
 		t.Fatalf("pools recorded for orders = %d, want 1", n)
 	}
 	_ = pool.Close(context.Background())
-}
-
-// TestWorkerPool_QueueGroupFanOutACKAndOptimistic checks the two other paths
-// of a queue group service with several groups: a group whose ACK cannot be
-// published skips the handler (the sender re-sends), and a message without a
-// reply subject (optimistic publish mode) is handled by every group and
-// answered by none.
-func TestWorkerPool_QueueGroupFanOutACKAndOptimistic(t *testing.T) {
-	logger := &mockLogger{}
-	reg := registry.NewModuleRegistry(logger)
-	pluginReg := registry.NewPluginRegistry(logger)
-	eventBus := newMockEventBus()
-	eventRegistry := registry.NewEventRegistry(logger)
-	lm := NewLifecycleManager(reg, pluginReg, eventBus, eventRegistry, logger, 0)
-
-	handled := make(chan string, 8)
-	pair := func(group string) types.QGHP {
-		return types.QGHP{QueueGroup: group, Handler: func(ctx context.Context, msg *types.Msg) error {
-			handled <- group + ":" + string(msg.Data)
-			return nil
-		}}
-	}
-	serviceModule := &mockModuleWithQueueGroupServices{
-		mockModule: mockModule{name: "qg-module"},
-		serviceEntries: []*types.ServiceEntry{{
-			Name:          "qg-service",
-			Type:          types.ServiceTypeQueueGroup,
-			Subject:       "services.qg-module.qg-service",
-			QueueHandlers: []types.QGHP{pair("a"), pair("b")},
-		}},
-	}
-	if err := reg.Register(serviceModule); err != nil {
-		t.Fatalf("Failed to register module: %v", err)
-	}
-	if err := lm.Start(context.Background()); err != nil {
-		t.Fatalf("Start failed: %v", err)
-	}
-	defer func() { _ = lm.Stop(context.Background()) }()
-
-	handlers := eventBus.getHandlers("services.qg-module.qg-service")
-	if len(handlers) != 2 {
-		t.Fatalf("expected 2 handlers, got %d", len(handlers))
-	}
-	deliver := func(reply, data string) {
-		for _, h := range handlers {
-			h(context.Background(), &types.Msg{Subject: "services.qg-module.qg-service", Reply: reply, Data: []byte(data)})
-		}
-	}
-
-	// Optimistic publish: handled by both groups, nothing published.
-	deliver("", "optimistic")
-	got := map[string]bool{}
-	for range 2 {
-		select {
-		case h := <-handled:
-			got[h] = true
-		case <-time.After(2 * time.Second):
-			t.Fatalf("handled %v, want both groups", got)
-		}
-	}
-	if !got["a:optimistic"] || !got["b:optimistic"] {
-		t.Fatalf("handled %v, want both groups", got)
-	}
-
-	// Failed ACK: both groups skip the handler.
-	eventBus.setPublishError(errors.New("connection closed"))
-	deliver("ack-failed", "skipped")
-	select {
-	case h := <-handled:
-		t.Fatalf("handler ran (%s) although its ACK was not sent", h)
-	case <-time.After(200 * time.Millisecond):
-	}
 }

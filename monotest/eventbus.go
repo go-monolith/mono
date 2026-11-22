@@ -116,9 +116,24 @@ func (b *EventBus) PublishMsg(msg *types.Msg) error {
 	if msg.Subject == "" {
 		return fmt.Errorf("monotest: message subject cannot be empty")
 	}
-	_, err := b.deliver(msg)
+	n, err := b.deliver(msg)
+	if err != nil || n > 0 || msg.Reply == "" {
+		return err
+	}
+	// Like the NATS server, answer a message with a reply subject that
+	// nobody receives with a "no responders" status on that reply subject,
+	// which a sync subscription reports as ErrServiceUnavailable.
+	_, err = b.deliver(&types.Msg{Subject: msg.Reply, Header: types.Header{NoRespondersStatusHeader: []string{NoRespondersStatus}}})
 	return err
 }
+
+// NoRespondersStatusHeader and NoRespondersStatus are the header and value of
+// the status message the bus sends to the reply subject of a message nobody
+// receives, as the NATS server does ("Status: 503").
+const (
+	NoRespondersStatusHeader = "Status"
+	NoRespondersStatus       = "503"
+)
 
 // Request publishes data on subject with a reply inbox and waits up to timeout
 // for the reply.
@@ -179,7 +194,9 @@ func (b *EventBus) Subscribe(subject string, handler types.MsgHandler) (types.Su
 
 // SubscribeSync creates a subscription read with NextMsg.
 func (b *EventBus) SubscribeSync(subject string) (types.Subscription, error) {
-	return b.subscribe(subject, "", nil, false)
+	// A reply inbox (a queue group client reading every group's answer) is
+	// not recorded in Subscribed, like the inboxes of requests.
+	return b.subscribe(subject, "", nil, strings.HasPrefix(subject, "_INBOX."))
 }
 
 // QueueSubscribe delivers each message on subject to one member of queue.
@@ -463,12 +480,12 @@ func (s *subscription) NextMsgWithContext(ctx context.Context) (*types.Msg, erro
 	}
 	select {
 	case msg := <-s.queueCh:
-		return msg, nil
+		return noRespondersError(msg)
 	default:
 	}
 	select {
 	case msg := <-s.queueCh:
-		return msg, nil
+		return noRespondersError(msg)
 	case <-s.done:
 		return nil, fmt.Errorf("monotest: subscription closed")
 	case <-ctx.Done():
@@ -488,3 +505,12 @@ func (s *subscription) Dropped() (int, error) { return int(s.dropped.Load()), ni
 
 // Delivered implements types.SubscriptionStatsReader.
 func (s *subscription) Delivered() (int64, error) { return s.delivered.Load(), nil }
+
+// noRespondersError turns a "no responders" status message into an error
+// wrapping ErrServiceUnavailable, as nats.go does for a sync subscription.
+func noRespondersError(msg *types.Msg) (*types.Msg, error) {
+	if msg != nil && len(msg.Data) == 0 && msg.Header.Get(NoRespondersStatusHeader) == NoRespondersStatus {
+		return nil, fmt.Errorf("%w: no responders available for request", monoerrors.ErrServiceUnavailable)
+	}
+	return msg, nil
+}
