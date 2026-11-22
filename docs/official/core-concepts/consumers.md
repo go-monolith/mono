@@ -191,6 +191,8 @@ func (m *OrderModule) createOrder(ctx context.Context, order *Order) error {
 
 Fire-and-forget event consumption via standard NATS subscriptions. Use it for real-time notifications and other events where occasional loss is acceptable.
 
+There is nothing to acknowledge: a NATS Core event is never redelivered, so `msg.Ack()` and `Nak()` do nothing here, and the handler's error is only logged. See [Who Acknowledges a Message](../api/container.md#who-acknowledges-a-message).
+
 ### Typed Handler (recommended)
 
 Import the emitter's contract package and register with `helper.RegisterTypedEventConsumer`. The payload arrives already unmarshaled:
@@ -385,7 +387,7 @@ func (m *AuditModule) handleOrderEvents(ctx context.Context, msgs []*mono.Msg) e
 
 ### Message Acknowledgment
 
-JetStream consumers must explicitly acknowledge messages:
+Event stream consumer handlers acknowledge their messages themselves; the framework does not acknowledge them for them (unlike cron services, whose occurrences the framework acknowledges automatically, see [Who Acknowledges a Message](../api/container.md#who-acknowledges-a-message)):
 
 | Method | Effect |
 |--------|--------|

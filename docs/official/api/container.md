@@ -35,6 +35,22 @@ func Unregister(name string) error
 
 The framework binds the container to the module before calling `RegisterServices`; do not call `BindModule`, `SetEventBus`, `SetMiddlewareChain`, `SetQueueGroupOptimisticWindow` or `StartChannelRouters` yourself.
 
+### Who Acknowledges a Message
+
+Some kinds of service are acknowledged by the framework, others by the handler. A handler must not acknowledge a message the framework acknowledges.
+
+| Service | Acknowledged by | What the sender or the server is told | What the handler's return value does |
+|---------|-----------------|----------------------------------------|--------------------------------------|
+| Channel | Nobody | Nothing | The handler owns error handling |
+| Request-reply | The framework: it publishes the handler's response, or an error reply, to the caller | The answer itself | Returned to the caller |
+| Queue group | The framework: an empty ACK to the sender, sent automatically once the queue group accepted the message and **before the handler runs** | "Accepted for processing", not "handled" | Logged only, never sent to the sender |
+| Event consumer (NATS Core) | Nobody | Nothing | Logged only |
+| Stream consumer | The handler: `msg.Ack()`, `Nak()`, `NakWithDelay()`, `Term()` or `InProgress()` | The JetStream server, which redelivers what is not acknowledged | Logged only |
+| Event stream consumer | The handler, as for stream consumers | The JetStream server | Logged only |
+| Cron | The framework, automatically: Ack when the handler returns `nil`, Nak on an error or a recovered panic | The JetStream server | Decides Ack or Nak |
+
+`Ack()`, `Nak()` and the other acknowledgement methods act only on JetStream messages. On a request-reply, queue group or event consumer message they do nothing and return `nil`: these are NATS Core messages, which are never redelivered.
+
 ## Typed Service Contracts
 
 Since v0.1.0, `pkg/helper` provides typed contracts that wrap the registration and lookup methods below. Declare one per service in the provider's `contract` package:
@@ -200,7 +216,7 @@ Registers a queue group service with one or more handler pairs for load-balanced
 **QGHP Structure:**
 ```go
 type QGHP struct {
-    QueueGroup string            // Queue group name (e.g., "high-priority-workers")
+    QueueGroup string            // Queue group name (e.g., "audit-writers")
     Handler    QueueGroupHandler // Handler function for this queue group
     Options    ServiceOptions    // Worker pool bounds for this queue group (zero = defaults)
 }
@@ -236,14 +252,30 @@ func (m *AuditModule) handleAuditLog(ctx context.Context, msg *mono.Msg) error {
 }
 ```
 
-**Multiple queue groups on one service:**
+**Acknowledgement (automatic):** the framework, not the handler, acknowledges each message.
+- With `Send` in ACK mode (the default), it sends the sender an empty ACK as soon as the queue group's worker pool accepted the message, and then runs the handler. `Send` returns once that ACK arrives.
+- The ACK means "accepted for processing". The handler's error is logged, never sent to the sender, and the message is not delivered again.
+- No ACK at all means that no instance subscribes to the service. `Send` then returns `ErrServiceUnavailable`.
+- Calling `msg.Ack()` or `Nak()` in the handler has no effect. See [Who Acknowledges a Message](#who-acknowledges-a-message).
+
+**Multiple queue groups on one service (fan-out):** every queue group receives every message, and within a group one instance handles it. Use several groups when different handlers must all process each message, for example writing an audit record and updating a search index:
 ```go
-// Multiple handlers for different processing priorities
-container.RegisterQueueGroupService("process-orders",
-    mono.QGHP{QueueGroup: "high-priority", Handler: m.handleHighPriority},
-    mono.QGHP{QueueGroup: "low-priority", Handler: m.handleLowPriority},
+container.RegisterQueueGroupService("order-placed",
+    mono.QGHP{QueueGroup: "audit-writers", Handler: m.writeAuditRecord},
+    mono.QGHP{QueueGroup: "search-indexers", Handler: m.indexOrder},
 )
 ```
+
+Every group answers the same `Send`: an ACK, or a rejection when its worker pool is full or it is shutting down. A message counts as delivered when **one** group has received it:
+- **Any ACK:** `Send` returns `nil` as soon as it arrives, whichever group answered first. The client reads every group's answer from its own inbox instead of taking the first one.
+- **Every group rejected it:** `Send` returns the rejection, `ErrServiceOverloaded` (full) or `ErrServiceUnavailable` (shutting down), as soon as each group has answered.
+- **Some groups rejected it and the others did not answer** (no instance of them online): `Send` returns the rejection 250ms after the first one (`FanOutRejectionGrace`; a group answers as soon as it receives a message), or earlier when the context ends.
+- **No instance subscribes at all:** `Send` returns `ErrServiceUnavailable` at once, as for one group.
+- **A group that rejects a message does not handle it**, although `Send` returned `nil` because another group did. Nothing tells the sender; the rejecting instance logs a warning (`Messages rejected by one queue group of a service with several`, at most once per second per group with the count, `queueGroup` naming the group). Size the pools of a fan-out service for the burst of its slowest group, or use a stream consumer service when every handler must get every message.
+- **Cost:** in ACK mode each send to such a service subscribes and unsubscribes an inbox of its own (a service with one group uses the connection's shared request inbox). The inbox follows a `nats.CustomInboxPrefix` set through `WithNATSClientOptions`.
+- **The sender counts the groups of its own registration.** During a deploy that adds a queue group, a sender whose registration has fewer groups stops reading once those have rejected the message, and may return `ErrServiceOverloaded` while the new group accepts it; a retry then handles it there twice.
+
+Up to v0.2.22 `Send` kept whichever answer came first, so it returned `ErrServiceOverloaded` for a message another group had handled, and a retry handled it there twice.
 
 ### RegisterStreamConsumerService
 
@@ -807,15 +839,18 @@ Gets a client for sending messages to a registered queue group service, or an er
 **Client Interface:**
 ```go
 type QueueGroupServiceClient interface {
-    // Send sends a message payload to the queue group and waits for ACK.
+    // Send sends a message payload to the queue group and waits for the
+    // framework's ACK (sent automatically, before the handler runs).
     // Returns ErrServiceUnavailable if no handlers are online.
     Send(ctx context.Context, data []byte) error
 
-    // SendMsg sends a raw message to the queue group and waits for ACK.
-    // Returns ErrServiceUnavailable if no handlers are online.
+    // SendMsg sends a raw message to the queue group and waits for the
+    // framework's ACK. Returns ErrServiceUnavailable if no handlers are online.
     SendMsg(ctx context.Context, msg *Msg) error
 }
 ```
+
+`Send` returns `nil` once the message was accepted (by one group, for a service with several). The handler's result never reaches the sender. See [RegisterQueueGroupService](#registerqueuegroupservice) for what the ACK means and how a service with several queue groups answers.
 
 **Example:**
 ```go
@@ -998,7 +1033,8 @@ container.RegisterQueueGroupService("send-notification",
 | Message | Behaviour |
 |---------|-----------|
 | Request-reply call | Answered at once with an error the caller sees as `errors.ErrServiceOverloaded`. The request was not handled; retry, ideally on another instance. |
-| Queue group `Send` (ACK mode) | `Send` returns `ErrServiceOverloaded` instead of an ACK. The message was not handled. |
+| Queue group `Send` (ACK mode), service with one queue group | `Send` returns `ErrServiceOverloaded` instead of an ACK. The message was not handled. |
+| Queue group `Send` (ACK mode), service with several queue groups | The full group rejects the message and logs a warning. `Send` returns `nil` when another group accepted it, and `ErrServiceOverloaded` when every group rejected it (see [RegisterQueueGroupService](#registerqueuegroupservice)). |
 | Queue group send in optimistic publish mode, event | Not rejected: the subscription waits for a free slot (back-pressure through the NATS client buffer). |
 
 **The NATS client buffer behind the pool:** messages wait there before the subscription callback hands them to the pool.

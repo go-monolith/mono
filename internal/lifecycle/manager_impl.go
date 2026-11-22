@@ -563,10 +563,13 @@ const overloadLogInterval = time.Second
 // overloadLogInterval per subscription, with the number affected since the
 // previous line.
 type overloadReporter struct {
-	logger   types.Logger
-	fields   []any
-	lastLog  atomic.Int64 // unix nanoseconds of the last line written
-	rejected atomic.Int64 // rejected or dropped since the last line
+	logger types.Logger
+	fields []any
+	// RejectMessage replaces the warning written for rejected messages
+	// when set (a queue group of a service with several queue groups).
+	RejectMessage string
+	lastLog       atomic.Int64 // unix nanoseconds of the last line written
+	rejected      atomic.Int64 // rejected or dropped since the last line
 
 	lastExpiredLog atomic.Int64 // unix nanoseconds of the last expired-requests line
 	expired        atomic.Int64 // expired requests dropped since that line
@@ -594,10 +597,21 @@ func (r *overloadReporter) withFields(extra ...any) []any {
 	return append(fields, extra...)
 }
 
+// QueueGroupFanOutRejectMessage is the warning written, at most once per
+// second with the count, when one queue group of a service with several queue
+// groups rejects messages because its worker pool and pending queue are full.
+// The sender's Send returns nil when another group accepted the message, so
+// this line is the only trace that this group did not handle it.
+const QueueGroupFanOutRejectMessage = "Messages rejected by one queue group of a service with several: worker pool and pending queue are full; this group does not handle them, and the sender is told they were delivered when another group accepted them"
+
 // reject records one rejected message and writes the warning when due.
 func (r *overloadReporter) reject(pool *workerpool.Pool) {
 	r.rejectedTotal.Add(1)
-	r.report("Messages rejected: worker pool and pending queue are full", pool, "rejected")
+	msg := "Messages rejected: worker pool and pending queue are full"
+	if r.RejectMessage != "" {
+		msg = r.RejectMessage
+	}
+	r.report(msg, pool, "rejected")
 }
 
 // drop records one message dropped because it was delivered after the pool
@@ -1370,6 +1384,13 @@ func (lm *lifecycleManager) setupNATSSubscriptions(ctx context.Context) error {
 					// serial unless the pair opted in to concurrency.
 					pool := lm.newPool(pair.Options, false, logger, modName, "queue_group", serviceName, queueGroup)
 					reporter := newOverloadReporter(logger, "service", serviceName, "queueGroup", queueGroup)
+					if len(entry.QueueHandlers) > 1 {
+						// Every group receives every message, and the sender is
+						// told the message was delivered when any group accepted
+						// it (queueGroupClient), so this group's rejection would
+						// otherwise go unnoticed.
+						reporter.RejectMessage = QueueGroupFanOutRejectMessage
+					}
 
 					sub, err := eventBus.QueueSubscribe(entry.Subject, queueGroup, func(reqCtx context.Context, msg *types.Msg) {
 						// Hand the message to the pool first: the ACK means

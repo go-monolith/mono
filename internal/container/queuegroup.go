@@ -7,6 +7,9 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/nats-io/nats.go"
+	"github.com/nats-io/nuid"
+
 	monoerrors "github.com/go-monolith/mono/pkg/errors"
 	"github.com/go-monolith/mono/pkg/types"
 )
@@ -15,8 +18,15 @@ import (
 //
 // QueueGroup services provide asynchronous message processing using NATS queue groups.
 // Multiple handler pairs can be registered for a single service, each with its own queue group.
-// All handlers share the same subject, and messages are load-balanced within each queue group
-// (one handler per queue group processes each message).
+// All handlers share the same subject: every queue group receives every message (fan-out),
+// and within a queue group one instance processes it (load balancing).
+//
+// The framework acknowledges each message automatically: it sends the sender an
+// empty ACK once the queue group accepted the message, before the handler runs.
+// The handler's error is logged and never reaches the sender. With more than
+// one queue group, a send is delivered when any group accepted it: Send
+// returns nil on the first ACK and a rejection only when every group rejected
+// the message. A group that rejected it does not handle it and logs a warning.
 //
 // Parameters:
 //   - name: Service name (must be kebab-case)
@@ -30,17 +40,17 @@ import (
 //
 // Example:
 //
-//	highHandler := func(ctx context.Context, msg *types.Msg) error {
-//	    // Process high-priority messages
+//	auditHandler := func(ctx context.Context, msg *types.Msg) error {
+//	    // Write an audit record for every placed order
 //	    return nil
 //	}
-//	lowHandler := func(ctx context.Context, msg *types.Msg) error {
-//	    // Process low-priority messages
+//	indexHandler := func(ctx context.Context, msg *types.Msg) error {
+//	    // Update the search index for every placed order
 //	    return nil
 //	}
-//	err := container.RegisterQueueGroupService("process-order",
-//	    types.QGHP{QueueGroup: "high-priority-workers", Handler: highHandler},
-//	    types.QGHP{QueueGroup: "low-priority-workers", Handler: lowHandler},
+//	err := container.RegisterQueueGroupService("order-placed",
+//	    types.QGHP{QueueGroup: "audit-writers", Handler: auditHandler},
+//	    types.QGHP{QueueGroup: "search-indexers", Handler: indexHandler},
 //	)
 func (c *serviceContainer) RegisterQueueGroupService(name string, pairs ...types.QGHP) error {
 	// Validate at least one pair
@@ -125,6 +135,8 @@ func (c *serviceContainer) GetQueueGroupService(name string) (types.QueueGroupSe
 		middlewareChain:  c.middlewareChain,
 		serviceName:      name,
 		moduleName:       entry.ModuleName,
+		groups:           len(entry.QueueHandlers),
+		logger:           c.logger,
 	}, nil
 }
 
@@ -138,6 +150,8 @@ type queueGroupClient struct {
 	middlewareChain   types.MiddlewareChainRunner
 	serviceName       string
 	moduleName        string
+	groups            int // queue groups (QGHP pairs) of the service; each answers a send
+	logger            types.Logger
 }
 
 // ensureContextDeadline ensures the context has a deadline, applying the default timeout if needed.
@@ -231,18 +245,7 @@ func (c *queueGroupClient) sendInternal(ctx context.Context, data []byte) error 
 	}
 
 	// Slow path: request with ACK (the deadline was applied above)
-	// Use request-reply to wait for ACK with headers
-	ack, err := c.eventBus.RequestMsgWithContext(ctx, msg)
-	if err != nil {
-		// Wrap context deadline exceeded errors with timeout error
-		if errors.Is(err, context.DeadlineExceeded) {
-			return monoerrors.WrapTimeout("queue-group", WaitedSince(started), err)
-		}
-		// ErrServiceUnavailable is already wrapped by eventbus.RequestWithContext
-		// when nats.ErrNoResponders occurs
-		return err
-	}
-	if err := c.checkACK(ack); err != nil {
+	if err := c.requestACK(ctx, msg, started); err != nil {
 		return err
 	}
 
@@ -251,6 +254,119 @@ func (c *queueGroupClient) sendInternal(ctx context.Context, data []byte) error 
 
 	return nil
 }
+
+// requestACK sends msg in ACK mode and waits for its acknowledgement.
+//
+// A service with one queue group answers once, so the first answer is the
+// outcome. With several queue groups every group receives the message and
+// answers the same inbox, and a full group rejects it while another accepts it
+// (requestFanOutACK).
+func (c *queueGroupClient) requestACK(ctx context.Context, msg *types.Msg, started time.Time) error {
+	if c.groups > 1 {
+		return c.requestFanOutACK(ctx, msg, started)
+	}
+	ack, err := c.eventBus.RequestMsgWithContext(ctx, msg)
+	if err != nil {
+		// ErrServiceUnavailable is already wrapped by the event bus when
+		// nats.ErrNoResponders occurs.
+		return c.requestError(err, started)
+	}
+	return c.checkACK(ack)
+}
+
+// requestError wraps a context deadline exceeded error with a timeout error
+// that names the time waited; other errors are returned unchanged.
+func (c *queueGroupClient) requestError(err error, started time.Time) error {
+	if errors.Is(err, context.DeadlineExceeded) {
+		return monoerrors.WrapTimeout("queue-group", WaitedSince(started), err)
+	}
+	return err
+}
+
+// requestFanOutACK sends msg to a service with several queue groups and reads
+// the groups' answers from its own inbox: the send is delivered when any group
+// has accepted it. It returns nil on the first ACK. A rejection (overloaded,
+// shutting down) is kept while other groups may still accept: it is returned
+// when every group rejected the message, or when the context ends after one
+// did. No subscriber at all is ErrServiceUnavailable, as for one group.
+//
+// Taking the first answer instead, as for one group, made the outcome depend
+// on which group answered first: ErrServiceOverloaded for a message another
+// group had handled (a retry handled it there twice), or nil for a message a
+// full group rejected. The latter remains (the message counts as delivered),
+// and the rejecting group logs QueueGroupFanOutRejectMessage at Warn.
+func (c *queueGroupClient) requestFanOutACK(ctx context.Context, msg *types.Msg, started time.Time) error {
+	inbox := c.newInbox()
+	sub, err := c.eventBus.SubscribeSync(inbox)
+	if err != nil {
+		return fmt.Errorf("queue group service %q: subscribe to the ACK inbox: %w", c.serviceName, err)
+	}
+	defer func() {
+		// Nothing is left to read, so the outcome stands; a failed
+		// unsubscribe (the connection closed) is only worth a debug line.
+		if err := sub.Unsubscribe(); err != nil && c.logger != nil {
+			c.logger.Debug("Failed to unsubscribe the queue group ACK inbox", "service", c.serviceName, "error", err)
+		}
+	}()
+
+	out := &types.Msg{Subject: msg.Subject, Reply: inbox, Data: msg.Data, Header: msg.Header}
+	if err := c.eventBus.PublishMsg(out); err != nil {
+		return fmt.Errorf("queue group service %q: send: %w", c.serviceName, err)
+	}
+
+	var rejection error
+	waitCtx := ctx
+	for range c.groups {
+		ans, err := sub.NextMsgWithContext(waitCtx)
+		if err != nil {
+			if rejection != nil {
+				return rejection
+			}
+			if errors.Is(err, nats.ErrNoResponders) || errors.Is(err, monoerrors.ErrServiceUnavailable) {
+				return monoerrors.WrapServiceUnavailable(c.serviceName, c.moduleName, types.ServiceTypeQueueGroup, err)
+			}
+			return c.requestError(err, started)
+		}
+		ackErr := c.checkACK(ans)
+		if ackErr == nil {
+			return nil
+		}
+		if rejection == nil {
+			rejection = ackErr
+			// The groups answer as soon as they receive the message, so
+			// one that has not answered within the grace has no instance
+			// online: do not hold the rejection until the context ends.
+			var cancel context.CancelFunc
+			waitCtx, cancel = context.WithTimeout(ctx, FanOutRejectionGrace)
+			defer cancel()
+		}
+	}
+	return rejection
+}
+
+// FanOutRejectionGrace is how long a send to a service with several queue
+// groups waits, after the first rejection, for the other groups' answers. A
+// group answers as soon as it receives the message (it never waits for its
+// pool), so a group that has not answered by then has no instance online, and
+// the rejection is returned instead of a timeout at the end of the context.
+const FanOutRejectionGrace = 250 * time.Millisecond
+
+// newInbox returns a new reply inbox: one of the NATS connection when the
+// event bus has one (it honours a nats.CustomInboxPrefix set through
+// WithNATSClientOptions), otherwise one under FanOutInboxPrefix.
+func (c *queueGroupClient) newInbox() string {
+	if withConn, ok := c.eventBus.(types.EventBusWithConn[*nats.Conn]); ok {
+		if conn := withConn.Conn(); conn != nil {
+			return conn.NewInbox()
+		}
+	}
+	return FanOutInboxPrefix + nuid.Next()
+}
+
+// FanOutInboxPrefix is the prefix of the inbox a send to a service with
+// several queue groups reads the groups' answers from when the event bus has
+// no NATS connection (the default inbox prefix of nats.go).
+const FanOutInboxPrefix = "_INBOX."
 
 // checkACK inspects the acknowledgement of a send. The handling instance
 // answers with an error response instead of an empty ACK when it rejected the
@@ -332,16 +448,7 @@ func (c *queueGroupClient) sendInternalMsg(ctx context.Context, msg *types.Msg) 
 	}
 
 	// Slow path: request with ACK (the deadline was applied above)
-	// Use request-reply to wait for ACK with headers
-	ack, err := c.eventBus.RequestMsgWithContext(ctx, fullMsg)
-	if err != nil {
-		// Wrap context deadline exceeded errors with timeout error
-		if errors.Is(err, context.DeadlineExceeded) {
-			return monoerrors.WrapTimeout("queue-group", WaitedSince(started), err)
-		}
-		return err
-	}
-	if err := c.checkACK(ack); err != nil {
+	if err := c.requestACK(ctx, fullMsg, started); err != nil {
 		return err
 	}
 
@@ -359,11 +466,14 @@ func (c *queueGroupClient) sendInternalMsg(ctx context.Context, msg *types.Msg) 
 // Errors returned indicate:
 //   - Service unavailable (no handlers online, or the handling instance is shutting down)
 //   - Service overloaded (the handling instance's worker pool and pending queue are full;
-//     the message was not handled and may be re-sent)
+//     the message was not handled and may be re-sent). For a service with several
+//     queue groups, only when every group rejected the message: Send returns nil
+//     when any group accepted it.
 //   - Timeout waiting for ACK
 //   - Context cancellation
 //
-// Handler processing errors do NOT propagate to the sender as processing
+// The ACK is sent by the framework automatically, before the handler runs;
+// handler processing errors do NOT propagate to the sender as processing
 // happens asynchronously after ACK.
 //
 // Example:
@@ -392,7 +502,9 @@ func (c *queueGroupClient) Send(ctx context.Context, data []byte) error {
 // Errors returned indicate:
 //   - Service unavailable (no handlers online, or the handling instance is shutting down)
 //   - Service overloaded (the handling instance's worker pool and pending queue are full;
-//     the message was not handled and may be re-sent)
+//     the message was not handled and may be re-sent). For a service with several
+//     queue groups, only when every group rejected the message: Send returns nil
+//     when any group accepted it.
 //   - Timeout waiting for ACK
 //   - Context cancellation
 //

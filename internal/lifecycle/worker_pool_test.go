@@ -455,6 +455,77 @@ func TestWorkerPool_QueueGroupOverloadReply(t *testing.T) {
 		t.Fatal("rejected message must not be ACKed")
 	}
 	requireErrorReply(t, eventBus, "ack-3", types.ErrorTypeOverloaded)
+	// A service with one queue group keeps the plain warning.
+	if !logger.hasWarnContaining("Messages rejected: worker pool and pending queue are full") || logger.hasWarnContaining(QueueGroupFanOutRejectMessage) {
+		t.Fatal("a service with one queue group must log the plain rejection warning")
+	}
+}
+
+// TestWorkerPool_QueueGroupFanOutRejectionWarns checks that a full queue group
+// of a service with several queue groups still rejects a message, and that the
+// rejection is logged with a warning saying that the sender may have been told
+// the message was delivered: the client returns nil when another group
+// accepted it (issue #89), so the log is the only trace of this group's share.
+func TestWorkerPool_QueueGroupFanOutRejectionWarns(t *testing.T) {
+	logger := &mockLogger{}
+	reg := registry.NewModuleRegistry(logger)
+	pluginReg := registry.NewPluginRegistry(logger)
+	eventBus := newMockEventBus()
+	eventRegistry := registry.NewEventRegistry(logger)
+	lm := NewLifecycleManager(reg, pluginReg, eventBus, eventRegistry, logger, 0)
+
+	release := make(chan struct{})
+	started := make(chan struct{}, 8)
+	serviceModule := &mockModuleWithQueueGroupServices{
+		mockModule: mockModule{name: "qg-module"},
+		serviceEntries: []*types.ServiceEntry{{
+			Name:    "qg-service",
+			Type:    types.ServiceTypeQueueGroup,
+			Subject: "services.qg-module.qg-service",
+			QueueHandlers: []types.QGHP{
+				{QueueGroup: "fast", Handler: func(context.Context, *types.Msg) error { return nil }},
+				{
+					QueueGroup: "slow",
+					Handler: func(context.Context, *types.Msg) error {
+						started <- struct{}{}
+						<-release
+						return nil
+					},
+					Options: types.ServiceOptions{MaxConcurrency: 1, MaxPending: 1},
+				},
+			},
+		}},
+	}
+	if err := reg.Register(serviceModule); err != nil {
+		t.Fatalf("Failed to register module: %v", err)
+	}
+	if err := lm.Start(context.Background()); err != nil {
+		t.Fatalf("Start failed: %v", err)
+	}
+	defer func() { _ = lm.Stop(context.Background()) }()
+	defer close(release) // before Stop, which waits for the slow handler
+
+	handlers := eventBus.getHandlers("services.qg-module.qg-service")
+	if len(handlers) != 2 {
+		t.Fatalf("expected 2 handlers, got %d", len(handlers))
+	}
+	slow := handlers[1]
+	send := func(reply string) {
+		slow(context.Background(), &types.Msg{Subject: "services.qg-module.qg-service", Reply: reply, Data: []byte("m")})
+	}
+	send("ack-1")
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("slow handler did not start")
+	}
+	send("ack-2")
+	send("ack-3")
+
+	requireErrorReply(t, eventBus, "ack-3", types.ErrorTypeOverloaded)
+	if !logger.hasWarnContaining(QueueGroupFanOutRejectMessage) {
+		t.Fatalf("no warning %q was logged", QueueGroupFanOutRejectMessage)
+	}
 }
 
 // TestWorkerPool_EventConsumerBackPressure checks that an event (no reply

@@ -332,6 +332,16 @@ See [A Request Always Gets a Reply](error-handling.md#a-request-always-gets-a-re
 - **Now:** the server is not given the file's path and answers a reload with "can only reload config when a file is provided using -c or --config". The configuration takes effect at start only; restart the application to change it.
 - **nats-server's own start-up line** `Using configuration file: <path>` (shown only with server logging on) is no longer written; the framework logs the path at start (`NATS config file loaded`).
 
+### A send to a queue group service with several queue groups is delivered when one group received it (v0.2.23)
+
+*v0.2.23.* Every queue group of a service (each `QGHP` pair) receives every message, and the framework of each group answers the same `Send`: an ACK, or a rejection when its worker pool is full. `Send` kept the first answer.
+
+- **What went wrong:** `Send` returned `ErrServiceOverloaded` for a message another group had handled, so a retry handled it there twice; which answer came first was a matter of timing.
+- **Now:** `Send` reads every group's answer and returns `nil` when any group accepted the message. It returns `ErrServiceOverloaded` only when every group rejected it, and `ErrServiceUnavailable` when no instance subscribes, as before.
+- **A group that rejects a message still does not handle it**, although `Send` returned `nil`. The rejecting instance logs the warning `Messages rejected by one queue group of a service with several` (at most once per second per group, with the count). Watch for it, or size the pools for the slowest group.
+- **Unchanged:** services with one queue group, the optimistic publish mode, and the handler, which never acknowledges a queue group message: the framework ACKs it automatically, before the handler runs (see [Who Acknowledges a Message](../api/container.md#who-acknowledges-a-message)).
+- **During a rolling upgrade** a sender on an earlier version still keeps the first answer. A sender counts the queue groups of its own registration, so while a deploy adds a group, a sender with fewer groups can still report `ErrServiceOverloaded` for a message the new group accepted.
+
 ## New Features
 
 All optional.

@@ -166,7 +166,7 @@ type TypedQueueGroupHandler[T any] func(ctx context.Context, payload T, msg *Msg
 // Multiple pairs can be registered for a single service, allowing different
 // queue groups to process messages from the same subject.
 type QGHP struct {
-	QueueGroup string            // Queue group name (e.g., "high-priority-workers")
+	QueueGroup string            // Queue group name (e.g., "audit-writers")
 	Handler    QueueGroupHandler // Handler function for this queue group
 	// Options bounds the worker pool of this queue group's subscription on
 	// this instance. Queue groups are serial by default (MaxConcurrency 0
@@ -178,7 +178,7 @@ type QGHP struct {
 // TypedQGHP associates a queue group name with a typed handler.
 // This is the generic version of QGHP for use with RegisterTypedQueueGroupService.
 type TypedQGHP[T any] struct {
-	QueueGroup string                    // Queue group name (e.g., "high-priority-workers")
+	QueueGroup string                    // Queue group name (e.g., "audit-writers")
 	Handler    TypedQueueGroupHandler[T] // Typed handler function for this queue group
 	// Options bounds the worker pool of this queue group's subscription on
 	// this instance; see QGHP.Options.
@@ -197,6 +197,15 @@ type StreamConsumerHandler func(ctx context.Context, msgs []*Msg) error
 type TypedStreamConsumerHandler[T any] func(ctx context.Context, payloads []T, msgs []*Msg) error
 
 // QueueGroupServiceClient sends fire-and-forget messages to queue group.
+//
+// The framework acknowledges each message automatically: the receiving
+// instance's framework sends an empty ACK once the queue group accepted the
+// message, before the handler runs. The handler never acknowledges it, and its
+// error is logged, never returned to the sender. A service with several queue
+// groups delivers every message to every group; a send to it returns nil when
+// any group accepted the message and ErrServiceOverloaded only when every
+// group rejected it (a group that rejected it does not handle it and logs a
+// warning).
 type QueueGroupServiceClient interface {
 	// Send sends a message payload to the queue group and waits for ACK.
 	// Returns ErrServiceUnavailable if no handlers are online.
