@@ -417,6 +417,69 @@ func TestWorkerPool_QueueGroupOverloadReportedToSender(t *testing.T) {
 	}
 }
 
+// TestWorkerPool_QueueGroupFanOutFullGroup checks that a queue group service
+// with several groups is not reported as overloaded while one group's pool is
+// full: every send returns nil and every group handles every message. Before,
+// the sender kept whichever group answered first, and got ErrServiceOverloaded
+// for messages the fast group had handled, or nil for messages the full group
+// dropped (issue #89).
+func TestWorkerPool_QueueGroupFanOutFullGroup(t *testing.T) {
+	fw := newWorkerPoolApp(t)
+
+	const sends = 20
+	release := make(chan struct{})
+	var fast, slow atomic.Int32
+	worker := &testModule{name: "pool-fanout"}
+	worker.registerServicesFunc = func(container mono.ServiceContainer) error {
+		return container.RegisterQueueGroupService("record",
+			mono.QGHP{
+				QueueGroup: "fast-workers",
+				Handler: func(_ context.Context, _ *mono.Msg) error {
+					fast.Add(1)
+					return nil
+				},
+			},
+			mono.QGHP{
+				QueueGroup: "slow-workers",
+				Handler: func(_ context.Context, _ *mono.Msg) error {
+					<-release
+					slow.Add(1)
+					return nil
+				},
+				Options: mono.ServiceOptions{MaxConcurrency: 1, MaxPending: 1},
+			},
+		)
+	}
+	if err := fw.Register(worker); err != nil {
+		t.Fatalf("Failed to register module: %v", err)
+	}
+	startWorkerPoolApp(t, fw)
+	var releaseOnce sync.Once
+	releaseSlow := func() { releaseOnce.Do(func() { close(release) }) }
+	defer releaseSlow()
+
+	client, err := worker.container.GetQueueGroupService("record")
+	if err != nil {
+		t.Fatalf("Failed to get client: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	for i := range sends {
+		if err := client.Send(ctx, []byte(strconv.Itoa(i))); err != nil {
+			t.Fatalf("send %d while the slow group is full: %v", i, err)
+		}
+	}
+
+	releaseSlow()
+	deadline := time.Now().Add(10 * time.Second)
+	for (fast.Load() < sends || slow.Load() < sends) && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if fast.Load() != sends || slow.Load() != sends {
+		t.Fatalf("handled fast=%d slow=%d, want %d in each group", fast.Load(), slow.Load(), sends)
+	}
+}
+
 // TestWorkerPool_DefaultServiceConcurrencyOne checks that
 // WithDefaultServiceConcurrency(1) restores serial handling for every
 // subscription that does not set its own MaxConcurrency.

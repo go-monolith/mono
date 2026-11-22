@@ -294,7 +294,7 @@ if err != nil {
 - ✓ Horizontal scalability
 - ✓ Good latency (message queued quickly)
 - ✓ Serial and in order by default; can opt in to a bounded worker pool per queue group
-- ✗ No response (fire-and-forget)
+- ✗ No response (fire-and-forget): the framework ACKs each message automatically once it is accepted, before the handler runs, and the handler's result never reaches the sender
 - ✗ No persistence
 - ✗ Error handling limited (worker processes independently)
 
@@ -312,7 +312,7 @@ container.RegisterQueueGroupService("send-notification",
 )
 ```
 
-When the pool and its pending queue are full, `Send` in ACK mode returns `ErrServiceOverloaded` (the message was not accepted); a send in optimistic publish mode is held back until a slot frees instead of being dropped. See [Handler Concurrency](../api/container.md#handler-concurrency-worker-pools).
+When the pool and its pending queue are full, `Send` in ACK mode returns `ErrServiceOverloaded` (the message was not accepted); a send in optimistic publish mode is held back until a slot frees instead of being dropped. A service with several queue groups never rejects a message: every group receives it, and a full group ACKs it and handles it once it has room. See [Handler Concurrency](../api/container.md#handler-concurrency-worker-pools) and [RegisterQueueGroupService](../api/container.md#registerqueuegroupservice).
 
 ---
 

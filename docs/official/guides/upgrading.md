@@ -332,6 +332,15 @@ See [A Request Always Gets a Reply](error-handling.md#a-request-always-gets-a-re
 - **Now:** the server is not given the file's path and answers a reload with "can only reload config when a file is provided using -c or --config". The configuration takes effect at start only; restart the application to change it.
 - **nats-server's own start-up line** `Using configuration file: <path>` (shown only with server logging on) is no longer written; the framework logs the path at start (`NATS config file loaded`).
 
+### A queue group service with several queue groups never rejects a message (v0.2.23)
+
+*v0.2.23.* Every queue group of a service (each `QGHP` pair) receives every message, and the framework of each group answers the same `Send` with its ACK. `Send` keeps the first answer. A group whose worker pool was full answered with an overloaded error instead.
+
+- **What went wrong:** `Send` returned `ErrServiceOverloaded` for a message another group had handled, so a retry handled it there twice. It also returned `nil` for a message the full group had dropped.
+- **Now:** with more than one queue group, a full group sends its ACK at once and handles the message once it has room. The subscription waits meanwhile, so that group's backlog builds up in its NATS client buffer. `Send` to such a service no longer returns `ErrServiceOverloaded`; it still returns `ErrServiceUnavailable` when no instance subscribes. When every group is full, `Send` may time out instead, and the message is still handled later.
+- **Unchanged:** a service with one queue group still rejects when its pool is full. The handler still never acknowledges a queue group message: the framework ACKs it automatically, before the handler runs (see [Who Acknowledges a Message](../api/container.md#who-acknowledges-a-message)).
+- **During a rolling upgrade** an instance of an earlier version still rejects. The fix is complete once every instance runs v0.2.23.
+
 ## New Features
 
 All optional.

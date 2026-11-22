@@ -15,8 +15,14 @@ import (
 //
 // QueueGroup services provide asynchronous message processing using NATS queue groups.
 // Multiple handler pairs can be registered for a single service, each with its own queue group.
-// All handlers share the same subject, and messages are load-balanced within each queue group
-// (one handler per queue group processes each message).
+// All handlers share the same subject: every queue group receives every message (fan-out),
+// and within a queue group one instance processes it (load balancing).
+//
+// The framework acknowledges each message automatically: it sends the sender an
+// empty ACK once the queue group accepted the message, before the handler runs.
+// The handler's error is logged and never reaches the sender. A service with
+// more than one queue group never rejects a message (a full group ACKs it and
+// handles it once it has room), so every group's answer is an ACK.
 //
 // Parameters:
 //   - name: Service name (must be kebab-case)
@@ -30,17 +36,17 @@ import (
 //
 // Example:
 //
-//	highHandler := func(ctx context.Context, msg *types.Msg) error {
-//	    // Process high-priority messages
+//	auditHandler := func(ctx context.Context, msg *types.Msg) error {
+//	    // Write an audit record for every placed order
 //	    return nil
 //	}
-//	lowHandler := func(ctx context.Context, msg *types.Msg) error {
-//	    // Process low-priority messages
+//	indexHandler := func(ctx context.Context, msg *types.Msg) error {
+//	    // Update the search index for every placed order
 //	    return nil
 //	}
-//	err := container.RegisterQueueGroupService("process-order",
-//	    types.QGHP{QueueGroup: "high-priority-workers", Handler: highHandler},
-//	    types.QGHP{QueueGroup: "low-priority-workers", Handler: lowHandler},
+//	err := container.RegisterQueueGroupService("order-placed",
+//	    types.QGHP{QueueGroup: "audit-writers", Handler: auditHandler},
+//	    types.QGHP{QueueGroup: "search-indexers", Handler: indexHandler},
 //	)
 func (c *serviceContainer) RegisterQueueGroupService(name string, pairs ...types.QGHP) error {
 	// Validate at least one pair
@@ -359,11 +365,14 @@ func (c *queueGroupClient) sendInternalMsg(ctx context.Context, msg *types.Msg) 
 // Errors returned indicate:
 //   - Service unavailable (no handlers online, or the handling instance is shutting down)
 //   - Service overloaded (the handling instance's worker pool and pending queue are full;
-//     the message was not handled and may be re-sent)
+//     the message was not handled and may be re-sent). Only for a service with one
+//     queue group: with several, every group receives every message and a full
+//     group ACKs it and handles it once it has room.
 //   - Timeout waiting for ACK
 //   - Context cancellation
 //
-// Handler processing errors do NOT propagate to the sender as processing
+// The ACK is sent by the framework automatically, before the handler runs;
+// handler processing errors do NOT propagate to the sender as processing
 // happens asynchronously after ACK.
 //
 // Example:
@@ -392,7 +401,9 @@ func (c *queueGroupClient) Send(ctx context.Context, data []byte) error {
 // Errors returned indicate:
 //   - Service unavailable (no handlers online, or the handling instance is shutting down)
 //   - Service overloaded (the handling instance's worker pool and pending queue are full;
-//     the message was not handled and may be re-sent)
+//     the message was not handled and may be re-sent). Only for a service with one
+//     queue group: with several, every group receives every message and a full
+//     group ACKs it and handles it once it has room.
 //   - Timeout waiting for ACK
 //   - Context cancellation
 //

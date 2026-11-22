@@ -95,7 +95,7 @@ func (m *OrderModule) handleGetOrder(ctx context.Context, req *GetOrderRequest) 
 
 ### Queue Group Handlers
 
-Queue group handlers use fire-and-forget semantics: errors are **not** returned to the sender. The framework logs a returned error at Error level (`QueueGroup handler error`), so add context to the error rather than logging it again:
+Queue group handlers use fire-and-forget semantics: errors are **not** returned to the sender. The framework ACKs each message automatically once it is accepted, before the handler runs, so `Send` has returned by the time the handler fails, and the message is not delivered again. The framework logs a returned error at Error level (`QueueGroup handler error`), so add context to the error rather than logging it again:
 
 ```go
 func (m *OrderModule) handleProcessOrder(ctx context.Context, order *Order) error {
@@ -146,7 +146,7 @@ Recovery is a safety net, not a substitute for returning errors; a handler that 
 
 ### Overloaded Services
 
-Request-reply, queue group and event consumer handlers run on a bounded worker pool per subscription (request-reply pools several workers by default; queue groups and event consumers have one worker unless they opt in). When every worker is busy and the pending queue is full, a request-reply call or an ACK-mode queue group send fails fast with `ErrServiceOverloaded` instead of waiting. The message was **not** handled, so the caller may retry; with several instances the retry usually lands on one with capacity.
+Request-reply, queue group and event consumer handlers run on a bounded worker pool per subscription (request-reply pools several workers by default; queue groups and event consumers have one worker unless they opt in). When every worker is busy and the pending queue is full, a request-reply call or an ACK-mode queue group send fails fast with `ErrServiceOverloaded` instead of waiting (except a queue group service with several queue groups, see below). The message was **not** handled, so the caller may retry; with several instances the retry usually lands on one with capacity.
 
 ```go
 resp, err := client.Call(ctx, data)
@@ -156,7 +156,7 @@ if errors.Is(err, monoerrors.ErrServiceOverloaded) {
 }
 ```
 
-Events and optimistic queue group sends are not rejected: the subscription waits for a free slot instead. An event is never rejected, also when it carries a reply subject (one published with `EventStream().Publish` does). See [Handler Concurrency](../api/container.md#handler-concurrency-worker-pools) for the options.
+Events, optimistic queue group sends and sends to a queue group service with several queue groups are not rejected: the subscription waits for a free slot instead (every group gets every message, and a rejection by one group could contradict the ACK of another). An event is never rejected, also when it carries a reply subject (one published with `EventStream().Publish` does). See [Handler Concurrency](../api/container.md#handler-concurrency-worker-pools) for the options.
 
 ## Handling Framework Errors
 
