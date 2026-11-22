@@ -342,6 +342,10 @@ See [A Request Always Gets a Reply](error-handling.md#a-request-always-gets-a-re
 - **Unchanged:** services with one queue group, the optimistic publish mode, and the handler, which never acknowledges a queue group message: the framework ACKs it automatically, before the handler runs (see [Who Acknowledges a Message](../api/container.md#who-acknowledges-a-message)).
 - **During a rolling upgrade** a sender on an earlier version still keeps the first answer. A sender counts the queue groups of its own registration, so while a deploy adds a group, a sender with fewer groups can still report `ErrServiceOverloaded` for a message the new group accepted.
 
+### Other fixes in v0.2.24
+
+- **Duplicate stream consumer durable names:** the stream planner now validates with `CheckStreamConsumers` that no two registrations (stream consumer services or event stream consumers) on the same stream produce the same consumer durable name (for example, module `order` with service `events-sync` and module `order-events` with service `sync`). Registrations with duplicate consumer durable names fail `Start` at once with an error wrapping `monoerrors.ErrInvalidConfiguration` before any NATS consumer is declared. To recover, rename one of the two registrations so it receives a distinct durable name (which starts from its deliver policy; with the default policy, existing stream messages may be delivered again). The obsolete consumer must be removed manually with `nats consumer rm <stream> <consumer>`, as the framework never deletes consumers automatically.
+
 ## New Features
 
 All optional.
