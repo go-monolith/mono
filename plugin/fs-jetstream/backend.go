@@ -107,7 +107,7 @@ func (b *JetStreamBackend) BucketName() string {
 // GetWithContext gets the value for the given key with a context.
 // Returns nil, nil when the key does not exist.
 func (b *JetStreamBackend) GetWithContext(ctx context.Context, key string) ([]byte, error) {
-	result, err := b.store.Get(ctx, key)
+	result, err := b.store.Get(readContext(ctx), key)
 	if err != nil {
 		if errors.Is(err, jetstream.ErrObjectNotFound) {
 			return nil, nil // Key not found returns nil, nil per storage.Storage contract
@@ -274,7 +274,7 @@ func (b *JetStreamBackend) Stat(key string) (*storage.ObjectInfo, error) {
 
 // GetReaderWithContext retrieves an object as a reader (for large files).
 func (b *JetStreamBackend) GetReaderWithContext(ctx context.Context, key string) (io.ReadCloser, *storage.ObjectInfo, error) {
-	result, err := b.store.Get(ctx, key)
+	result, err := b.store.Get(readContext(ctx), key)
 	if err != nil {
 		if errors.Is(err, jetstream.ErrObjectNotFound) {
 			return nil, nil, fmt.Errorf("%w: %s", storage.ErrKeyNotFound, key)
@@ -339,6 +339,30 @@ func (b *JetStreamBackend) PutReader(key string, reader io.Reader, exp time.Dura
 // =============================================================================
 // Helper Functions
 // =============================================================================
+
+// unboundedReadContext wraps a context that has no deadline so that
+// nats.go's ObjectStore.Get does not cap the entire read at its 5s default
+// API timeout via wrapContextWithoutDeadline.
+type unboundedReadContext struct {
+	context.Context
+}
+
+func (c unboundedReadContext) Deadline() (time.Time, bool) {
+	if d, ok := c.Context.Deadline(); ok {
+		return d, true
+	}
+	return time.Now().Add(100 * 365 * 24 * time.Hour), true
+}
+
+func readContext(ctx context.Context) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if _, ok := ctx.Deadline(); ok {
+		return ctx
+	}
+	return unboundedReadContext{Context: ctx}
+}
 
 // convertToStorageObjectInfo converts JetStream ObjectInfo to storage.ObjectInfo.
 func convertToStorageObjectInfo(info *jetstream.ObjectInfo) *storage.ObjectInfo {

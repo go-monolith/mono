@@ -1403,3 +1403,155 @@ func TestJetStreamBackend_GetReaderWithContext_NotFound(t *testing.T) {
 		t.Errorf("expected ErrKeyNotFound, got: %v", err)
 	}
 }
+
+// TestJetStreamBackend_GetReader_UnboundedContextDoesNotTimeout reproduces finding from issue #89:
+// reads given a context without a deadline must not be capped at nats.go default 5s API timeout.
+func TestJetStreamBackend_GetReader_UnboundedContextDoesNotTimeout(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping slow read test in short mode")
+	}
+	_, js := setupTestNATSWithJetStream(t)
+
+	config := BucketConfig{
+		Name:     "test-bucket",
+		Storage:  MemoryStorage,
+		Replicas: 1,
+	}
+
+	os := createTestObjectStore(t, js, config)
+	backend := NewJetStreamBackend("test-bucket", os, 0, testLogger())
+
+	// 1 MiB payload
+	payload := make([]byte, 1024*1024)
+	for i := range payload {
+		payload[i] = byte(i % 251)
+	}
+
+	err := backend.Set("large-file.bin", payload, 0)
+	if err != nil {
+		t.Fatalf("Set failed: %v", err)
+	}
+
+	// Read with context without deadline (GetReader passes context.Background())
+	reader, info, err := backend.GetReader("large-file.bin")
+	if err != nil {
+		t.Fatalf("GetReader failed: %v", err)
+	}
+	defer reader.Close()
+
+	if info.Size != int64(len(payload)) {
+		t.Fatalf("expected size %d, got %d", len(payload), info.Size)
+	}
+
+	// Read chunks slowly exceeding nats.go default 5s API timeout
+	chunk := make([]byte, 64*1024)
+	totalRead := 0
+	start := time.Now()
+	for {
+		n, rerr := reader.Read(chunk)
+		if n > 0 {
+			totalRead += n
+		}
+		if rerr == io.EOF {
+			break
+		}
+		if rerr != nil {
+			t.Fatalf("Read failed after reading %d bytes and %v: %v", totalRead, time.Since(start), rerr)
+		}
+		// Sleep 500ms between chunks while under 6 seconds so total reading time exceeds 5s
+		if time.Since(start) < 6*time.Second {
+			time.Sleep(500 * time.Millisecond)
+		}
+	}
+
+	if totalRead != len(payload) {
+		t.Fatalf("expected to read %d bytes, got %d", len(payload), totalRead)
+	}
+}
+
+// TestJetStreamBackend_GetReaderWithContext_RespectsCancellation tests that
+// context cancellation is immediately respected when reading.
+func TestJetStreamBackend_GetReaderWithContext_RespectsCancellation(t *testing.T) {
+	_, js := setupTestNATSWithJetStream(t)
+
+	config := BucketConfig{
+		Name:     "test-bucket",
+		Storage:  MemoryStorage,
+		Replicas: 1,
+	}
+
+	os := createTestObjectStore(t, js, config)
+	backend := NewJetStreamBackend("test-bucket", os, 0, testLogger())
+
+	payload := make([]byte, 512*1024)
+	err := backend.Set("cancel-file.bin", payload, 0)
+	if err != nil {
+		t.Fatalf("Set failed: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	reader, _, err := backend.GetReaderWithContext(ctx, "cancel-file.bin")
+	if err != nil {
+		t.Fatalf("GetReaderWithContext failed: %v", err)
+	}
+	defer reader.Close()
+
+	// Read first chunk
+	chunk := make([]byte, 64*1024)
+	n, err := reader.Read(chunk)
+	if err != nil || n == 0 {
+		t.Fatalf("expected to read first chunk, got %d bytes, err: %v", n, err)
+	}
+
+	// Cancel context
+	cancel()
+
+	// Subsequent read must fail with context.Canceled
+	_, err = reader.Read(chunk)
+	if err == nil {
+		// Might take one more read to detect cancellation in pipe
+		_, err = reader.Read(chunk)
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context.Canceled, got: %v", err)
+	}
+}
+
+// TestJetStreamBackend_GetReaderWithContext_RespectsExplicitDeadline tests that
+// a context with an explicit deadline is preserved and respected.
+func TestJetStreamBackend_GetReaderWithContext_RespectsExplicitDeadline(t *testing.T) {
+	_, js := setupTestNATSWithJetStream(t)
+
+	config := BucketConfig{
+		Name:     "test-bucket",
+		Storage:  MemoryStorage,
+		Replicas: 1,
+	}
+
+	os := createTestObjectStore(t, js, config)
+	backend := NewJetStreamBackend("test-bucket", os, 0, testLogger())
+
+	payload := make([]byte, 512*1024)
+	err := backend.Set("deadline-file.bin", payload, 0)
+	if err != nil {
+		t.Fatalf("Set failed: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+
+	reader, _, err := backend.GetReaderWithContext(ctx, "deadline-file.bin")
+	if err != nil {
+		t.Fatalf("GetReaderWithContext failed: %v", err)
+	}
+	defer reader.Close()
+
+	// Wait for deadline to expire
+	time.Sleep(300 * time.Millisecond)
+
+	chunk := make([]byte, 64*1024)
+	_, err = reader.Read(chunk)
+	if err == nil {
+		t.Fatal("expected error after context deadline exceeded, got nil")
+	}
+}
