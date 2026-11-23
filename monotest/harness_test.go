@@ -465,6 +465,11 @@ func (m *mismatchContractModule) RegisterServices(c types.ServiceContainer) erro
 	})
 }
 
+// stubNoRegistrarContainer embeds types.ServiceContainer but does not implement types.ContractRegistrar.
+type stubNoRegistrarContainer struct {
+	types.ServiceContainer
+}
+
 func TestContainerImplementsContractRegistrar(t *testing.T) {
 	bus := monotest.NewEventBus()
 	c := monotest.NewContainer("inventory", bus)
@@ -482,7 +487,7 @@ func TestContainerImplementsContractRegistrar(t *testing.T) {
 	}
 	entries := c.Entries()
 	if len(entries) != 1 || entries[0].Contract == nil || *entries[0].Contract != checkStock.ToBase() {
-		t.Fatalf("expected contract to be recorded on entry, got %+v", entries[0])
+		t.Fatalf("expected contract to be recorded on entry, got %+v", entries)
 	}
 
 	// Direct call to RegisterContract with a mismatched module fails.
@@ -507,5 +512,12 @@ func TestContainerImplementsContractRegistrar(t *testing.T) {
 	rec := runCheck(t, &mismatchContractModule{})
 	if !rec.fatal || !rec.has("rule 8: Start failed") || !strings.Contains(strings.Join(rec.errors, " "), "service contract mismatch") {
 		t.Fatalf("expected CheckModule to fail with contract mismatch, got %v", rec.errors)
+	}
+
+	// Calling RegisterContract on a container whose inner container does not implement
+	// types.ContractRegistrar fails loudly.
+	cNoRegistrar := &monotest.Container{ServiceContainer: &stubNoRegistrarContainer{}}
+	if err := cNoRegistrar.RegisterContract(checkStock.ToBase()); err == nil {
+		t.Fatal("expected error when inner container does not implement types.ContractRegistrar, got nil")
 	}
 }
