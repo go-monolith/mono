@@ -477,15 +477,20 @@ func convertToStorageEntry(entry jetstream.KeyValueEntry) *storage.Entry {
 	}
 }
 
-// jetStreamErrCodeWrongLastSequence is the NATS JetStream API error code
-// for "wrong last sequence" errors, indicating a revision mismatch.
-const jetStreamErrCodeWrongLastSequence = 10071
+// NATS JetStream API error codes indicating a revision mismatch (wrong last sequence):
+// - 10071: JSStreamWrongLastSequenceErr (standalone / single-replica streams)
+// - 10164: JSStreamWrongLastSequenceConstant (replicated R>1 streams)
+const (
+	jetStreamErrCodeWrongLastSequence     = 10071
+	jetStreamErrCodeWrongLastSequenceRepl = 10164
+)
 
 // isRevisionMismatchError checks if the error is a revision mismatch error.
 func isRevisionMismatchError(err error) bool {
 	var apiErr *jetstream.APIError
 	if errors.As(err, &apiErr) {
-		return apiErr.ErrorCode == jetStreamErrCodeWrongLastSequence
+		return apiErr.ErrorCode == jetStreamErrCodeWrongLastSequence ||
+			apiErr.ErrorCode == jetStreamErrCodeWrongLastSequenceRepl
 	}
 	return false
 }

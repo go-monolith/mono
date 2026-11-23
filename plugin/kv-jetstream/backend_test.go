@@ -914,6 +914,25 @@ func TestIsRevisionMismatchError_APIErrorCorrectCode(t *testing.T) {
 	}
 }
 
+func TestIsRevisionMismatchError_APIErrorReplicatedCode(t *testing.T) {
+	// Test with APIError with replicated stream error code (10164)
+	apiErr := &jetstream.APIError{
+		ErrorCode: jetStreamErrCodeWrongLastSequenceRepl,
+	}
+	if !isRevisionMismatchError(apiErr) {
+		t.Error("expected true for APIError with code 10164")
+	}
+}
+
+func TestIsRevisionMismatchError_WrappedAPIErrorReplicatedCode(t *testing.T) {
+	// Test with wrapped APIError with replicated stream error code (10164)
+	baseErr := &jetstream.APIError{ErrorCode: jetStreamErrCodeWrongLastSequenceRepl}
+	wrappedErr := fmt.Errorf("update failed on replicated bucket: %w", baseErr)
+	if !isRevisionMismatchError(wrappedErr) {
+		t.Error("expected true for wrapped APIError with code 10164")
+	}
+}
+
 // =============================================================================
 // Reset and Close Tests
 // =============================================================================
