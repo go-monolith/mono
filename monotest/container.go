@@ -39,6 +39,12 @@ type Container struct {
 	calls          map[string]*atomic.Int64
 }
 
+var (
+	_ types.ServiceContainer       = (*Container)(nil)
+	_ types.ContractRegistrar      = (*Container)(nil)
+	_ types.ChannelRouterInspector = (*Container)(nil)
+)
+
 // stubModule is the module a stand-in container is bound to.
 type stubModule struct{ name string }
 
@@ -63,6 +69,9 @@ func newContainer(module types.Module, bus *EventBus, logger types.Logger) (*Con
 		return nil, fmt.Errorf("event bus cannot be nil")
 	}
 	inner := container.New(logger)
+	if _, ok := inner.(types.ContractRegistrar); !ok {
+		return nil, fmt.Errorf("inner container does not implement types.ContractRegistrar")
+	}
 	if err := inner.BindModule(module); err != nil {
 		return nil, err
 	}
@@ -349,4 +358,19 @@ func (c *Container) ChannelRouterRunning(serviceName string) bool {
 		return inspector.ChannelRouterRunning(serviceName)
 	}
 	return true
+}
+
+// RegisterContract implements types.ContractRegistrar: it records def on the
+// entry of the already registered service def.Name on the inner container.
+// The contract must name the module this container is bound to and the type
+// the service was registered with; otherwise ErrServiceContractMismatch is
+// returned and nothing is recorded. It returns ErrServiceNotFound when the
+// service is not registered yet, ErrContainerNotBound if the container is
+// not bound to a module, or an error if the inner container does not implement
+// types.ContractRegistrar. Registering the same contract twice is a no-op.
+func (c *Container) RegisterContract(def types.BaseServiceDefinition) error {
+	if registrar, ok := c.ServiceContainer.(types.ContractRegistrar); ok {
+		return registrar.RegisterContract(def)
+	}
+	return fmt.Errorf("inner container does not implement types.ContractRegistrar")
 }
