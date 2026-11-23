@@ -146,6 +146,8 @@ func (m *OrderModule) RegisterServices(container mono.ServiceContainer) error {
 }
 ```
 
+**Responses are routed, and only while the framework runs.** A router goroutine moves what the provider sends on `out` to each consumer's own channel: to the consumer named in `msg.Reply`, or to every consumer when it is empty. The routers start after every module has started and stop when shutdown begins, before modules are stopped (the rollback of a `Start` that failed after they started stops modules while they still run). A consumer that waits for a response in its `Start` or `Stop` waits for nothing; a request sent then reaches the provider, but its response is not delivered. Code that must know asserts the container it was handed (a dependency view) to `types.ChannelRouterInspector` (package `pkg/types`) and calls `ChannelRouterRunning(name)`, as the audit adapter does: `SaveAuditTrail` fails at once with `audit.ErrConfirmationUnavailable` instead of waiting.
+
 ### RegisterRequestReplyService
 
 ```go

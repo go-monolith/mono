@@ -22,6 +22,8 @@ type AuditAdapterPort interface {
 	// SaveAuditTrail saves a list of audit entries synchronously.
 	// Each entry is sent as a separate message to the channel and waits for confirmation.
 	// The Timestamp field of each entry will be set by the audit module.
+	// It returns ErrConfirmationUnavailable, without sending anything, while
+	// the framework's channel routers do not run (a module's Start or Stop).
 	SaveAuditTrail(ctx context.Context, entries []Entry) (int, error)
 
 	// AsyncSaveAuditTrail saves a list of audit entries asynchronously (fire-and-forget).
@@ -45,7 +47,26 @@ type auditAdapter struct {
 	// saves reading it at the same time would each drop the other's
 	// confirmations.
 	mu *sync.Mutex
+	// routers tells whether the audit-trail router runs, which delivers the
+	// confirmations; nil when the container cannot tell (a test double).
+	routers types.ChannelRouterInspector
 }
+
+// AuditTrailService is the name of the audit module's channel service.
+const AuditTrailService = "audit-trail"
+
+// ErrConfirmationUnavailable is returned by SaveAuditTrail when no
+// confirmation can arrive: the channel router that delivers the audit
+// module's confirmations is not running. It runs from after every module has
+// started until shutdown begins, so SaveAuditTrail cannot be confirmed from a
+// module's Start, Stop, RegisterServices or SetDependencyServiceContainer. The
+// call sends nothing in that case, so it can be repeated later without writing
+// an entry twice; use AsyncSaveAuditTrail there, which does not wait.
+var ErrConfirmationUnavailable = errors.New("audit: SaveAuditTrail cannot be confirmed while the audit-trail channel router is not running (in a module's Start or Stop, or during shutdown); use AsyncSaveAuditTrail")
+
+// RouterCheckInterval is how often a SaveAuditTrail waiting for
+// confirmations checks that the audit-trail router still runs.
+const RouterCheckInterval = 50 * time.Millisecond
 
 // confirmationLocks holds the mutex of every confirmation channel an
 // adapter was built on (see auditAdapter.mu). There is one channel per
@@ -94,17 +115,27 @@ func NewAuditAdapter(container types.ServiceContainer, consumerModuleName string
 		return nil, fmt.Errorf("audit adapter requires non-nil ServiceContainer")
 	}
 
-	inChan, outChan, err := container.GetChannelService("audit-trail", consumerModuleName)
+	inChan, outChan, err := container.GetChannelService(AuditTrailService, consumerModuleName)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get audit-trail channel service: %w", err)
 	}
 
-	return &auditAdapter{
+	adapter := &auditAdapter{
 		inChan:   inChan,
 		outChan:  outChan,
 		consumer: consumerModuleName,
 		mu:       ConfirmationLock(outChan),
-	}, nil
+	}
+	if routers, ok := container.(types.ChannelRouterInspector); ok {
+		adapter.routers = routers
+	}
+	return adapter, nil
+}
+
+// routerRunning reports whether the audit-trail router runs; true when the
+// container cannot tell.
+func (a *auditAdapter) routerRunning() bool {
+	return a.routers == nil || a.routers.ChannelRouterRunning(AuditTrailService)
 }
 
 // SaveAuditTrail saves a list of audit entries synchronously.
@@ -118,9 +149,16 @@ func NewAuditAdapter(container types.ServiceContainer, consumerModuleName string
 // encountered: an entry the audit module could not write to its log is not
 // counted. When ctx ends first, the count is that of the entries confirmed so
 // far; entries already sent may still be written, and their confirmations
-// are not taken for those of a later call. After the audit module was
-// stopped no confirmation arrives, so the call returns when ctx ends: give it
-// a context with a deadline.
+// are not taken for those of a later call.
+//
+// The confirmations are delivered by the framework's channel router, which
+// runs from after every module has started until shutdown begins. Outside
+// that time (a module's Start or Stop) the call sends nothing and returns
+// ErrConfirmationUnavailable at once; use AsyncSaveAuditTrail there. When the
+// router stops while the call waits (shutdown began), it returns the count
+// confirmed so far and ErrConfirmationUnavailable; the entries already sent
+// may still be written. After the audit module was stopped no confirmation
+// arrives either, so give the call a context with a deadline.
 //
 // Example:
 //
@@ -139,6 +177,9 @@ func NewAuditAdapter(container types.ServiceContainer, consumerModuleName string
 func (a *auditAdapter) SaveAuditTrail(ctx context.Context, entries []Entry) (int, error) {
 	if len(entries) == 0 {
 		return 0, nil
+	}
+	if !a.routerRunning() {
+		return 0, ErrConfirmationUnavailable
 	}
 
 	// Every entry of this call carries its ID, which the confirmation echoes.
@@ -163,6 +204,11 @@ func (a *auditAdapter) SaveAuditTrail(ctx context.Context, entries []Entry) (int
 	// Serialize sync requests to ensure correct response routing
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	// A save queued behind another one can get the lock after shutdown
+	// began: check again before anything is sent.
+	if !a.routerRunning() {
+		return 0, ErrConfirmationUnavailable
+	}
 
 	// Confirmations of an earlier call that gave up waiting are still on
 	// their way or in the channel. Those already here are dropped now; the
@@ -182,6 +228,14 @@ func (a *auditAdapter) SaveAuditTrail(ctx context.Context, entries []Entry) (int
 	window := max(cap(a.outChan)/2, 1)
 	sent, received, successCount := 0, 0, 0
 	var firstErr error
+	// The router can stop while the call waits (shutdown began): no
+	// confirmation would arrive any more.
+	var routerCheck <-chan time.Time
+	if a.routers != nil {
+		ticker := time.NewTicker(RouterCheckInterval)
+		defer ticker.Stop()
+		routerCheck = ticker.C
+	}
 	for received < len(messages) {
 		var sendCh chan *types.Msg
 		var next *types.Msg
@@ -203,6 +257,36 @@ func (a *auditAdapter) SaveAuditTrail(ctx context.Context, entries []Entry) (int
 				continue
 			}
 			successCount++
+		case <-routerCheck:
+			if a.routerRunning() {
+				continue
+			}
+			// Confirmations the router delivered before it stopped may be in
+			// the channel: count them, so that the entries reported as not
+			// confirmed were really not confirmed.
+			for drained := false; !drained && received < sent; {
+				select {
+				case respMsg := <-a.outChan:
+					if !IsConfirmationOf(respMsg, call) {
+						continue
+					}
+					received++
+					if err := ConfirmationError(respMsg); err != nil {
+						if firstErr == nil {
+							firstErr = err
+						}
+						continue
+					}
+					successCount++
+				default:
+					drained = true
+				}
+			}
+			if received == len(messages) {
+				return successCount, firstErr
+			}
+			return successCount, errors.Join(firstErr, fmt.Errorf("the audit-trail router stopped after %d of %d audit entries were sent and %d confirmed: %w",
+				sent, len(messages), received, ErrConfirmationUnavailable))
 		case <-ctx.Done():
 			// Take the confirmations of the entries already sent, so that
 			// they are not read as those of the next call.

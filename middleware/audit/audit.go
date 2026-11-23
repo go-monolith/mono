@@ -199,8 +199,9 @@ func (m *AuditModule) Start(_ context.Context) error {
 //
 // The channels of the audit-trail service are not closed: other modules send
 // on them, and a send on a closed channel panics. An entry sent after Stop is
-// not written: SaveAuditTrail waits for a confirmation until its context ends
-// and returns an error, AsyncSaveAuditTrail cannot tell.
+// not written: SaveAuditTrail returns an error (ErrConfirmationUnavailable
+// once the channel routers stopped at shutdown, otherwise when its context
+// ends), AsyncSaveAuditTrail cannot tell.
 func (m *AuditModule) Stop(ctx context.Context) error {
 	return m.stop(ctx, true)
 }

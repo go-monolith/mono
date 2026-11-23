@@ -346,6 +346,13 @@ See [A Request Always Gets a Reply](error-handling.md#a-request-always-gets-a-re
 
 - **Duplicate stream consumer durable names:** the stream planner now validates with `CheckStreamConsumers` that no two registrations (stream consumer services or event stream consumers) on the same stream produce the same consumer durable name (for example, module `order` with service `events-sync` and module `order-events` with service `sync`). Registrations with duplicate consumer durable names fail `Start` at once with an error wrapping `monoerrors.ErrInvalidConfiguration` before any NATS consumer is declared. To recover, rename one of the two registrations so it receives a distinct durable name (which starts from its deliver policy; with the default policy, existing stream messages may be delivered again). The obsolete consumer must be removed manually with `nats consumer rm <stream> <consumer>`, as the framework never deletes consumers automatically.
 
+### `SaveAuditTrail` from a module's `Start` or `Stop` fails at once (v0.2.25)
+
+*v0.2.25.* The confirmations of `SaveAuditTrail` are delivered by the channel router, which runs from after every module has started until shutdown begins. Called from a module's `Start` or `Stop`, the call wrote the entry and waited for its context to end (without a deadline `Start` never returned); a caller that retried wrote the entry twice.
+
+- **Now:** outside that time `SaveAuditTrail` sends nothing and returns `audit.ErrConfirmationUnavailable` at once. A call that is waiting when shutdown begins returns the count confirmed so far with the same error.
+- **What to change:** save from `Start` or `Stop` with `AsyncSaveAuditTrail`, which does not wait, or check for the error with `errors.Is`.
+
 ## New Features
 
 All optional.
@@ -365,6 +372,7 @@ All optional.
 | [`monoerrors.ErrWorkQueueConsumerConflict`](../api/container.md#work-queue-streams-one-consumer-per-subject), [`monoerrors.ErrStreamSubjectsOverlap`](../api/container.md#renaming-a-stream-or-switching-a-service-between-stream-consumer-and-cron) | v0.2.16 | `Start` errors for a second consumer on the same subjects of a work-queue stream, and for a stream that asks for subjects another stream holds. Both failed before as well, with the server's error; nothing is deleted |
 | `helper.DecodeBatch`, `helper.ErrUndecodableMessage` | v0.2.17 | Decode a batch leaving out the messages that fail to unmarshal; the error the typed batch handlers return for such a batch |
 | `audit.CanonicalDetails`, `audit.HashEntry`, `audit.LegacyEmptyDetailsHash` | v0.2.17 | The form an audit entry's details are hashed in, and the hash earlier versions gave an entry with empty details |
+| `audit.ErrConfirmationUnavailable`, `audit.AuditTrailService`, `audit.RouterCheckInterval`, `types.ChannelRouterInspector` | v0.2.25 | The error of a `SaveAuditTrail` that cannot be confirmed (no channel router running), the audit module's channel service name, how often a waiting save checks the router, and how a container tells whether the router of a channel service runs |
 | `types.ModuleStoppingEvent` (`module.stopping`) | v0.2.21 | Lifecycle event emitted by the lifecycle manager before a module's `Stop()` executes (during shutdown and rollback) |
 | `fsjetstream.NewJetStreamBackendWithJetStream`, `UploadObject`, `ErrUploadAckTimeout`, `ErrUploadOutOfOrder` | v0.2.20 | A backend whose uploads write the metadata only after every chunk is stored, the upload itself, and the errors of an upload whose chunk was not acknowledged within `UploadAckTimeout` (10s) or whose chunks were not stored in the order they were read |
 | `types.IsOneShotCronSchedule`, `types.CronOneShotSubject` | v0.2.20 | Whether a cron schedule fires once (`@at`), and the subject on which the framework records a one-shot schedule it has published |

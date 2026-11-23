@@ -340,3 +340,13 @@ func StubQueueGroup[T any](c *Container, name string, fn func(ctx context.Contex
 		},
 	})
 }
+
+// ChannelRouterRunning reports whether the router of the channel service
+// serviceName is running (see types.ChannelRouterInspector): after Dispatch,
+// as the framework starts routers after every module started.
+func (c *Container) ChannelRouterRunning(serviceName string) bool {
+	if inspector, ok := c.ServiceContainer.(types.ChannelRouterInspector); ok {
+		return inspector.ChannelRouterRunning(serviceName)
+	}
+	return true
+}

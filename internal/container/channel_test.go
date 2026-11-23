@@ -448,3 +448,62 @@ func TestRouterLoop_OutChannelClosed(t *testing.T) {
 
 	// Router should have exited cleanly without panic
 }
+
+// ChannelRouterRunning follows the router: false before StartChannelRouters
+// and after its context ends, true in between, false for other names; a
+// dependency view reports the provider's.
+func TestChannelRouterRunning(t *testing.T) {
+	c := NewServiceContainer(&mockLogger{}).(*serviceContainer)
+	if err := c.BindModule(&mockModule{name: "audit"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.RegisterChannelService("audit-trail", make(chan *types.Msg, 1), make(chan *types.Msg, 1)); err != nil {
+		t.Fatal(err)
+	}
+	if c.ChannelRouterRunning("audit-trail") {
+		t.Fatal("running before StartChannelRouters")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	c.StartChannelRouters(ctx)
+	if !c.ChannelRouterRunning("audit-trail") {
+		t.Fatal("not running right after StartChannelRouters")
+	}
+	if c.ChannelRouterRunning("other") {
+		t.Fatal("running for a service that does not exist")
+	}
+	cancel()
+	// At once, although the goroutine may still be returning: shutdown
+	// stops the modules right after cancelling the routers.
+	if c.ChannelRouterRunning("audit-trail") {
+		t.Fatal("still running after its context was cancelled")
+	}
+
+	// A service registered again under its name is not served by the
+	// router of the old entry.
+	ctx2, cancel2 := context.WithCancel(context.Background())
+	defer cancel2()
+	c.StartChannelRouters(ctx2)
+	if err := c.Unregister("audit-trail"); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.RegisterChannelService("audit-trail", make(chan *types.Msg, 1), make(chan *types.Msg, 1)); err != nil {
+		t.Fatal(err)
+	}
+	if c.ChannelRouterRunning("audit-trail") {
+		t.Fatal("a re-registered service is reported as served by the old router")
+	}
+
+	// A view over a container that cannot tell reports running.
+	var view types.ChannelRouterInspector = &dependencyView{inner: &mockServiceContainerNoInspector{}}
+	if !view.ChannelRouterRunning("audit-trail") {
+		t.Fatal("a view over a container that cannot tell should report running")
+	}
+	view = &dependencyView{inner: c}
+	if view.ChannelRouterRunning("audit-trail") {
+		t.Fatal("a view should report its provider's router state")
+	}
+}
+
+// mockServiceContainerNoInspector is a ServiceContainer that does not
+// implement types.ChannelRouterInspector.
+type mockServiceContainerNoInspector struct{ types.ServiceContainer }
