@@ -21,6 +21,7 @@ type serviceContainer struct {
 	eventBus                   types.EventBus              // For RequestReply, QueueGroup, and StreamConsumer services
 	queueGroupOptimisticWindow time.Duration               // Optimistic publish window for queue groups (0 = disabled)
 	middlewareChain            types.MiddlewareChainRunner // Middleware chain for service registration interception
+	routers                    sync.Map                    // *types.ServiceEntry of a channel service -> *RouterState (ChannelRouterRunning)
 }
 
 // NewServiceContainer creates a new ServiceContainer instance.

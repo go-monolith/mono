@@ -3,6 +3,7 @@ package container
 import (
 	"context"
 	"fmt"
+	"sync/atomic"
 
 	monoerrors "github.com/go-monolith/mono/pkg/errors"
 	"github.com/go-monolith/mono/pkg/types"
@@ -60,7 +61,8 @@ func (c *serviceContainer) RegisterChannelService(name string, in chan *types.Ms
 // The goroutine exits when either:
 //   - The out channel is closed (provider stopped)
 //   - The context is cancelled (framework shutdown)
-func (c *serviceContainer) routerLoop(ctx context.Context, entry *types.ServiceEntry) {
+func (c *serviceContainer) routerLoop(ctx context.Context, entry *types.ServiceEntry, state *RouterState) {
+	defer state.Running.Add(-1)
 	for {
 		select {
 		case msg, ok := <-entry.OutChannel:
@@ -205,7 +207,62 @@ func (c *serviceContainer) StartChannelRouters(ctx context.Context) {
 
 	for _, entry := range c.services {
 		if entry.Type == types.ServiceTypeChannel {
-			go c.routerLoop(ctx, entry)
+			// Recorded before the goroutine starts, so that the router is
+			// reported as running once StartChannelRouters has returned.
+			state := c.routerState(entry)
+			state.Running.Add(1)
+			state.Ctx.Store(&ctx)
+			go c.routerLoop(ctx, entry, state)
 		}
 	}
+}
+
+// RouterState is what a container records about the routers of one channel
+// service entry. Keyed by the entry, so that a service unregistered and
+// registered again under its name is not reported as served by the router of
+// the old entry.
+type RouterState struct {
+	// Running counts the router goroutines that have not returned: a retried
+	// Start runs a new router while the one of the failed start may still be
+	// returning.
+	Running atomic.Int32
+	// Ctx is the context of the router started last. The router is not
+	// reported as running once it is cancelled, although its goroutine may
+	// still be returning: shutdown cancels it and stops the modules right
+	// after, without waiting for the goroutine.
+	Ctx atomic.Pointer[context.Context]
+}
+
+// routerState returns the router state of a channel service entry.
+func (c *serviceContainer) routerState(entry *types.ServiceEntry) *RouterState {
+	value, _ := c.routers.LoadOrStore(entry, &RouterState{})
+	state, ok := value.(*RouterState)
+	if !ok {
+		// Only *RouterState values are stored.
+		return &RouterState{}
+	}
+	return state
+}
+
+// ChannelRouterRunning reports whether the router of the channel service
+// serviceName is running (see types.ChannelRouterInspector): from
+// StartChannelRouters until its context is cancelled or the provider closes
+// the out channel. It is false for a name that is not a channel service.
+func (c *serviceContainer) ChannelRouterRunning(serviceName string) bool {
+	c.mu.RLock()
+	entry, exists := c.services[serviceName]
+	c.mu.RUnlock()
+	if !exists || entry.Type != types.ServiceTypeChannel {
+		return false
+	}
+	value, ok := c.routers.Load(entry)
+	if !ok {
+		return false
+	}
+	state, ok := value.(*RouterState)
+	if !ok || state.Running.Load() <= 0 {
+		return false
+	}
+	ctx := state.Ctx.Load()
+	return ctx != nil && (*ctx).Err() == nil
 }

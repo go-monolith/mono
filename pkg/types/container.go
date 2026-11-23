@@ -7,6 +7,26 @@ import (
 	"time"
 )
 
+// ChannelRouterInspector is implemented by the framework's service
+// containers, and by the dependency views it hands to modules. It reports
+// whether the router of a channel service is running.
+//
+// The router delivers what a channel service's provider sends on its out
+// channel to the consumers' channels. It runs from after every module has
+// started (Start step 4.5) until shutdown cancels the runtime context, before
+// modules are stopped, so it is not running while modules start, nor while
+// they stop at shutdown (during the rollback of a Start that failed after the
+// routers started, they still run while modules are stopped). Code that waits
+// for an answer on a channel service's consumer channel
+// (audit.SaveAuditTrail) checks it, and fails instead of waiting for an answer
+// nothing would deliver.
+type ChannelRouterInspector interface {
+	// ChannelRouterRunning reports whether the router of the channel
+	// service serviceName is running. It is false for a name that is not
+	// a channel service of the container.
+	ChannelRouterRunning(serviceName string) bool
+}
+
 // ServiceContainer provides dependency injection with name-based registration.
 //
 // The Service Container supports five types of services:

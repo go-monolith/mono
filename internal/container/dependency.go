@@ -236,6 +236,17 @@ func (v *dependencyView) GetStreamConsumerService(name string) (types.StreamCons
 
 func (v *dependencyView) Has(name string) bool { return v.inner.Has(name) }
 
+// ChannelRouterRunning reports whether the router of the dependency's channel
+// service serviceName is running (see types.ChannelRouterInspector). Reading
+// it is not a boundary violation. A container that cannot tell is reported as
+// running, so that callers behave as before the check existed.
+func (v *dependencyView) ChannelRouterRunning(serviceName string) bool {
+	if inspector, ok := v.inner.(types.ChannelRouterInspector); ok {
+		return inspector.ChannelRouterRunning(serviceName)
+	}
+	return true
+}
+
 // Entries returns one description per service of the dependency, in the
 // order of the real container. Each call returns fresh copies. The first call
 // is logged (see dependencyView).
