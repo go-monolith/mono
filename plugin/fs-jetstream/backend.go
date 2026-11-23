@@ -16,6 +16,12 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 )
 
+const (
+	// defaultReadInactivityTimeout is the inactivity timeout for reads when the caller
+	// passes a context without a deadline.
+	defaultReadInactivityTimeout = 5 * time.Second
+)
+
 // JetStreamBackend implements storage.Storage and extended interfaces
 // using JetStream ObjectStore as the backend.
 //
@@ -107,7 +113,10 @@ func (b *JetStreamBackend) BucketName() string {
 // GetWithContext gets the value for the given key with a context.
 // Returns nil, nil when the key does not exist.
 func (b *JetStreamBackend) GetWithContext(ctx context.Context, key string) ([]byte, error) {
-	result, err := b.store.Get(readContext(ctx), key)
+	readCtx, cancelRead := context.WithCancel(ctx)
+	defer cancelRead()
+
+	result, err := b.store.Get(readContext(readCtx), key)
 	if err != nil {
 		if errors.Is(err, jetstream.ErrObjectNotFound) {
 			return nil, nil // Key not found returns nil, nil per storage.Storage contract
@@ -116,7 +125,10 @@ func (b *JetStreamBackend) GetWithContext(ctx context.Context, key string) ([]by
 	}
 	defer result.Close() //nolint:errcheck // Close error on read cleanup is non-actionable
 
-	data, err := io.ReadAll(result)
+	reader := b.wrapReader(result, cancelRead, ctx)
+	defer reader.Close() //nolint:errcheck
+
+	data, err := io.ReadAll(reader)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read object %s: %w", key, err)
 	}
@@ -274,8 +286,10 @@ func (b *JetStreamBackend) Stat(key string) (*storage.ObjectInfo, error) {
 
 // GetReaderWithContext retrieves an object as a reader (for large files).
 func (b *JetStreamBackend) GetReaderWithContext(ctx context.Context, key string) (io.ReadCloser, *storage.ObjectInfo, error) {
-	result, err := b.store.Get(readContext(ctx), key)
+	readCtx, cancelRead := context.WithCancel(ctx)
+	result, err := b.store.Get(readContext(readCtx), key)
 	if err != nil {
+		cancelRead()
 		if errors.Is(err, jetstream.ErrObjectNotFound) {
 			return nil, nil, fmt.Errorf("%w: %s", storage.ErrKeyNotFound, key)
 		}
@@ -285,10 +299,12 @@ func (b *JetStreamBackend) GetReaderWithContext(ctx context.Context, key string)
 	info, err := result.Info()
 	if err != nil {
 		result.Close() //nolint:errcheck // Close error on info failure is secondary
+		cancelRead()
 		return nil, nil, fmt.Errorf("failed to get object info %s: %w", key, err)
 	}
 
-	return result, convertToStorageObjectInfo(info), nil
+	reader := b.wrapReader(result, cancelRead, ctx)
+	return reader, convertToStorageObjectInfo(info), nil
 }
 
 // GetReader retrieves an object as a reader (for large files).
@@ -340,18 +356,71 @@ func (b *JetStreamBackend) PutReader(key string, reader io.Reader, exp time.Dura
 // Helper Functions
 // =============================================================================
 
-// unboundedReadContext wraps a context that has no deadline so that
-// nats.go's ObjectStore.Get does not cap the entire read at its 5s default
-// API timeout via wrapContextWithoutDeadline.
-type unboundedReadContext struct {
-	context.Context
+// wrapReader wraps an ObjectStore reader with inactivity monitoring when the caller
+// did not supply an explicit context deadline.
+func (b *JetStreamBackend) wrapReader(r io.ReadCloser, cancel context.CancelFunc, origCtx context.Context) io.ReadCloser {
+	if _, hasDeadline := origCtx.Deadline(); hasDeadline {
+		return r
+	}
+	return newInactivityReader(r, cancel, defaultReadInactivityTimeout)
 }
 
-func (c unboundedReadContext) Deadline() (time.Time, bool) {
+type inactivityReader struct {
+	r       io.ReadCloser
+	cancel  context.CancelFunc
+	timer   *time.Timer
+	timeout time.Duration
+	closed  bool
+	mu      sync.Mutex
+}
+
+func newInactivityReader(r io.ReadCloser, cancel context.CancelFunc, timeout time.Duration) *inactivityReader {
+	ir := &inactivityReader{
+		r:       r,
+		cancel:  cancel,
+		timeout: timeout,
+	}
+	ir.timer = time.AfterFunc(timeout, func() {
+		cancel()
+	})
+	return ir
+}
+
+func (ir *inactivityReader) Read(p []byte) (int, error) {
+	n, err := ir.r.Read(p)
+	ir.mu.Lock()
+	defer ir.mu.Unlock()
+	if !ir.closed && n > 0 {
+		ir.timer.Reset(ir.timeout)
+	}
+	return n, err
+}
+
+func (ir *inactivityReader) Close() error {
+	ir.mu.Lock()
+	if !ir.closed {
+		ir.closed = true
+		ir.timer.Stop()
+		ir.cancel()
+	}
+	ir.mu.Unlock()
+	return ir.r.Close()
+}
+
+// inactivityReadContext wraps a context without a deadline so that
+// nats.go's ObjectStore.Get does not cap the entire read at its 5s default
+// API timeout via wrapContextWithoutDeadline, while bounding each read operation
+// by an inactivity timeout rather than blocking indefinitely.
+type inactivityReadContext struct {
+	context.Context
+	timeout time.Duration
+}
+
+func (c inactivityReadContext) Deadline() (time.Time, bool) {
 	if d, ok := c.Context.Deadline(); ok {
 		return d, true
 	}
-	return time.Now().Add(100 * 365 * 24 * time.Hour), true
+	return time.Now().Add(c.timeout), true
 }
 
 func readContext(ctx context.Context) context.Context {
@@ -361,7 +430,10 @@ func readContext(ctx context.Context) context.Context {
 	if _, ok := ctx.Deadline(); ok {
 		return ctx
 	}
-	return unboundedReadContext{Context: ctx}
+	return inactivityReadContext{
+		Context: ctx,
+		timeout: defaultReadInactivityTimeout,
+	}
 }
 
 // convertToStorageObjectInfo converts JetStream ObjectInfo to storage.ObjectInfo.

@@ -1421,8 +1421,8 @@ func TestJetStreamBackend_GetReader_UnboundedContextDoesNotTimeout(t *testing.T)
 	os := createTestObjectStore(t, js, config)
 	backend := NewJetStreamBackend("test-bucket", os, 0, testLogger())
 
-	// 1 MiB payload
-	payload := make([]byte, 1024*1024)
+	// 384 KiB payload (3 chunks of default 128 KiB)
+	payload := make([]byte, 384*1024)
 	for i := range payload {
 		payload[i] = byte(i % 251)
 	}
@@ -1444,7 +1444,7 @@ func TestJetStreamBackend_GetReader_UnboundedContextDoesNotTimeout(t *testing.T)
 	}
 
 	// Read chunks slowly exceeding nats.go default 5s API timeout
-	chunk := make([]byte, 64*1024)
+	chunk := make([]byte, 16*1024)
 	totalRead := 0
 	start := time.Now()
 	for {
@@ -1458,14 +1458,107 @@ func TestJetStreamBackend_GetReader_UnboundedContextDoesNotTimeout(t *testing.T)
 		if rerr != nil {
 			t.Fatalf("Read failed after reading %d bytes and %v: %v", totalRead, time.Since(start), rerr)
 		}
-		// Sleep 500ms between chunks while under 6 seconds so total reading time exceeds 5s
-		if time.Since(start) < 6*time.Second {
-			time.Sleep(500 * time.Millisecond)
+		// Sleep between chunks while under 5.2 seconds so total reading time exceeds 5s
+		if time.Since(start) < 5200*time.Millisecond {
+			time.Sleep(250 * time.Millisecond)
 		}
 	}
 
 	if totalRead != len(payload) {
 		t.Fatalf("expected to read %d bytes, got %d", len(payload), totalRead)
+	}
+	if elapsed := time.Since(start); elapsed <= 5*time.Second {
+		t.Fatalf("expected test duration to exceed 5s, took %v", elapsed)
+	}
+}
+
+// TestJetStreamBackend_DamagedObject_TimesOutWithinBound tests that an object whose chunks are
+// gone (metadata only, e.g. from an upload rejected before v0.2.20) returns an error within a
+// bound for both Get and GetReader rather than blocking indefinitely.
+func TestJetStreamBackend_DamagedObject_TimesOutWithinBound(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping slow damaged object test in short mode")
+	}
+	_, js := setupTestNATSWithJetStream(t)
+
+	config := BucketConfig{
+		Name:     "test-bucket",
+		Storage:  MemoryStorage,
+		Replicas: 1,
+	}
+
+	os := createTestObjectStore(t, js, config)
+	backend := NewJetStreamBackend("test-bucket", os, 0, testLogger())
+
+	payload := make([]byte, 300*1024)
+	for i := range payload {
+		payload[i] = byte(i % 251)
+	}
+
+	// Test Get on damaged object
+	err := backend.Set("damaged-get.bin", payload, 0)
+	if err != nil {
+		t.Fatalf("Set failed: %v", err)
+	}
+
+	info1, err := os.GetInfo(context.Background(), "damaged-get.bin")
+	if err != nil {
+		t.Fatalf("GetInfo failed: %v", err)
+	}
+
+	stream, err := js.Stream(context.Background(), "OBJ_test-bucket")
+	if err != nil {
+		t.Fatalf("Stream failed: %v", err)
+	}
+	err = stream.Purge(context.Background(), jetstream.WithPurgeSubject(ChunkSubject("test-bucket", info1.NUID)))
+	if err != nil {
+		t.Fatalf("Purge failed: %v", err)
+	}
+
+	start := time.Now()
+	_, err = backend.Get("damaged-get.bin")
+	elapsed := time.Since(start)
+	if err == nil {
+		t.Fatal("expected Get to fail on damaged object whose chunks are purged, got nil")
+	}
+	if elapsed > 8*time.Second {
+		t.Fatalf("Get took too long to timeout: %v", elapsed)
+	}
+
+	// Test GetReader on damaged object
+	err = backend.Set("damaged-reader.bin", payload, 0)
+	if err != nil {
+		t.Fatalf("Set failed: %v", err)
+	}
+
+	info2, err := os.GetInfo(context.Background(), "damaged-reader.bin")
+	if err != nil {
+		t.Fatalf("GetInfo failed: %v", err)
+	}
+
+	err = stream.Purge(context.Background(), jetstream.WithPurgeSubject(ChunkSubject("test-bucket", info2.NUID)))
+	if err != nil {
+		t.Fatalf("Purge failed: %v", err)
+	}
+
+	reader, rinfo, err := backend.GetReader("damaged-reader.bin")
+	if err != nil {
+		t.Fatalf("GetReader failed: %v", err)
+	}
+	defer reader.Close()
+
+	if rinfo == nil {
+		t.Fatal("expected non-nil ObjectInfo from GetReader")
+	}
+
+	start = time.Now()
+	_, err = io.ReadAll(reader)
+	elapsed = time.Since(start)
+	if err == nil {
+		t.Fatal("expected Read on damaged object to fail, got nil")
+	}
+	if elapsed > 8*time.Second {
+		t.Fatalf("Read took too long to timeout: %v", elapsed)
 	}
 }
 
