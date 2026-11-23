@@ -152,9 +152,10 @@ func StreamRegistrations(services []*types.ServiceEntry, events []types.EventStr
 //   - wrapping ErrStreamConfigImmutable when two of them disagree on a setting
 //     NATS cannot change on an existing stream (see CheckStreamRegistrations);
 //   - wrapping ErrInvalidConfiguration when two of their subjects overlap
-//     without one covering the other (see CheckStreamSubjects), or when one
+//     without one covering the other (see CheckStreamSubjects), when one
 //     of them seals a stream that runs message schedules (see
-//     CheckSealedStream);
+//     CheckSealedStream), or when two of them get the same consumer durable
+//     name on the same stream (see CheckStreamConsumers);
 //   - wrapping ErrWorkQueueConsumerConflict when two of them put a consumer
 //     on the same subjects of a work-queue stream (see
 //     CheckWorkQueueConsumers).
@@ -164,6 +165,9 @@ func StreamRegistrations(services []*types.ServiceEntry, events []types.EventStr
 // CheckStreamsDisjoint).
 func NewStreamPlan(regs []StreamRegistration) (*StreamPlan, error) {
 	if err := CheckStreamRegistrations(regs); err != nil {
+		return nil, err
+	}
+	if err := CheckStreamConsumers(regs); err != nil {
 		return nil, err
 	}
 	if err := CheckStreamSubjects(regs); err != nil {
@@ -502,6 +506,27 @@ func SubjectsCollide(a, b string) bool {
 		}
 	}
 	return len(x) == len(y)
+}
+
+// CheckStreamConsumers returns an error wrapping ErrInvalidConfiguration when
+// two registrations on the same stream would get the same consumer durable
+// name.
+func CheckStreamConsumers(regs []StreamRegistration) error {
+	seen := make(map[string]map[string]string)
+	for _, reg := range regs {
+		consumers := seen[reg.Stream.Name]
+		if consumers == nil {
+			consumers = make(map[string]string)
+			seen[reg.Stream.Name] = consumers
+		}
+		if otherOwner, exists := consumers[reg.Consumer]; exists {
+			return fmt.Errorf("%w: stream %s has duplicate consumer durable name %q registered by the %s and by the %s; "+
+				"consumer durable names must be distinct on the same stream",
+				monoerrors.ErrInvalidConfiguration, reg.Stream.Name, reg.Consumer, otherOwner, reg.Owner)
+		}
+		consumers[reg.Consumer] = reg.Owner
+	}
+	return nil
 }
 
 // CheckStreamSubjects returns an error wrapping ErrInvalidConfiguration when
