@@ -39,6 +39,12 @@ type Container struct {
 	calls          map[string]*atomic.Int64
 }
 
+var (
+	_ types.ServiceContainer       = (*Container)(nil)
+	_ types.ContractRegistrar      = (*Container)(nil)
+	_ types.ChannelRouterInspector = (*Container)(nil)
+)
+
 // stubModule is the module a stand-in container is bound to.
 type stubModule struct{ name string }
 
@@ -349,4 +355,13 @@ func (c *Container) ChannelRouterRunning(serviceName string) bool {
 		return inspector.ChannelRouterRunning(serviceName)
 	}
 	return true
+}
+
+// RegisterContract implements types.ContractRegistrar: it records def on the
+// entry of the already registered service def.Name on the inner container.
+func (c *Container) RegisterContract(def types.BaseServiceDefinition) error {
+	if registrar, ok := c.ServiceContainer.(types.ContractRegistrar); ok {
+		return registrar.RegisterContract(def)
+	}
+	return nil
 }
