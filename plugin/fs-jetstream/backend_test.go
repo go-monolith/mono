@@ -1562,6 +1562,118 @@ func TestJetStreamBackend_DamagedObject_TimesOutWithinBound(t *testing.T) {
 	}
 }
 
+// TestJetStreamBackend_GetReader_PauseBetweenReadsExceedsDefaultInactivityTimeout tests
+// that a caller pausing longer than defaultReadInactivityTimeout (5s) between Read calls
+// can successfully read the entire object without encountering context cancellation.
+func TestJetStreamBackend_GetReader_PauseBetweenReadsExceedsDefaultInactivityTimeout(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping slow reader pause test in short mode")
+	}
+	_, js := setupTestNATSWithJetStream(t)
+
+	config := BucketConfig{
+		Name:     "test-bucket",
+		Storage:  MemoryStorage,
+		Replicas: 1,
+	}
+
+	os := createTestObjectStore(t, js, config)
+	backend := NewJetStreamBackend("test-bucket", os, 0, testLogger())
+
+	// 256 KiB payload (2 chunks of 128 KiB)
+	payload := make([]byte, 256*1024)
+	for i := range payload {
+		payload[i] = byte(i % 251)
+	}
+
+	err := backend.Set("pause-file.bin", payload, 0)
+	if err != nil {
+		t.Fatalf("Set failed: %v", err)
+	}
+
+	reader, info, err := backend.GetReader("pause-file.bin")
+	if err != nil {
+		t.Fatalf("GetReader failed: %v", err)
+	}
+	defer reader.Close()
+
+	if info.Size != int64(len(payload)) {
+		t.Fatalf("expected size %d, got %d", len(payload), info.Size)
+	}
+
+	buf := make([]byte, 64*1024)
+	n, err := reader.Read(buf)
+	if err != nil {
+		t.Fatalf("first Read failed: %v", err)
+	}
+	if n == 0 {
+		t.Fatal("first Read returned 0 bytes")
+	}
+
+	// Pause longer than defaultReadInactivityTimeout (5s) to verify that
+	// inactivity timer does not fire between caller reads when data is available.
+	time.Sleep(5500 * time.Millisecond)
+
+	// Continue reading the rest of the object
+	rest, err := io.ReadAll(reader)
+	if err != nil {
+		t.Fatalf("subsequent Read failed after pause: %v", err)
+	}
+
+	totalRead := n + len(rest)
+	if totalRead != len(payload) {
+		t.Fatalf("expected to read %d bytes, got %d", len(payload), totalRead)
+	}
+}
+
+func TestInactivityReadContext_Deadline(t *testing.T) {
+	// Without deadline
+	bgCtx := context.Background()
+	inactivityCtx := inactivityReadContext{
+		Context: bgCtx,
+		timeout: 5 * time.Second,
+	}
+	d1, ok1 := inactivityCtx.Deadline()
+	if !ok1 || time.Until(d1) <= 0 || time.Until(d1) > 6*time.Second {
+		t.Fatalf("unexpected deadline: %v, %v", d1, ok1)
+	}
+
+	// With explicit deadline
+	fixedDeadline := time.Now().Add(10 * time.Second)
+	ctxWithDeadline, cancel := context.WithDeadline(bgCtx, fixedDeadline)
+	defer cancel()
+
+	inactivityCtx2 := inactivityReadContext{
+		Context: ctxWithDeadline,
+		timeout: 5 * time.Second,
+	}
+	d2, ok2 := inactivityCtx2.Deadline()
+	if !ok2 || !d2.Equal(fixedDeadline) {
+		t.Fatalf("expected fixed deadline %v, got %v", fixedDeadline, d2)
+	}
+}
+
+func TestContextReadCloser_CloseMultipleTimes(t *testing.T) {
+	canceled := false
+	cancel := func() {
+		canceled = true
+	}
+	rc := &contextReadCloser{
+		ReadCloser: io.NopCloser(bytes.NewReader([]byte("test"))),
+		cancel:     cancel,
+	}
+	if err := rc.Close(); err != nil {
+		t.Fatalf("first Close failed: %v", err)
+	}
+	if !canceled {
+		t.Fatal("expected cancel to have been called")
+	}
+	// Second Close should be a no-op
+	if err := rc.Close(); err != nil {
+		t.Fatalf("second Close failed: %v", err)
+	}
+}
+
 // TestJetStreamBackend_GetReaderWithContext_RespectsCancellation tests that
 // context cancellation is immediately respected when reading.
 func TestJetStreamBackend_GetReaderWithContext_RespectsCancellation(t *testing.T) {

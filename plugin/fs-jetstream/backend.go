@@ -113,10 +113,29 @@ func (b *JetStreamBackend) BucketName() string {
 // GetWithContext gets the value for the given key with a context.
 // Returns nil, nil when the key does not exist.
 func (b *JetStreamBackend) GetWithContext(ctx context.Context, key string) ([]byte, error) {
+	if _, hasDeadline := ctx.Deadline(); hasDeadline {
+		result, err := b.store.Get(ctx, key)
+		if err != nil {
+			if errors.Is(err, jetstream.ErrObjectNotFound) {
+				return nil, nil // Key not found returns nil, nil per storage.Storage contract
+			}
+			return nil, fmt.Errorf("failed to get object %s: %w", key, err)
+		}
+		defer result.Close() //nolint:errcheck // Close error on read cleanup is non-actionable
+
+		data, err := io.ReadAll(result)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read object %s: %w", key, err)
+		}
+		return data, nil
+	}
+
 	readCtx, cancelRead := context.WithCancel(ctx)
 	defer cancelRead()
 
+	lookupTimer := time.AfterFunc(defaultReadInactivityTimeout, cancelRead)
 	result, err := b.store.Get(readContext(readCtx), key)
+	lookupTimer.Stop()
 	if err != nil {
 		if errors.Is(err, jetstream.ErrObjectNotFound) {
 			return nil, nil // Key not found returns nil, nil per storage.Storage contract
@@ -125,10 +144,7 @@ func (b *JetStreamBackend) GetWithContext(ctx context.Context, key string) ([]by
 	}
 	defer result.Close() //nolint:errcheck // Close error on read cleanup is non-actionable
 
-	reader := b.wrapReader(result, cancelRead, ctx)
-	defer reader.Close() //nolint:errcheck
-
-	data, err := io.ReadAll(reader)
+	data, err := io.ReadAll(result)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read object %s: %w", key, err)
 	}
@@ -286,8 +302,28 @@ func (b *JetStreamBackend) Stat(key string) (*storage.ObjectInfo, error) {
 
 // GetReaderWithContext retrieves an object as a reader (for large files).
 func (b *JetStreamBackend) GetReaderWithContext(ctx context.Context, key string) (io.ReadCloser, *storage.ObjectInfo, error) {
+	if _, hasDeadline := ctx.Deadline(); hasDeadline {
+		result, err := b.store.Get(ctx, key)
+		if err != nil {
+			if errors.Is(err, jetstream.ErrObjectNotFound) {
+				return nil, nil, fmt.Errorf("%w: %s", storage.ErrKeyNotFound, key)
+			}
+			return nil, nil, fmt.Errorf("failed to get object %s: %w", key, err)
+		}
+
+		info, err := result.Info()
+		if err != nil {
+			result.Close() //nolint:errcheck // Close error on info failure is secondary
+			return nil, nil, fmt.Errorf("failed to get object info %s: %w", key, err)
+		}
+
+		return result, convertToStorageObjectInfo(info), nil
+	}
+
 	readCtx, cancelRead := context.WithCancel(ctx)
+	lookupTimer := time.AfterFunc(defaultReadInactivityTimeout, cancelRead)
 	result, err := b.store.Get(readContext(readCtx), key)
+	lookupTimer.Stop()
 	if err != nil {
 		cancelRead()
 		if errors.Is(err, jetstream.ErrObjectNotFound) {
@@ -303,7 +339,10 @@ func (b *JetStreamBackend) GetReaderWithContext(ctx context.Context, key string)
 		return nil, nil, fmt.Errorf("failed to get object info %s: %w", key, err)
 	}
 
-	reader := b.wrapReader(result, cancelRead, ctx)
+	reader := &contextReadCloser{
+		ReadCloser: result,
+		cancel:     cancelRead,
+	}
 	return reader, convertToStorageObjectInfo(info), nil
 }
 
@@ -356,55 +395,16 @@ func (b *JetStreamBackend) PutReader(key string, reader io.Reader, exp time.Dura
 // Helper Functions
 // =============================================================================
 
-// wrapReader wraps an ObjectStore reader with inactivity monitoring when the caller
-// did not supply an explicit context deadline.
-func (b *JetStreamBackend) wrapReader(r io.ReadCloser, cancel context.CancelFunc, origCtx context.Context) io.ReadCloser {
-	if _, hasDeadline := origCtx.Deadline(); hasDeadline {
-		return r
-	}
-	return newInactivityReader(r, cancel, defaultReadInactivityTimeout)
+// contextReadCloser wraps an ObjectStore reader and cancels its context when closed.
+type contextReadCloser struct {
+	io.ReadCloser
+	cancel context.CancelFunc
+	once   sync.Once
 }
 
-type inactivityReader struct {
-	r       io.ReadCloser
-	cancel  context.CancelFunc
-	timer   *time.Timer
-	timeout time.Duration
-	closed  bool
-	mu      sync.Mutex
-}
-
-func newInactivityReader(r io.ReadCloser, cancel context.CancelFunc, timeout time.Duration) *inactivityReader {
-	ir := &inactivityReader{
-		r:       r,
-		cancel:  cancel,
-		timeout: timeout,
-	}
-	ir.timer = time.AfterFunc(timeout, func() {
-		cancel()
-	})
-	return ir
-}
-
-func (ir *inactivityReader) Read(p []byte) (int, error) {
-	n, err := ir.r.Read(p)
-	ir.mu.Lock()
-	defer ir.mu.Unlock()
-	if !ir.closed && n > 0 {
-		ir.timer.Reset(ir.timeout)
-	}
-	return n, err
-}
-
-func (ir *inactivityReader) Close() error {
-	ir.mu.Lock()
-	if !ir.closed {
-		ir.closed = true
-		ir.timer.Stop()
-		ir.cancel()
-	}
-	ir.mu.Unlock()
-	return ir.r.Close()
+func (r *contextReadCloser) Close() error {
+	r.once.Do(r.cancel)
+	return r.ReadCloser.Close()
 }
 
 // inactivityReadContext wraps a context without a deadline so that
