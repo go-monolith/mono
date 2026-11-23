@@ -352,6 +352,7 @@ See [A Request Always Gets a Reply](error-handling.md#a-request-always-gets-a-re
 
 - **Now:** outside that time `SaveAuditTrail` sends nothing and returns `audit.ErrConfirmationUnavailable` at once. A call that is waiting when shutdown begins returns the count confirmed so far with the same error.
 - **What to change:** save from `Start` or `Stop` with `AsyncSaveAuditTrail`, which does not wait, or check for the error with `errors.Is`.
+- **Background work started from `Start`:** a goroutine that saves right away can run before the routers start. Its save used to be confirmed a few milliseconds later, once they started; it now fails with `ErrConfirmationUnavailable`. Use `AsyncSaveAuditTrail` there, or retry the error until the application has started.
 
 ## New Features
 
