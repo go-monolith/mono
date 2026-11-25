@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/go-monolith/mono/internal/container"
 	"github.com/go-monolith/mono/pkg/errors"
 	"github.com/go-monolith/mono/pkg/types"
 )
@@ -363,8 +364,8 @@ func (r *eventRegistry) RegisterEventStreamConsumer(eventDef types.BaseEventDefi
 	jetStreamDisabled := r.jetStreamDisabled
 	r.mu.RUnlock()
 	if jetStreamDisabled {
-		return fmt.Errorf("event stream consumer of %s.%s.%s in module '%s' requires JetStream; enable it with WithJetStreamStorageDir or a jetstream{} block in the NATS config file: %w",
-			eventDef.ModuleName, eventDef.Name, eventDef.Version, module.Name(), errors.ErrJetStreamNotEnabled)
+		return fmt.Errorf("event stream consumer of %s.%s.%s in module '%s' requires JetStream; %s: %w",
+			eventDef.ModuleName, eventDef.Name, eventDef.Version, module.Name(), container.JetStreamHint, errors.ErrJetStreamNotEnabled)
 	}
 
 	// Override the stream subjects with the event definition subject

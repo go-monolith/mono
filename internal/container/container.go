@@ -65,8 +65,9 @@ func (c *serviceContainer) SetEventBus(bus types.EventBus) {
 	c.eventBus = bus
 }
 
-// jetStreamHint is how the errors about a missing JetStream say to enable it.
-const jetStreamHint = "enable it with WithJetStreamStorageDir or a jetstream{} block in the NATS config file"
+// JetStreamHint is how the errors about a missing JetStream say to enable it;
+// the event registry uses it too, so the messages cannot drift apart.
+const JetStreamHint = "enable it with WithJetStreamStorageDir or a jetstream{} block in the NATS config file"
 
 // CheckJetStreamRequired returns an error wrapping
 // errors.ErrJetStreamNotEnabled when m implements
@@ -78,7 +79,7 @@ func CheckJetStreamRequired(m types.Module, enabled bool) error {
 	if enabled || !ok || !req.RequiresJetStream() {
 		return nil
 	}
-	return fmt.Errorf("'%s' requires JetStream; %s: %w", m.Name(), jetStreamHint, monoerrors.ErrJetStreamNotEnabled)
+	return fmt.Errorf("'%s' requires JetStream; %s: %w", m.Name(), JetStreamHint, monoerrors.ErrJetStreamNotEnabled)
 }
 
 // SetJetStreamEnabled records whether JetStream is enabled on the server (see
@@ -298,7 +299,7 @@ func (c *serviceContainer) registerService(name string, entry *types.ServiceEntr
 	if (entry.Type == types.ServiceTypeStreamConsumer || entry.Type == types.ServiceTypeCron) && c.jetStream == jetStreamDisabled {
 		c.mu.Unlock()
 		return fmt.Errorf("%s service '%s' of module '%s' requires JetStream; %s: %w",
-			types.FormatServiceType(entry.Type), name, c.boundModule.Name(), jetStreamHint, monoerrors.ErrJetStreamNotEnabled)
+			types.FormatServiceType(entry.Type), name, c.boundModule.Name(), JetStreamHint, monoerrors.ErrJetStreamNotEnabled)
 	}
 
 	// Validate service name
