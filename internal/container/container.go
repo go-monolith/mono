@@ -22,6 +22,30 @@ type serviceContainer struct {
 	queueGroupOptimisticWindow time.Duration               // Optimistic publish window for queue groups (0 = disabled)
 	middlewareChain            types.MiddlewareChainRunner // Middleware chain for service registration interception
 	routers                    sync.Map                    // *types.ServiceEntry of a channel service -> *RouterState (ChannelRouterRunning)
+	jetStream                  jetStreamAvailability       // Whether services that need JetStream can be registered
+}
+
+// jetStreamAvailability records what the framework knows about JetStream on
+// the server the container's services run on.
+type jetStreamAvailability int
+
+const (
+	// jetStreamUnknown is the default: nobody told the container, so
+	// registrations are not checked (unit tests, the monotest harness).
+	jetStreamUnknown jetStreamAvailability = iota
+	jetStreamEnabled
+	jetStreamDisabled
+)
+
+// JetStreamAvailabilitySetter is implemented by the framework's container.
+// The lifecycle tells each container it creates whether JetStream is enabled,
+// so that registering a service that needs it fails at once instead of at
+// stream setup after every module started.
+type JetStreamAvailabilitySetter interface {
+	// SetJetStreamEnabled records whether JetStream is enabled. While it is
+	// not, RegisterStreamConsumerService and RegisterCronService fail with
+	// errors.ErrJetStreamNotEnabled.
+	SetJetStreamEnabled(enabled bool)
 }
 
 // NewServiceContainer creates a new ServiceContainer instance.
@@ -38,6 +62,19 @@ func (c *serviceContainer) SetEventBus(bus types.EventBus) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.eventBus = bus
+}
+
+// SetJetStreamEnabled records whether JetStream is enabled on the server (see
+// JetStreamAvailabilitySetter). A container that is never told does not
+// check registrations.
+func (c *serviceContainer) SetJetStreamEnabled(enabled bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if enabled {
+		c.jetStream = jetStreamEnabled
+	} else {
+		c.jetStream = jetStreamDisabled
+	}
 }
 
 // SetQueueGroupOptimisticWindow configures the optimistic publish window for queue group services.
@@ -234,6 +271,17 @@ func (c *serviceContainer) registerService(name string, entry *types.ServiceEntr
 	if (entry.Type == types.ServiceTypeRequestReply || entry.Type == types.ServiceTypeQueueGroup || entry.Type == types.ServiceTypeCron) && c.eventBus == nil {
 		c.mu.Unlock()
 		return fmt.Errorf("EventBus must be set before registering %s services", types.FormatServiceType(entry.Type))
+	}
+
+	// Fail fast for services that need JetStream when the server has none:
+	// otherwise the registration succeeds and Start fails only at stream
+	// setup, after every module started, and only once the JetStream ready
+	// timeout ran out (the missing JetStream API answers "no responders",
+	// which is retried as a cluster still forming).
+	if (entry.Type == types.ServiceTypeStreamConsumer || entry.Type == types.ServiceTypeCron) && c.jetStream == jetStreamDisabled {
+		c.mu.Unlock()
+		return fmt.Errorf("%s service '%s' of module '%s' requires JetStream; enable it with WithJetStreamStorageDir or a jetstream{} block in the NATS config file: %w",
+			types.FormatServiceType(entry.Type), name, c.boundModule.Name(), monoerrors.ErrJetStreamNotEnabled)
 	}
 
 	// Validate service name
