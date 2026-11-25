@@ -81,9 +81,10 @@ Four distinct patterns for inter-module communication:
 ### JetStream Required (Fail Fast)
 
 - **Why**: stream consumer and cron services, and the kv-jetstream and fs-jetstream plugins, cannot work without JetStream. Without it, registration succeeded and `Start` failed only at stream setup, after every module had started, and only once the JetStream ready timeout (2 minutes by default) or the `Start` context ran out: the missing JetStream API answers "no responders", which the setup retries as a cluster still forming.
-- **Registration**: `Start` records whether JetStream is enabled right after the JetStream wait and tells every container it creates (module, middleware, plugin) through the optional `container.JetStreamAvailabilitySetter`. Without JetStream, `RegisterStreamConsumerService` and `RegisterCronService` return an error wrapping `errors.ErrJetStreamNotEnabled`, so the module's start fails (`ErrModuleStartFailed`) and rolls back at once. A container that is never told (unit tests, the `monotest` harness) does not check.
+- **Registration**: `Start` records whether JetStream is enabled right after the JetStream wait and tells every container it creates (module, middleware, plugin) and the event registry through the optional `container.JetStreamAvailabilitySetter`. Without JetStream, `RegisterStreamConsumerService`, `RegisterCronService` and `EventRegistry.RegisterEventStreamConsumer` return an error wrapping `errors.ErrJetStreamNotEnabled`, so the module's start fails (`ErrModuleStartFailed`) and rolls back at once. A container or registry that is never told (unit tests, the `monotest` harness without `WithJetStreamEnabled`) does not check. The setting is not part of the registry's `Checkpoint`; every `Start` sets it again.
 - **Modules and plugins** (`types.JetStreamRequiredModule`, `RequiresJetStream() bool`): a module, middleware module or plugin that returns true fails `Start` before it is started, with the same errors. The kv-jetstream and fs-jetstream plugins implement it.
-- **Not covered**: event stream consumers are not checked at registration and still fail at stream setup.
+- **Tests**: `monotest.WithJetStreamEnabled(false)` makes the harness behave as an application without JetStream, with the same checks (`container.CheckJetStreamRequired` for the module and its plugins, the container and the event registry told).
+- **Not covered**: event stream consumers registered by the application before `Start` (outside a module's `RegisterEventConsumers`) are checked only at stream setup.
 
 ### Cron Service Design
 

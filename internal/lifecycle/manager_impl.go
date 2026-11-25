@@ -854,11 +854,15 @@ func (lm *lifecycleManager) Start(ctx context.Context) (err error) {
 	if err != nil {
 		return err
 	}
-	// Every container made from here on is told, so that a stream consumer
-	// or cron service registered without JetStream fails at registration.
+	// Every container made from here on is told, and the event registry, so
+	// that a stream consumer, cron service or event stream consumer
+	// registered without JetStream fails at registration.
 	lm.mu.Lock()
 	lm.jetStreamEnabled = jetStreamEnabled
 	lm.mu.Unlock()
+	if setter, ok := lm.eventRegistry.(container.JetStreamAvailabilitySetter); ok {
+		setter.SetJetStreamEnabled(jetStreamEnabled)
+	}
 	// Step -0.5: second sweep (the embedded server's manager did the first
 	// right after the server started) over consumers the server may still
 	// delete for inactivity before the setup (Step 5) converts them: plugin,
@@ -3123,20 +3127,12 @@ func (lm *lifecycleManager) applyJetStreamAvailability(c types.ServiceContainer)
 	setter.SetJetStreamEnabled(enabled)
 }
 
-// checkJetStreamRequired fails a module or plugin that implements
-// types.JetStreamRequiredModule and needs JetStream while the application
-// runs without it, before anything of it is started.
+// checkJetStreamRequired fails a module, middleware or plugin that
+// implements types.JetStreamRequiredModule and needs JetStream while the
+// application runs without it, before anything of it is started.
 func (lm *lifecycleManager) checkJetStreamRequired(m types.Module) error {
-	req, ok := m.(types.JetStreamRequiredModule)
-	if !ok || !req.RequiresJetStream() {
-		return nil
-	}
 	lm.mu.RLock()
 	enabled := lm.jetStreamEnabled
 	lm.mu.RUnlock()
-	if enabled {
-		return nil
-	}
-	return fmt.Errorf("'%s' requires JetStream; enable it with WithJetStreamStorageDir or a jetstream{} block in the NATS config file: %w",
-		m.Name(), monoerrors.ErrJetStreamNotEnabled)
+	return container.CheckJetStreamRequired(m, enabled)
 }

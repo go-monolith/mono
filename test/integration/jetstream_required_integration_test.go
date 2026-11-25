@@ -15,8 +15,23 @@ import (
 	kvjetstream "github.com/go-monolith/mono/plugin/kv-jetstream"
 )
 
+// jsEventStreamConsumerModule registers an event stream consumer.
+type jsEventStreamConsumerModule struct{}
+
+func (m *jsEventStreamConsumerModule) Name() string                { return "billing" }
+func (m *jsEventStreamConsumerModule) Start(context.Context) error { return nil }
+func (m *jsEventStreamConsumerModule) Stop(context.Context) error  { return nil }
+
+func (m *jsEventStreamConsumerModule) RegisterEventConsumers(r mono.EventRegistry) error {
+	return r.RegisterEventStreamConsumer(mono.BaseEventDefinition{
+		ModuleName: "order", Name: "Placed", Subject: "events.order.v1.placed", Version: "v1",
+	}, mono.StreamConsumerConfig{Stream: mono.StreamConfig{Name: "ORDER_EVENTS_NO_JS"}},
+		func(context.Context, []*mono.Msg) error { return nil }, m)
+}
+
 // TestJetStreamRequired_FailFastWithoutJetStream checks that a module
-// registering a stream consumer or cron service, or a plugin that needs
+// registering a stream consumer service, cron service or event stream
+// consumer, or a plugin that needs
 // JetStream, fails Start at once with ErrJetStreamNotEnabled on an application
 // without JetStream, instead of waiting for the JetStream ready timeout.
 func TestJetStreamRequired_FailFastWithoutJetStream(t *testing.T) {
@@ -32,6 +47,11 @@ func TestJetStreamRequired_FailFastWithoutJetStream(t *testing.T) {
 			if err := fw.Register(newCronTestModule("reports", "rollup", mono.CronServiceConfig{
 				Schedule: "@every 1s",
 			}, 1)); err != nil {
+				t.Fatalf("Register failed: %v", err)
+			}
+		},
+		"event stream consumer": func(t *testing.T, fw mono.MonoApplication) {
+			if err := fw.Register(&jsEventStreamConsumerModule{}); err != nil {
 				t.Fatalf("Register failed: %v", err)
 			}
 		},

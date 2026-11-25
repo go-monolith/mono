@@ -37,14 +37,15 @@ const (
 	jetStreamDisabled
 )
 
-// JetStreamAvailabilitySetter is implemented by the framework's container.
-// The lifecycle tells each container it creates whether JetStream is enabled,
-// so that registering a service that needs it fails at once instead of at
-// stream setup after every module started.
+// JetStreamAvailabilitySetter is implemented by the framework's container and
+// event registry. The lifecycle tells each container it creates, and the
+// event registry, whether JetStream is enabled, so that registering a service
+// or event stream consumer that needs it fails at once instead of at stream
+// setup after every module started.
 type JetStreamAvailabilitySetter interface {
 	// SetJetStreamEnabled records whether JetStream is enabled. While it is
-	// not, RegisterStreamConsumerService and RegisterCronService fail with
-	// errors.ErrJetStreamNotEnabled.
+	// not, RegisterStreamConsumerService, RegisterCronService and
+	// RegisterEventStreamConsumer fail with errors.ErrJetStreamNotEnabled.
 	SetJetStreamEnabled(enabled bool)
 }
 
@@ -62,6 +63,22 @@ func (c *serviceContainer) SetEventBus(bus types.EventBus) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.eventBus = bus
+}
+
+// jetStreamHint is how the errors about a missing JetStream say to enable it.
+const jetStreamHint = "enable it with WithJetStreamStorageDir or a jetstream{} block in the NATS config file"
+
+// CheckJetStreamRequired returns an error wrapping
+// errors.ErrJetStreamNotEnabled when m implements
+// types.JetStreamRequiredModule, needs JetStream and enabled is false. The
+// lifecycle and the monotest harness call it before a module, middleware or
+// plugin is started.
+func CheckJetStreamRequired(m types.Module, enabled bool) error {
+	req, ok := m.(types.JetStreamRequiredModule)
+	if enabled || !ok || !req.RequiresJetStream() {
+		return nil
+	}
+	return fmt.Errorf("'%s' requires JetStream; %s: %w", m.Name(), jetStreamHint, monoerrors.ErrJetStreamNotEnabled)
 }
 
 // SetJetStreamEnabled records whether JetStream is enabled on the server (see
@@ -280,8 +297,8 @@ func (c *serviceContainer) registerService(name string, entry *types.ServiceEntr
 	// which is retried as a cluster still forming).
 	if (entry.Type == types.ServiceTypeStreamConsumer || entry.Type == types.ServiceTypeCron) && c.jetStream == jetStreamDisabled {
 		c.mu.Unlock()
-		return fmt.Errorf("%s service '%s' of module '%s' requires JetStream; enable it with WithJetStreamStorageDir or a jetstream{} block in the NATS config file: %w",
-			types.FormatServiceType(entry.Type), name, c.boundModule.Name(), monoerrors.ErrJetStreamNotEnabled)
+		return fmt.Errorf("%s service '%s' of module '%s' requires JetStream; %s: %w",
+			types.FormatServiceType(entry.Type), name, c.boundModule.Name(), jetStreamHint, monoerrors.ErrJetStreamNotEnabled)
 	}
 
 	// Validate service name

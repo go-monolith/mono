@@ -23,6 +23,18 @@ type eventRegistry struct {
 	logger                 types.Logger
 	chain                  types.MiddlewareChainRunner // Middleware chain for event consumer registration interception
 	streamConsumerSequence int                         // Process-local counter for stream consumer IDs (never persisted)
+	jetStreamDisabled      bool                        // Set by the lifecycle when the application runs without JetStream
+}
+
+// SetJetStreamEnabled records whether JetStream is enabled (it implements
+// container.JetStreamAvailabilitySetter). While it is not,
+// RegisterEventStreamConsumer fails with errors.ErrJetStreamNotEnabled. A
+// registry that is never told does not check, and the setting is not part of
+// a Checkpoint.
+func (r *eventRegistry) SetJetStreamEnabled(enabled bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.jetStreamDisabled = !enabled
 }
 
 // NewEventRegistry creates a new event registry instance with the provided logger.
@@ -346,6 +358,13 @@ func (r *eventRegistry) RegisterEventStreamConsumer(eventDef types.BaseEventDefi
 	}
 	if config.Stream.Name == "" {
 		return fmt.Errorf("stream name cannot be empty")
+	}
+	r.mu.RLock()
+	jetStreamDisabled := r.jetStreamDisabled
+	r.mu.RUnlock()
+	if jetStreamDisabled {
+		return fmt.Errorf("event stream consumer of %s.%s.%s in module '%s' requires JetStream; enable it with WithJetStreamStorageDir or a jetstream{} block in the NATS config file: %w",
+			eventDef.ModuleName, eventDef.Name, eventDef.Version, module.Name(), errors.ErrJetStreamNotEnabled)
 	}
 
 	// Override the stream subjects with the event definition subject

@@ -53,13 +53,12 @@ var (
 	// retry, and with several instances the retry usually lands on another one.
 	ErrServiceOverloaded = errors.New("service overloaded")
 
-	// ErrJetStreamNotEnabled is returned when a service that needs JetStream
-	// (a stream consumer or cron service) is registered while the embedded
-	// NATS server runs without it. Enable JetStream with
-	// WithJetStreamStorageDir, or a jetstream{} block of a NATS config file.
-	// It is also returned by Start for a module or plugin implementing
-	// types.JetStreamRequiredModule. Event stream consumers are not checked
-	// at registration; they fail at stream setup.
+	// ErrJetStreamNotEnabled is returned when a service or consumer that
+	// needs JetStream (a stream consumer service, cron service or event
+	// stream consumer) is registered while the embedded NATS server runs
+	// without it. Enable JetStream with WithJetStreamStorageDir, or a
+	// jetstream{} block of a NATS config file. It is also returned by Start
+	// for a module or plugin implementing types.JetStreamRequiredModule.
 	ErrJetStreamNotEnabled = errors.New("JetStream is not enabled")
 
 	// ErrInvalidConfiguration is returned when configuration validation fails

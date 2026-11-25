@@ -142,3 +142,30 @@ func (m *registeringModule) RegisterServices(c types.ServiceContainer) error {
 		types.StreamConsumerConfig{Stream: types.StreamConfig{Name: "ORDERS"}},
 		func(context.Context, []*types.Msg) error { return nil })
 }
+
+// eventStreamConsumerModule registers an event stream consumer.
+type eventStreamConsumerModule struct {
+	mockModule
+}
+
+func (m *eventStreamConsumerModule) RegisterEventConsumers(r types.EventRegistry) error {
+	return r.RegisterEventStreamConsumer(types.BaseEventDefinition{
+		ModuleName: "order", Name: "OrderCreated", Subject: "events.orders.v1.created", Version: "v1",
+	}, types.StreamConsumerConfig{Stream: types.StreamConfig{Name: "ORDERS"}},
+		func(context.Context, []*types.Msg) error { return nil }, m)
+}
+
+// TestStart_EventStreamConsumerRegistrationWithoutJetStream checks that the
+// lifecycle tells the event registry that JetStream is disabled, so that an
+// event stream consumer registration fails the module start.
+func TestStart_EventStreamConsumerRegistrationWithoutJetStream(t *testing.T) {
+	lm, reg, _ := newJetStreamTestLifecycle(false)
+	m := &eventStreamConsumerModule{mockModule: mockModule{name: "billing"}}
+	if err := reg.Register(m); err != nil {
+		t.Fatalf("Register failed: %v", err)
+	}
+	assertJetStreamNotEnabled(t, lm.Start(context.Background()))
+	if m.startCalled {
+		t.Error("module Start was called")
+	}
+}

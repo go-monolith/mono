@@ -86,6 +86,23 @@ func WithUnexercisedContract(def types.BaseServiceDefinition) Option {
 	return func(h *Harness) { h.unexercised[def] = true }
 }
 
+// WithJetStreamEnabled sets whether the harness behaves as an application
+// with JetStream (true) or without it (false). Without it, as in the
+// framework, the module's Start fails with an error wrapping
+// errors.ErrJetStreamNotEnabled when the module or one of its plugins
+// implements types.JetStreamRequiredModule and needs JetStream, or when it
+// registers a stream consumer service, cron service or event stream consumer.
+// Without this option the harness does not check, as before.
+//
+// Example:
+//
+//	h := monotest.New(t, module, monotest.WithJetStreamEnabled(false))
+//	err := h.Start(ctx)
+//	// errors.Is(err, errors.ErrJetStreamNotEnabled)
+func WithJetStreamEnabled(enabled bool) Option {
+	return func(h *Harness) { h.jetStream = &enabled }
+}
+
 // WithStopTimeout bounds, in Stop and CheckModule, the wait for handlers in
 // flight and for the module's Stop (default 5s).
 func WithStopTimeout(d time.Duration) Option {
@@ -118,6 +135,7 @@ type Harness struct {
 	orderingOnly map[string]bool
 	unexercised  map[types.BaseServiceDefinition]bool
 	stopTimeout  time.Duration
+	jetStream    *bool // nil: not checked (see WithJetStreamEnabled)
 
 	rec        *boundary.Recorder
 	container  *Container
@@ -234,11 +252,30 @@ func (h *Harness) Start(ctx context.Context) (err error) {
 	h.runtimeCtx, h.cancel = context.WithCancel(context.Background())
 	h.bus.SetRuntimeContext(h.runtimeCtx)
 
+	// Step -1: what needs JetStream, when the test says whether there is
+	// JetStream. Plugins first, as the framework starts them first.
+	if h.jetStream != nil {
+		aliases := make([]string, 0, len(h.plugins))
+		for alias := range h.plugins {
+			aliases = append(aliases, alias)
+		}
+		sort.Strings(aliases)
+		for _, alias := range aliases {
+			if err := container.CheckJetStreamRequired(h.plugins[alias], *h.jetStream); err != nil {
+				return monoerrors.WrapPluginStartFailed(alias, err)
+			}
+		}
+		if err := container.CheckJetStreamRequired(h.module, *h.jetStream); err != nil {
+			return monoerrors.WrapModuleStartFailed(name, err)
+		}
+	}
+
 	// Step 0: the module's own container.
 	own, err := newContainer(h.module, h.bus, h.logger.WithModule(name))
 	if err != nil {
 		return monoerrors.WrapModuleStartFailed(name, err)
 	}
+	h.applyJetStream(own.ServiceContainer)
 	h.container = own
 
 	// Step 0.5: plugins.
@@ -308,6 +345,7 @@ func (h *Harness) Start(ctx context.Context) (err error) {
 
 	// Step 4: events (definitions the module emits, consumers it registers).
 	h.registry = registry.NewEventRegistry(h.logger)
+	h.applyJetStream(h.registry)
 	for _, def := range h.emitted {
 		if err := h.registry.RegisterEvent(def); err != nil {
 			return monoerrors.WrapModuleStartFailed(name, fmt.Errorf("register event %s.%s from WithEmittedEvents: %w", def.ModuleName, def.Name, err))
@@ -509,4 +547,15 @@ func (r *recordingBus) RequestMsgWithContext(ctx context.Context, msg *types.Msg
 		r.record(msg.Subject)
 	}
 	return r.EventBus.RequestMsgWithContext(ctx, msg)
+}
+
+// applyJetStream tells a container or event registry whether JetStream is
+// enabled, when the test set it with WithJetStreamEnabled.
+func (h *Harness) applyJetStream(target any) {
+	if h.jetStream == nil {
+		return
+	}
+	if setter, ok := target.(container.JetStreamAvailabilitySetter); ok {
+		setter.SetJetStreamEnabled(*h.jetStream)
+	}
 }
