@@ -79,6 +79,8 @@ type ServiceContainer interface {
 	// RegisterStreamConsumerService registers a JetStream durable pull consumer service.
 	// The service will automatically create/update the stream and consumer on startup.
 	// The handler receives batches of messages that should be individually acknowledged.
+	// It fails with errors.ErrJetStreamNotEnabled when the application runs
+	// without JetStream, so the module's start fails at once.
 	RegisterStreamConsumerService(name string, config StreamConsumerConfig, handler StreamConsumerHandler) error
 
 	// RegisterCronService registers a cron-scheduled service backed by the
@@ -86,7 +88,8 @@ type ServiceContainer interface {
 	// schedule is registered server-side, so exactly one message fires per
 	// occurrence across a cluster. Each occurrence is delivered to the handler
 	// through a durable pull consumer with explicit acknowledgement. Requires
-	// JetStream to be enabled. There is no client to retrieve: the service is
+	// JetStream to be enabled: without it the registration fails with
+	// errors.ErrJetStreamNotEnabled. There is no client to retrieve: the service is
 	// driven entirely by the server-side schedule.
 	//
 	// Note: cron handlers are not currently wrapped by the middleware chain

@@ -200,6 +200,27 @@ type ServiceConsumerModule interface {
 	ConsumeServices() []BaseServiceDefinition
 }
 
+// JetStreamRequiredModule is implemented by a module or plugin that cannot
+// work without JetStream (for example a key-value or object store plugin).
+//
+// When RequiresJetStream returns true and the application runs without
+// JetStream (no WithJetStreamStorageDir and no jetstream{} block in the NATS
+// config file), Start fails before the module, middleware module or plugin
+// is started, with an error wrapping errors.ErrJetStreamNotEnabled and
+// errors.ErrModuleStartFailed. Without it, such a module only
+// failed at its first JetStream call, which is answered "no responders" and
+// may wait for a request timeout.
+//
+// Example:
+//
+//	func (m *CacheModule) RequiresJetStream() bool { return true }
+type JetStreamRequiredModule interface {
+	Module
+
+	// RequiresJetStream reports whether the module needs JetStream.
+	RequiresJetStream() bool
+}
+
 // EventBusAwareModule receives an EventBus instance during framework initialization
 //
 // Modules implementing this interface gain access to the EventBus for low-level

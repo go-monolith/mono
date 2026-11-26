@@ -291,6 +291,10 @@ func (container ServiceContainer) RegisterStreamConsumerService(
 
 Registers a JetStream durable pull consumer service for persistent, ordered message processing: messages survive restarts, are delivered at least once, in batches, and can be replayed.
 
+{% hint style="warning" %}
+**Requires JetStream.** Without `WithJetStreamStorageDir` (or a `jetstream{}` block in a NATS config file), registering fails with `monoerrors.ErrJetStreamNotEnabled`, so `app.Start` fails at once with that error wrapped in `ErrModuleStartFailed`.
+{% endhint %}
+
 **Parameters:**
 - `name` - Service name (subject pattern)
 - `config` - JetStream consumer configuration
@@ -652,7 +656,7 @@ Registers a cron-scheduled service backed by the embedded NATS JetStream message
 - Each occurrence is delivered through a durable pull consumer with explicit acknowledgement.
 - The consumer keeps its position across restarts: an occurrence that fired while the application was down is delivered, and occurrences already handled are not delivered again (delivery is at-least-once, so an occurrence whose acknowledgement was lost at shutdown is).
 - If the consumer is missing at startup (for example, deleted by an operator), it is recreated after the occurrences already stored, so it delivers only new ones; the number it skipped is logged as a warning.
-- Requires JetStream (`WithJetStreamStorageDir(...)`); registering a cron service without JetStream fails fast at startup.
+- Requires JetStream (`WithJetStreamStorageDir(...)`, or a `jetstream{}` block in a NATS config file). Without it, `RegisterCronService` returns `monoerrors.ErrJetStreamNotEnabled`, so `app.Start` fails at once with that error wrapped in `ErrModuleStartFailed`.
 - Cron services are server-driven and have **no** consumer-side client (there is no `GetCronService`).
 
 **Parameters:**

@@ -31,6 +31,7 @@ type lifecycleManager struct {
 	registry                   registry.ModuleRegistry
 	pluginRegistry             registry.PluginRegistry
 	eventBus                   types.EventBus
+	jetStreamEnabled           bool                // Set by Start once the JetStream wait has answered
 	eventRegistry              types.EventRegistry // Event registry for event definitions and consumers
 	logger                     types.Logger
 	middlewareChain            *middleware.Chain
@@ -853,6 +854,15 @@ func (lm *lifecycleManager) Start(ctx context.Context) (err error) {
 	if err != nil {
 		return err
 	}
+	// Every container made from here on is told, and the event registry, so
+	// that a stream consumer, cron service or event stream consumer
+	// registered without JetStream fails at registration.
+	lm.mu.Lock()
+	lm.jetStreamEnabled = jetStreamEnabled
+	lm.mu.Unlock()
+	if setter, ok := lm.eventRegistry.(container.JetStreamAvailabilitySetter); ok {
+		setter.SetJetStreamEnabled(jetStreamEnabled)
+	}
 	// Step -0.5: second sweep (the embedded server's manager did the first
 	// right after the server started) over consumers the server may still
 	// delete for inactivity before the setup (Step 5) converts them: plugin,
@@ -910,6 +920,9 @@ func (lm *lifecycleManager) Start(ctx context.Context) (err error) {
 	if lm.middlewareChain != nil {
 		for _, mw := range lm.middlewareChain.Middlewares() {
 			lm.logger.Info("Starting middleware module", "module", mw.Name())
+			if err := lm.checkJetStreamRequired(mw); err != nil {
+				return monoerrors.WrapModuleStartFailed(mw.Name(), err)
+			}
 			if err := lm.registerMiddlewareServices(mw); err != nil {
 				return fmt.Errorf("failed to register services of middleware module %s: %w", mw.Name(), err)
 			}
@@ -1012,6 +1025,7 @@ func (lm *lifecycleManager) registerMiddlewareServices(mw types.MiddlewareModule
 		return err
 	}
 	c.SetEventBus(lm.eventBus)
+	lm.applyJetStreamAvailability(c)
 	if lm.queueGroupOptimisticWindow > 0 {
 		c.SetQueueGroupOptimisticWindow(lm.queueGroupOptimisticWindow)
 	}
@@ -1067,6 +1081,10 @@ func (lm *lifecycleManager) startModule(ctx context.Context, module types.Module
 
 	lm.logger.Info("Starting module", "module", moduleName)
 
+	if err := lm.checkJetStreamRequired(module); err != nil {
+		return monoerrors.WrapModuleStartFailed(moduleName, err)
+	}
+
 	// Step 0: Create and bind ServiceContainer
 	moduleContainer := container.New(lm.logger.WithModule(moduleName))
 	if err := moduleContainer.BindModule(module); err != nil {
@@ -1075,6 +1093,7 @@ func (lm *lifecycleManager) startModule(ctx context.Context, module types.Module
 	// Always set EventBus on container for RequestReply/QueueGroup/StreamConsumer services
 	// regardless of whether the module uses them or not
 	moduleContainer.SetEventBus(lm.eventBus)
+	lm.applyJetStreamAvailability(moduleContainer)
 
 	// Set queue group optimistic window if configured
 	if lm.queueGroupOptimisticWindow > 0 {
@@ -2250,6 +2269,10 @@ func (lm *lifecycleManager) startPlugin(ctx context.Context, plugin types.Plugin
 
 	lm.logger.Info("Starting plugin", "alias", alias, "module", plugin.Name())
 
+	if err := lm.checkJetStreamRequired(plugin); err != nil {
+		return monoerrors.WrapPluginStartFailed(alias, err)
+	}
+
 	// Step 0: Create dedicated ServiceContainer for plugin.
 	// Note: Middleware chain is NOT set on plugin containers - plugins are
 	// explicitly excluded from middleware hooks by design (see pkg/types/plugin.go).
@@ -2259,6 +2282,7 @@ func (lm *lifecycleManager) startPlugin(ctx context.Context, plugin types.Plugin
 		return monoerrors.WrapPluginStartFailed(alias, err)
 	}
 	pluginContainer.SetEventBus(lm.eventBus)
+	lm.applyJetStreamAvailability(pluginContainer)
 
 	// Step 1: Inject container into plugin
 	plugin.SetContainer(pluginContainer)
@@ -3088,4 +3112,27 @@ func getErrorTypeName(err error) string {
 	// Remove "Error" suffix and convert to lowercase
 	typeName = strings.TrimSuffix(typeName, "Error")
 	return strings.ToLower(typeName)
+}
+
+// applyJetStreamAvailability tells a container the lifecycle created whether
+// JetStream is enabled (see container.JetStreamAvailabilitySetter).
+func (lm *lifecycleManager) applyJetStreamAvailability(c types.ServiceContainer) {
+	setter, ok := c.(container.JetStreamAvailabilitySetter)
+	if !ok {
+		return
+	}
+	lm.mu.RLock()
+	enabled := lm.jetStreamEnabled
+	lm.mu.RUnlock()
+	setter.SetJetStreamEnabled(enabled)
+}
+
+// checkJetStreamRequired fails a module, middleware or plugin that
+// implements types.JetStreamRequiredModule and needs JetStream while the
+// application runs without it, before anything of it is started.
+func (lm *lifecycleManager) checkJetStreamRequired(m types.Module) error {
+	lm.mu.RLock()
+	enabled := lm.jetStreamEnabled
+	lm.mu.RUnlock()
+	return container.CheckJetStreamRequired(m, enabled)
 }

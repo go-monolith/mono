@@ -345,8 +345,12 @@ func TestCronServiceIntegration(t *testing.T) {
 
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
+		began := time.Now()
 		if err := fw.Start(ctx); err == nil {
 			t.Fatal("expected Start to fail when JetStream is not enabled")
+		}
+		if elapsed := time.Since(began); elapsed > 5*time.Second {
+			t.Errorf("Start took %s, want it to fail at registration", elapsed)
 		}
 	})
 }

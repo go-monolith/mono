@@ -296,6 +296,10 @@ func (registry EventRegistry) RegisterEventStreamConsumer(
 
 Registers a JetStream durable consumer for an event, with at-least-once delivery. Use it for payments, audit logs, compliance events: any event where loss is unacceptable.
 
+{% hint style="warning" %}
+**Requires JetStream.** Without `WithJetStreamStorageDir` (or a `jetstream{}` block in a NATS config file), registering fails with `monoerrors.ErrJetStreamNotEnabled`, so `app.Start` fails at once with that error wrapped in `ErrModuleStartFailed`.
+{% endhint %}
+
 **Parameters:**
 - `eventDef` - The event definition to consume
 - `config` - JetStream stream and consumer configuration

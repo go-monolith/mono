@@ -528,6 +528,9 @@ type EventRegistry interface {
 	// EventStreamConsumer persists messages in JetStream and supports message acknowledgment,
 	// redelivery on failure, and durable subscriptions.
 	//
+	// It fails with errors.ErrJetStreamNotEnabled when the application runs
+	// without JetStream, so the module's start fails at once.
+	//
 	// Example:
 	//
 	//	config := mono.StreamConsumerConfig{

@@ -103,6 +103,14 @@ func (m *PluginModule) SetEventBus(bus types.EventBus) {
 	m.eventBus = bus
 }
 
+// RequiresJetStream reports that the plugin needs JetStream: its object store buckets
+// are JetStream streams. It implements types.JetStreamRequiredModule, so an
+// application without JetStream fails Start with errors.ErrJetStreamNotEnabled
+// before the plugin starts.
+func (m *PluginModule) RequiresJetStream() bool { return true }
+
+var _ types.JetStreamRequiredModule = (*PluginModule)(nil)
+
 // Start initializes the module and creates or opens all configured buckets.
 //
 // It returns an error wrapping ErrStorageMismatch when a bucket's stream
