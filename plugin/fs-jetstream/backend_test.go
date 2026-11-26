@@ -1518,8 +1518,8 @@ func TestJetStreamBackend_DamagedObject_TimesOutWithinBound(t *testing.T) {
 	start := time.Now()
 	_, err = backend.Get("damaged-get.bin")
 	elapsed := time.Since(start)
-	if err == nil {
-		t.Fatal("expected Get to fail on damaged object whose chunks are purged, got nil")
+	if !errors.Is(err, nats.ErrTimeout) {
+		t.Fatalf("expected Get error to wrap nats.ErrTimeout, got: %v", err)
 	}
 	if elapsed > 8*time.Second {
 		t.Fatalf("Get took too long to timeout: %v", elapsed)
@@ -1554,8 +1554,8 @@ func TestJetStreamBackend_DamagedObject_TimesOutWithinBound(t *testing.T) {
 	start = time.Now()
 	_, err = io.ReadAll(reader)
 	elapsed = time.Since(start)
-	if err == nil {
-		t.Fatal("expected Read on damaged object to fail, got nil")
+	if !errors.Is(err, nats.ErrTimeout) {
+		t.Fatalf("expected Read error to wrap nats.ErrTimeout, got: %v", err)
 	}
 	if elapsed > 8*time.Second {
 		t.Fatalf("Read took too long to timeout: %v", elapsed)
