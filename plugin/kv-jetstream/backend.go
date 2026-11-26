@@ -567,5 +567,10 @@ func (w *storageKeyWatcher) Updates() <-chan *storage.Entry {
 // Stop stops the watcher and releases resources.
 func (w *storageKeyWatcher) Stop() error {
 	w.cancel()
-	return w.watcher.Stop()
+	err := w.watcher.Stop()
+	// Drain any remaining updates so nats.go's delivery goroutine can exit
+	// if it was blocked sending to w.watcher.Updates() when Stop was called.
+	for range w.watcher.Updates() {
+	}
+	return err
 }
