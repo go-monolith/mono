@@ -333,6 +333,17 @@ Add these tests:
 - **One import rule test for the application** (since v0.1.2), below.
 - **Harness tests** where you want to call the module's services and check what it did: `monotest.New` starts the module, `monotest.Call` calls a service, and the stand-in containers count the calls they handled. See [Driving a module directly](module-boundaries.md#testing-with-monotest).
 
+To test how a module behaves without JetStream, pass `monotest.WithJetStreamEnabled(false)`. `Start` then fails with `ErrJetStreamNotEnabled` exactly as the framework does: for a module or plugin implementing `JetStreamRequiredModule`, and for a stream consumer service, cron service or event stream consumer registration. Without the option, nothing is checked.
+
+```go
+func TestCacheModuleNeedsJetStream(t *testing.T) {
+    h := monotest.New(t, &CacheModule{}, monotest.WithJetStreamEnabled(false))
+    if err := h.Start(context.Background()); !errors.Is(err, monoerrors.ErrJetStreamNotEnabled) {
+        t.Fatalf("Start err = %v, want ErrJetStreamNotEnabled", err)
+    }
+}
+```
+
 ### Import Rule Test
 
 Add one for the application, in its root directory, so that `./...` covers every module. `CheckImports` runs `go list` and reports every contract package that imports more than it may, and every package that imports another module's package instead of its `contract`:
@@ -469,6 +480,8 @@ func TestOrderEventPublishing(t *testing.T) {
 ```
 
 ### JetStream
+
+Stream consumer services, cron services, event stream consumers and the kv-jetstream and fs-jetstream plugins need JetStream. An application without it fails `Start` at once with `ErrJetStreamNotEnabled`, so enable it in tests that use them.
 
 Test with persistent streams:
 

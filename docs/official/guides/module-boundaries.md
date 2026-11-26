@@ -297,6 +297,7 @@ func TestOrderModuleConformance(t *testing.T) {
 | `WithEmittedEvents(defs...)` | Events of other modules, for consumers that use `registry.GetEventByName` |
 | `WithPlugin(alias, plugin)` | Inject a plugin. Give it a container first with `plugin.SetContainer(monotest.NewContainer(...))` |
 | `WithStopTimeout(d)` | Bound `Stop` (default 5s) |
+| `WithJetStreamEnabled(enabled)` | Behave as an application with (`true`) or without (`false`) JetStream. With `false`, `Start` fails with `ErrJetStreamNotEnabled` for what needs it. Without the option, nothing is checked |
 | `WithEventBus(bus)` | Run on this bus instead of the dependencies' bus (or a new one) |
 | `Strict()` | Reject violations, like `WithStrictModuleBoundaries`. Ignored by `CheckModule` |
 

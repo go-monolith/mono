@@ -21,6 +21,7 @@ type HealthCheckableModule interface { Health(ctx context.Context) HealthStatus 
 type EventEmitterModule interface { EmitEvents() []BaseEventDefinition }
 type EventConsumerModule interface { RegisterEventConsumers(EventRegistry) error }
 type UsePluginModule interface { SetPlugin(alias string, plugin PluginModule) }
+type JetStreamRequiredModule interface { RequiresJetStream() bool }  // pkg/types
 
 // Special kinds of module
 type PluginModule interface { SetContainer(ServiceContainer); Container() ServiceContainer }
@@ -427,6 +428,29 @@ func (m *DocumentModule) Start(ctx context.Context) error {
 
     return nil
 }
+```
+
+### JetStreamRequiredModule
+
+```go
+// In pkg/types
+type JetStreamRequiredModule interface {
+    Module
+
+    // RequiresJetStream reports whether the module needs JetStream.
+    RequiresJetStream() bool
+}
+```
+
+**When to implement:** When your module, middleware module or plugin cannot work without JetStream, for example because it opens key-value or object store buckets, or publishes to a stream in `Start`.
+
+When `RequiresJetStream()` returns true and the application runs without JetStream (no `WithJetStreamStorageDir` and no `jetstream{}` block in a NATS config file), `app.Start` fails before the module is started, with an error wrapping `monoerrors.ErrJetStreamNotEnabled` and `monoerrors.ErrModuleStartFailed`. Without it, such a module would fail only at its first JetStream call, which can wait for a request timeout.
+
+You do not need it for stream consumer services, cron services or event stream consumers: their registration already fails with the same error when JetStream is off.
+
+**Example:**
+```go
+func (m *CacheModule) RequiresJetStream() bool { return true }
 ```
 
 ## Special Module Kinds

@@ -354,6 +354,13 @@ See [A Request Always Gets a Reply](error-handling.md#a-request-always-gets-a-re
 - **What to change:** save from `Start` or `Stop` with `AsyncSaveAuditTrail`, which does not wait, or check for the error with `errors.Is`.
 - **Background work started from `Start`:** a goroutine that saves right away can run before the routers start. Its save used to be confirmed a few milliseconds later, once they started; it now fails with `ErrConfirmationUnavailable`. Use `AsyncSaveAuditTrail` there, or retry the error until the application has started.
 
+### Missing JetStream fails `Start` at once (v0.2.28)
+
+*v0.2.28.* An application that registered a stream consumer service, cron service or event stream consumer, or used the kv-jetstream or fs-jetstream plugin, without JetStream failed `Start` only at stream setup, after every module had started, and only once the `Start` context or `WithJetStreamReadyTimeout` (2 minutes by default) ran out.
+
+- **Now:** the registration, or the plugin's start, fails at once with an error wrapping `monoerrors.ErrJetStreamNotEnabled` (and `ErrModuleStartFailed`).
+- **What to change:** nothing, unless you want your own modules or plugins checked the same way: implement `RequiresJetStream() bool` ([`JetStreamRequiredModule`](../api/module.md#jetstreamrequiredmodule)). To test it, use `monotest.WithJetStreamEnabled(false)`.
+
 ## New Features
 
 All optional.

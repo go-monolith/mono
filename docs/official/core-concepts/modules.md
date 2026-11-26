@@ -243,6 +243,16 @@ func (m *MyModule) SetPlugin(alias string, plugin mono.PluginModule) {
 
 **When to use**: When you need to use functionality from a plugin.
 
+### JetStreamRequiredModule
+
+Declare that the module needs JetStream:
+
+```go
+func (m *MyModule) RequiresJetStream() bool { return true }
+```
+
+**When to use**: When the module cannot work without JetStream. Without it, `app.Start` fails before the module starts, with `ErrJetStreamNotEnabled`. Stream consumer, cron and event stream consumer registrations are checked anyway. See [JetStreamRequiredModule](../api/module.md#jetstreamrequiredmodule).
+
 ## Complete Module Example
 
 Here's a complete module implementing multiple optional interfaces:

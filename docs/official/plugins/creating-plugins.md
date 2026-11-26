@@ -143,6 +143,12 @@ func (p *MyPlugin) Container() mono.ServiceContainer {
 }
 ```
 
+If the plugin cannot work without JetStream, also implement `RequiresJetStream`. Without JetStream, `app.Start` then fails before the plugin starts, with `ErrJetStreamNotEnabled`, instead of at its first JetStream call:
+
+```go
+func (p *MyPlugin) RequiresJetStream() bool { return true }
+```
+
 ## Step 4: Define Your Public API
 
 Give consumers an interface (a port) that hides the implementation, and return it from a method on the plugin:
@@ -389,6 +395,12 @@ func (m *Module) SetPlugin(alias string, plugin mono.PluginModule) {
     }
 }
 ```
+
+### Start Fails with `ErrJetStreamNotEnabled`
+
+**Problem**: `app.Start` returns an error wrapping `ErrJetStreamNotEnabled`.
+
+**Solution**: The plugin (or a module) needs JetStream and the application runs without it. Enable it with `mono.WithJetStreamStorageDir(dir)`, or a `jetstream{}` block in the NATS config file.
 
 ## Related Documentation
 

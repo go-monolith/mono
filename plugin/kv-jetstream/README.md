@@ -484,7 +484,7 @@ func (m *DataModule) SetPlugin(alias string, plugin mono.PluginModule) {
 
 ## Plugin Lifecycle
 
-1. **Startup**: Plugin starts FIRST (before middleware and regular modules)
+1. **Startup**: Plugin starts FIRST (before middleware and regular modules). It requires JetStream (`RequiresJetStream() bool` returns true): without `WithJetStreamStorageDir` or a `jetstream{}` block in the NATS config file, `Start` fails before the plugin starts, with an error wrapping `monoerrors.ErrJetStreamNotEnabled`
 2. **Bucket Creation**: All configured buckets are created/updated in JetStream
 3. **Consumer Access**: Consumer modules receive plugin via `SetPlugin()`
 4. **Shutdown**: Plugin stops LAST (after all modules and middleware)

@@ -20,7 +20,7 @@ The `kv-jetstream` plugin implements bucket-based key-value storage capabilities
 
 ### 1. Create and Register the Plugin
 
-Import the plugin as `kvjetstream "github.com/go-monolith/mono/plugin/kv-jetstream"`. The application must enable JetStream:
+Import the plugin as `kvjetstream "github.com/go-monolith/mono/plugin/kv-jetstream"`. The application must enable JetStream. Without it, `app.Start` fails before the plugin starts, with an error wrapping `monoerrors.ErrJetStreamNotEnabled` (the plugin implements [`JetStreamRequiredModule`](../api/module.md#jetstreamrequiredmodule)):
 
 ```go
 package main
