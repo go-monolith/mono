@@ -568,9 +568,12 @@ func (w *storageKeyWatcher) Updates() <-chan *storage.Entry {
 func (w *storageKeyWatcher) Stop() error {
 	w.cancel()
 	err := w.watcher.Stop()
-	// Drain any remaining updates so nats.go's delivery goroutine can exit
-	// if it was blocked sending to w.watcher.Updates() when Stop was called.
-	for range w.watcher.Updates() {
-	}
+	// Drain any remaining updates in the background so nats.go's delivery
+	// goroutine can exit if it was blocked sending to w.watcher.Updates()
+	// when Stop was called, without blocking Stop() if Updates() is never closed.
+	go func(ch <-chan jetstream.KeyValueEntry) {
+		for range ch {
+		}
+	}(w.watcher.Updates())
 	return err
 }

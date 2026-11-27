@@ -1638,10 +1638,11 @@ func TestJetStreamKVBackend_KeysWithContext_WithData(t *testing.T) {
 
 // mockJetStreamKeyWatcher implements jetstream.KeyWatcher for testing.
 type mockJetStreamKeyWatcher struct {
-	updates chan jetstream.KeyValueEntry
-	stopped bool
-	stopErr error
-	mu      sync.Mutex
+	updates  chan jetstream.KeyValueEntry
+	stopped  bool
+	stopErr  error
+	stopOnce sync.Once
+	mu       sync.Mutex
 }
 
 func newMockJetStreamKeyWatcher() *mockJetStreamKeyWatcher {
@@ -1658,6 +1659,9 @@ func (m *mockJetStreamKeyWatcher) Stop() error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.stopped = true
+	m.stopOnce.Do(func() {
+		close(m.updates)
+	})
 	return m.stopErr
 }
 

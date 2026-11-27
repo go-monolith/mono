@@ -594,10 +594,11 @@ func TestConvertKVEntry_AllOperations(t *testing.T) {
 
 // mockWatcherJetStreamKeyWatcher implements jetstream.KeyWatcher for unit testing.
 type mockWatcherJetStreamKeyWatcher struct {
-	updates chan jetstream.KeyValueEntry
-	stopped bool
-	stopErr error
-	mu      sync.Mutex
+	updates  chan jetstream.KeyValueEntry
+	stopped  bool
+	stopErr  error
+	stopOnce sync.Once
+	mu       sync.Mutex
 }
 
 func newMockWatcherJetStreamKeyWatcher() *mockWatcherJetStreamKeyWatcher {
@@ -614,6 +615,9 @@ func (m *mockWatcherJetStreamKeyWatcher) Stop() error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.stopped = true
+	m.stopOnce.Do(func() {
+		close(m.updates)
+	})
 	return m.stopErr
 }
 
