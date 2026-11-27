@@ -1403,3 +1403,360 @@ func TestJetStreamBackend_GetReaderWithContext_NotFound(t *testing.T) {
 		t.Errorf("expected ErrKeyNotFound, got: %v", err)
 	}
 }
+
+// TestJetStreamBackend_GetReader_UnboundedContextDoesNotTimeout reproduces finding from issue #89:
+// reads given a context without a deadline must not be capped at nats.go default 5s API timeout.
+func TestJetStreamBackend_GetReader_UnboundedContextDoesNotTimeout(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping slow read test in short mode")
+	}
+	_, js := setupTestNATSWithJetStream(t)
+
+	config := BucketConfig{
+		Name:     "test-bucket",
+		Storage:  MemoryStorage,
+		Replicas: 1,
+	}
+
+	os := createTestObjectStore(t, js, config)
+	backend := NewJetStreamBackend("test-bucket", os, 0, testLogger())
+
+	// 384 KiB payload (3 chunks of default 128 KiB)
+	payload := make([]byte, 384*1024)
+	for i := range payload {
+		payload[i] = byte(i % 251)
+	}
+
+	err := backend.Set("large-file.bin", payload, 0)
+	if err != nil {
+		t.Fatalf("Set failed: %v", err)
+	}
+
+	// Read with context without deadline (GetReader passes context.Background())
+	reader, info, err := backend.GetReader("large-file.bin")
+	if err != nil {
+		t.Fatalf("GetReader failed: %v", err)
+	}
+	defer reader.Close()
+
+	if info.Size != int64(len(payload)) {
+		t.Fatalf("expected size %d, got %d", len(payload), info.Size)
+	}
+
+	// Read chunks slowly exceeding nats.go default 5s API timeout
+	chunk := make([]byte, 16*1024)
+	totalRead := 0
+	start := time.Now()
+	for {
+		n, rerr := reader.Read(chunk)
+		if n > 0 {
+			totalRead += n
+		}
+		if rerr == io.EOF {
+			break
+		}
+		if rerr != nil {
+			t.Fatalf("Read failed after reading %d bytes and %v: %v", totalRead, time.Since(start), rerr)
+		}
+		// Sleep between chunks while under 5.2 seconds so total reading time exceeds 5s
+		if time.Since(start) < 5200*time.Millisecond {
+			time.Sleep(250 * time.Millisecond)
+		}
+	}
+
+	if totalRead != len(payload) {
+		t.Fatalf("expected to read %d bytes, got %d", len(payload), totalRead)
+	}
+	if elapsed := time.Since(start); elapsed <= 5*time.Second {
+		t.Fatalf("expected test duration to exceed 5s, took %v", elapsed)
+	}
+}
+
+// TestJetStreamBackend_DamagedObject_TimesOutWithinBound tests that an object whose chunks are
+// gone (metadata only, e.g. from an upload rejected before v0.2.20) returns an error within a
+// bound for both Get and GetReader rather than blocking indefinitely.
+func TestJetStreamBackend_DamagedObject_TimesOutWithinBound(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping slow damaged object test in short mode")
+	}
+	_, js := setupTestNATSWithJetStream(t)
+
+	config := BucketConfig{
+		Name:     "test-bucket",
+		Storage:  MemoryStorage,
+		Replicas: 1,
+	}
+
+	os := createTestObjectStore(t, js, config)
+	backend := NewJetStreamBackend("test-bucket", os, 0, testLogger())
+
+	payload := make([]byte, 300*1024)
+	for i := range payload {
+		payload[i] = byte(i % 251)
+	}
+
+	// Test Get on damaged object
+	err := backend.Set("damaged-get.bin", payload, 0)
+	if err != nil {
+		t.Fatalf("Set failed: %v", err)
+	}
+
+	info1, err := os.GetInfo(context.Background(), "damaged-get.bin")
+	if err != nil {
+		t.Fatalf("GetInfo failed: %v", err)
+	}
+
+	stream, err := js.Stream(context.Background(), "OBJ_test-bucket")
+	if err != nil {
+		t.Fatalf("Stream failed: %v", err)
+	}
+	err = stream.Purge(context.Background(), jetstream.WithPurgeSubject(ChunkSubject("test-bucket", info1.NUID)))
+	if err != nil {
+		t.Fatalf("Purge failed: %v", err)
+	}
+
+	start := time.Now()
+	_, err = backend.Get("damaged-get.bin")
+	elapsed := time.Since(start)
+	if !errors.Is(err, nats.ErrTimeout) {
+		t.Fatalf("expected Get error to wrap nats.ErrTimeout, got: %v", err)
+	}
+	if elapsed > 8*time.Second {
+		t.Fatalf("Get took too long to timeout: %v", elapsed)
+	}
+
+	// Test GetReader on damaged object
+	err = backend.Set("damaged-reader.bin", payload, 0)
+	if err != nil {
+		t.Fatalf("Set failed: %v", err)
+	}
+
+	info2, err := os.GetInfo(context.Background(), "damaged-reader.bin")
+	if err != nil {
+		t.Fatalf("GetInfo failed: %v", err)
+	}
+
+	err = stream.Purge(context.Background(), jetstream.WithPurgeSubject(ChunkSubject("test-bucket", info2.NUID)))
+	if err != nil {
+		t.Fatalf("Purge failed: %v", err)
+	}
+
+	reader, rinfo, err := backend.GetReader("damaged-reader.bin")
+	if err != nil {
+		t.Fatalf("GetReader failed: %v", err)
+	}
+	defer reader.Close()
+
+	if rinfo == nil {
+		t.Fatal("expected non-nil ObjectInfo from GetReader")
+	}
+
+	start = time.Now()
+	_, err = io.ReadAll(reader)
+	elapsed = time.Since(start)
+	if !errors.Is(err, nats.ErrTimeout) {
+		t.Fatalf("expected Read error to wrap nats.ErrTimeout, got: %v", err)
+	}
+	if elapsed > 8*time.Second {
+		t.Fatalf("Read took too long to timeout: %v", elapsed)
+	}
+}
+
+// TestJetStreamBackend_GetReader_PauseBetweenReadsExceedsDefaultInactivityTimeout tests
+// that a caller pausing longer than defaultReadInactivityTimeout (5s) between Read calls
+// can successfully read the entire object without encountering context cancellation.
+func TestJetStreamBackend_GetReader_PauseBetweenReadsExceedsDefaultInactivityTimeout(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping slow reader pause test in short mode")
+	}
+	_, js := setupTestNATSWithJetStream(t)
+
+	config := BucketConfig{
+		Name:     "test-bucket",
+		Storage:  MemoryStorage,
+		Replicas: 1,
+	}
+
+	os := createTestObjectStore(t, js, config)
+	backend := NewJetStreamBackend("test-bucket", os, 0, testLogger())
+
+	// 256 KiB payload (2 chunks of 128 KiB)
+	payload := make([]byte, 256*1024)
+	for i := range payload {
+		payload[i] = byte(i % 251)
+	}
+
+	err := backend.Set("pause-file.bin", payload, 0)
+	if err != nil {
+		t.Fatalf("Set failed: %v", err)
+	}
+
+	reader, info, err := backend.GetReader("pause-file.bin")
+	if err != nil {
+		t.Fatalf("GetReader failed: %v", err)
+	}
+	defer reader.Close()
+
+	if info.Size != int64(len(payload)) {
+		t.Fatalf("expected size %d, got %d", len(payload), info.Size)
+	}
+
+	buf := make([]byte, 64*1024)
+	n, err := reader.Read(buf)
+	if err != nil {
+		t.Fatalf("first Read failed: %v", err)
+	}
+	if n == 0 {
+		t.Fatal("first Read returned 0 bytes")
+	}
+
+	// Pause longer than defaultReadInactivityTimeout (5s) to verify that
+	// inactivity timer does not fire between caller reads when data is available.
+	time.Sleep(5500 * time.Millisecond)
+
+	// Continue reading the rest of the object
+	rest, err := io.ReadAll(reader)
+	if err != nil {
+		t.Fatalf("subsequent Read failed after pause: %v", err)
+	}
+
+	totalRead := n + len(rest)
+	if totalRead != len(payload) {
+		t.Fatalf("expected to read %d bytes, got %d", len(payload), totalRead)
+	}
+}
+
+func TestInactivityReadContext_Deadline(t *testing.T) {
+	// Without deadline
+	bgCtx := context.Background()
+	inactivityCtx := inactivityReadContext{
+		Context: bgCtx,
+		timeout: 5 * time.Second,
+	}
+	d1, ok1 := inactivityCtx.Deadline()
+	if !ok1 || time.Until(d1) <= 0 || time.Until(d1) > 6*time.Second {
+		t.Fatalf("unexpected deadline: %v, %v", d1, ok1)
+	}
+
+	// With explicit deadline
+	fixedDeadline := time.Now().Add(10 * time.Second)
+	ctxWithDeadline, cancel := context.WithDeadline(bgCtx, fixedDeadline)
+	defer cancel()
+
+	inactivityCtx2 := inactivityReadContext{
+		Context: ctxWithDeadline,
+		timeout: 5 * time.Second,
+	}
+	d2, ok2 := inactivityCtx2.Deadline()
+	if !ok2 || !d2.Equal(fixedDeadline) {
+		t.Fatalf("expected fixed deadline %v, got %v", fixedDeadline, d2)
+	}
+}
+
+func TestContextReadCloser_CloseMultipleTimes(t *testing.T) {
+	canceled := false
+	cancel := func() {
+		canceled = true
+	}
+	rc := &contextReadCloser{
+		ReadCloser: io.NopCloser(bytes.NewReader([]byte("test"))),
+		cancel:     cancel,
+	}
+	if err := rc.Close(); err != nil {
+		t.Fatalf("first Close failed: %v", err)
+	}
+	if !canceled {
+		t.Fatal("expected cancel to have been called")
+	}
+	// Second Close should be a no-op
+	if err := rc.Close(); err != nil {
+		t.Fatalf("second Close failed: %v", err)
+	}
+}
+
+// TestJetStreamBackend_GetReaderWithContext_RespectsCancellation tests that
+// context cancellation is immediately respected when reading.
+func TestJetStreamBackend_GetReaderWithContext_RespectsCancellation(t *testing.T) {
+	_, js := setupTestNATSWithJetStream(t)
+
+	config := BucketConfig{
+		Name:     "test-bucket",
+		Storage:  MemoryStorage,
+		Replicas: 1,
+	}
+
+	os := createTestObjectStore(t, js, config)
+	backend := NewJetStreamBackend("test-bucket", os, 0, testLogger())
+
+	payload := make([]byte, 512*1024)
+	err := backend.Set("cancel-file.bin", payload, 0)
+	if err != nil {
+		t.Fatalf("Set failed: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	reader, _, err := backend.GetReaderWithContext(ctx, "cancel-file.bin")
+	if err != nil {
+		t.Fatalf("GetReaderWithContext failed: %v", err)
+	}
+	defer reader.Close()
+
+	// Read first chunk
+	chunk := make([]byte, 64*1024)
+	n, err := reader.Read(chunk)
+	if err != nil || n == 0 {
+		t.Fatalf("expected to read first chunk, got %d bytes, err: %v", n, err)
+	}
+
+	// Cancel context
+	cancel()
+
+	// Subsequent read must fail with context.Canceled
+	_, err = reader.Read(chunk)
+	if err == nil {
+		// Might take one more read to detect cancellation in pipe
+		_, err = reader.Read(chunk)
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context.Canceled, got: %v", err)
+	}
+}
+
+// TestJetStreamBackend_GetReaderWithContext_RespectsExplicitDeadline tests that
+// a context with an explicit deadline is preserved and respected.
+func TestJetStreamBackend_GetReaderWithContext_RespectsExplicitDeadline(t *testing.T) {
+	_, js := setupTestNATSWithJetStream(t)
+
+	config := BucketConfig{
+		Name:     "test-bucket",
+		Storage:  MemoryStorage,
+		Replicas: 1,
+	}
+
+	os := createTestObjectStore(t, js, config)
+	backend := NewJetStreamBackend("test-bucket", os, 0, testLogger())
+
+	payload := make([]byte, 512*1024)
+	err := backend.Set("deadline-file.bin", payload, 0)
+	if err != nil {
+		t.Fatalf("Set failed: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+
+	reader, _, err := backend.GetReaderWithContext(ctx, "deadline-file.bin")
+	if err != nil {
+		t.Fatalf("GetReaderWithContext failed: %v", err)
+	}
+	defer reader.Close()
+
+	// Wait for deadline to expire
+	time.Sleep(300 * time.Millisecond)
+
+	chunk := make([]byte, 64*1024)
+	_, err = reader.Read(chunk)
+	if err == nil {
+		t.Fatal("expected error after context deadline exceeded, got nil")
+	}
+}
