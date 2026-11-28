@@ -92,7 +92,15 @@ func (w *jetStreamKeyWatcher) Updates() <-chan *KVEntry {
 // It signals the processing goroutine to exit and stops the underlying watcher.
 func (w *jetStreamKeyWatcher) Stop() error {
 	w.cancel() // Signal goroutine to stop
-	return w.watcher.Stop()
+	err := w.watcher.Stop()
+	// Drain any remaining updates in the background so nats.go's delivery
+	// goroutine can exit if it was blocked sending to w.watcher.Updates()
+	// when Stop was called, without blocking Stop() if Updates() is never closed.
+	go func(ch <-chan jetstream.KeyValueEntry) {
+		for range ch {
+		}
+	}(w.watcher.Updates())
+	return err
 }
 
 // convertKVEntry converts JetStream KeyValueEntry to plugin KVEntry.
