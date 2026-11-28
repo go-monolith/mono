@@ -1671,6 +1671,15 @@ func (m *mockJetStreamKeyWatcher) isStopped() bool {
 	return m.stopped
 }
 
+func (m *mockJetStreamKeyWatcher) sendUpdate(entry jetstream.KeyValueEntry) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.stopped {
+		return
+	}
+	m.updates <- entry
+}
+
 // mockKeyValueEntry implements jetstream.KeyValueEntry for testing.
 type mockKeyValueEntry struct {
 	bucket    string
@@ -1912,7 +1921,7 @@ func TestStorageKeyWatcher_StopDuringNilSend(t *testing.T) {
 	}()
 
 	// Send nil entry - this should exit via ctx.Done
-	mock.updates <- nil
+	mock.sendUpdate(nil)
 
 	// Wait for watcher to stop
 	time.Sleep(50 * time.Millisecond)
@@ -1935,7 +1944,7 @@ func TestStorageKeyWatcher_StopDuringEntrySend(t *testing.T) {
 	}()
 
 	// Send entry - this should exit via ctx.Done
-	mock.updates <- &mockKeyValueEntry{key: "key", value: []byte("value")}
+	mock.sendUpdate(&mockKeyValueEntry{key: "key", value: []byte("value")})
 
 	// Wait for watcher to stop
 	time.Sleep(50 * time.Millisecond)

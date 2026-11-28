@@ -627,6 +627,15 @@ func (m *mockWatcherJetStreamKeyWatcher) isStopped() bool {
 	return m.stopped
 }
 
+func (m *mockWatcherJetStreamKeyWatcher) sendUpdate(entry jetstream.KeyValueEntry) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.stopped {
+		return
+	}
+	m.updates <- entry
+}
+
 var _ jetstream.KeyWatcher = (*mockWatcherJetStreamKeyWatcher)(nil)
 
 func TestJetStreamKeyWatcher_ProcessUpdates_NilEntry_Unit(t *testing.T) {
@@ -635,7 +644,7 @@ func TestJetStreamKeyWatcher_ProcessUpdates_NilEntry_Unit(t *testing.T) {
 	defer watcher.Stop()
 
 	// Send nil entry (end of initial values marker)
-	mock.updates <- nil
+	mock.sendUpdate(nil)
 
 	// Should receive nil through watcher
 	select {
@@ -700,7 +709,7 @@ func TestJetStreamKeyWatcher_ProcessUpdates_StopDuringNilSend_Unit(t *testing.T)
 		watcher.Stop()
 	}()
 
-	mock.updates <- nil
+	mock.sendUpdate(nil)
 
 	// Wait for clean shutdown
 	time.Sleep(50 * time.Millisecond)
@@ -721,11 +730,11 @@ func TestJetStreamKeyWatcher_ProcessUpdates_StopDuringEntrySend_Unit(t *testing.
 		watcher.Stop()
 	}()
 
-	mock.updates <- &mockWatcherKeyValueEntry{
+	mock.sendUpdate(&mockWatcherKeyValueEntry{
 		key:       "key",
 		value:     []byte("value"),
 		operation: jetstream.KeyValuePut,
-	}
+	})
 
 	// Wait for clean shutdown
 	time.Sleep(50 * time.Millisecond)
